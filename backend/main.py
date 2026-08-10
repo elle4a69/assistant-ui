@@ -3096,12 +3096,15 @@ def get_threads(
             )
         ).distinct()
         
-    threads = query.order_by(Thread.updated_at.desc()).all()
-    results = []
+    threads = query.all()
+    ordered_results = []
     
     for t in threads:
-        last_msg = db.query(Message).filter(Message.thread_id == t.id).order_by(Message.at.desc()).first()
-        last_message_at = format_dt(last_msg.at if last_msg else t.created_at)
+        last_msg = db.query(Message).filter(Message.thread_id == t.id).order_by(
+            Message.at.desc(), Message.id.desc()
+        ).first()
+        last_activity_at = last_msg.at if last_msg else t.created_at
+        last_message_at = format_dt(last_activity_at)
         last_arrival_event = db.query(ThreadEvent).filter(
             ThreadEvent.thread_id == t.id,
             ThreadEvent.type == "customer-arrived",
@@ -3109,7 +3112,7 @@ def get_threads(
         
         assigned_agent_name = f"Agent {t.assigned_agent_id}" if t.assigned_agent_id else None
         
-        results.append({
+        result = {
             "id": t.id,
             "customerPhone": t.customer_phone,
             "lastMessageAt": last_message_at,
@@ -3127,9 +3130,16 @@ def get_threads(
                 "dueAt": format_dt(t.sla_due_at),
                 "level": t.priority
             }
-        })
-        
-    return results
+        }
+        ordered_results.append((
+            last_activity_at,
+            last_msg.id if last_msg else "",
+            t.id,
+            result,
+        ))
+
+    ordered_results.sort(key=lambda item: item[:3], reverse=True)
+    return [item[3] for item in ordered_results]
 
 
 @app.post("/api/threads/catch-up")

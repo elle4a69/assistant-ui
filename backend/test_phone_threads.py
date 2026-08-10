@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from main import Base, Message, Thread, canonical_phone_number, find_thread_by_phone, get_thread_detail
+from main import Base, Message, Thread, canonical_phone_number, find_thread_by_phone, get_thread_detail, get_threads
 
 
 def test_australian_mobile_formats_share_one_canonical_value():
@@ -110,4 +110,63 @@ def test_thread_detail_orders_messages_by_received_time_then_id():
     detail = get_thread_detail(thread.id, db)
 
     assert [message["text"] for message in detail["messages"]] == ["First", "Second", "Third"]
+    db.close()
+
+
+def test_thread_list_orders_conversations_by_latest_message_not_thread_update():
+    test_engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=test_engine)
+    db = sessionmaker(bind=test_engine)()
+    now = datetime.utcnow()
+
+    stale_conversation = Thread(
+        id="stale-conversation",
+        customer_phone="+61411111111",
+        state="taken-over",
+        priority="medium",
+        sla_due_at=now + timedelta(hours=1),
+        unread_count=0,
+        created_at=now - timedelta(hours=2),
+        updated_at=now,
+    )
+    recent_conversation = Thread(
+        id="recent-conversation",
+        customer_phone="+61422222222",
+        state="auto-reply",
+        priority="medium",
+        sla_due_at=now + timedelta(hours=1),
+        unread_count=1,
+        created_at=now - timedelta(hours=1),
+        updated_at=now - timedelta(minutes=30),
+    )
+    db.add_all([stale_conversation, recent_conversation])
+    db.flush()
+    db.add_all([
+        Message(
+            id="older-message",
+            thread_id=stale_conversation.id,
+            role="agent",
+            text="Older message",
+            at=now - timedelta(hours=1),
+        ),
+        Message(
+            id="newest-message",
+            thread_id=recent_conversation.id,
+            role="customer",
+            text="Newest message",
+            at=now - timedelta(minutes=1),
+        ),
+    ])
+    db.commit()
+
+    items = get_threads(
+        search=None,
+        filterStatus=None,
+        filterPriority=None,
+        onlyUnread=None,
+        db=db,
+    )
+
+    assert [item["id"] for item in items] == [recent_conversation.id, stale_conversation.id]
+    assert items[0]["lastMessageText"] == "Newest message"
     db.close()
