@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import requests
 from requests.auth import HTTPBasicAuth
 from typing import Optional, Dict, Any
@@ -9,6 +10,23 @@ PERSIST_DIR = "/data" if os.path.exists("/data") else BASE_DIR
 CONFIG_PATH = os.path.join(PERSIST_DIR, "data", "mobilemessage.json")
 API_BASE_URL = "https://api.mobilemessage.com.au/v1"
 _resolved_sender: Optional[str] = None
+
+
+def normalize_sms_destination(to_phone: str) -> Optional[str]:
+    """Return an E.164-style destination without '+', or None when malformed."""
+    digits = re.sub(r"\D", "", to_phone or "")
+    if digits.startswith("6104") and len(digits) == 12:
+        digits = "614" + digits[4:]
+    elif digits.startswith("04") and len(digits) == 10:
+        digits = "61" + digits[1:]
+    elif digits.startswith("4") and len(digits) == 9:
+        digits = "61" + digits
+
+    if digits.startswith("61") and not re.fullmatch(r"614\d{8}", digits):
+        return None
+    if not re.fullmatch(r"[1-9]\d{7,14}", digits):
+        return None
+    return digits
 
 def load_config() -> Dict[str, Any]:
     config = {
@@ -84,6 +102,17 @@ def send_sms(
         print("MobileMessage dispatch skipped (gateway disabled).")
         return {"status": "skipped", "reason": "Gateway disabled"}
 
+    clean_to = normalize_sms_destination(to_phone)
+    if not clean_to:
+        print("MobileMessage dispatch blocked (invalid destination phone number).")
+        return {
+            "status": "error",
+            "reason": (
+                "Invalid destination phone number. Use an Australian mobile in "
+                "04xx xxx xxx or +614xx xxx xxx format."
+            ),
+        }
+
     sender_id = _resolve_sender(
         username,
         password,
@@ -92,9 +121,6 @@ def send_sms(
     if not sender_id:
         print("MobileMessage dispatch failed (no registered sender available).")
         return {"status": "error", "reason": "No registered sender available"}
-    
-    # Format destination phone to standard international
-    clean_to = to_phone.strip().lstrip("+")
     
     payload_msg: Dict[str, Any] = {
         "to": clean_to,

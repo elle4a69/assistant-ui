@@ -397,7 +397,7 @@ export default function SmsTriageDashboard() {
       setReplyText('');
       await Promise.all([fetchThreadsList(), fetchThreadDetail(selectedThreadId, true)]);
     } catch (err) {
-      alert('Failed to send reply');
+      alert(err instanceof Error ? err.message : 'Failed to send reply');
     } finally {
       sendingReplyRef.current = false;
       setSendingReply(false);
@@ -438,7 +438,7 @@ export default function SmsTriageDashboard() {
       await approveDraft(messageId);
       await Promise.all([fetchThreadsList(), fetchThreadDetail(selectedThreadId, true)]);
     } catch (err) {
-      alert('Failed to approve draft message');
+      alert(err instanceof Error ? err.message : 'Failed to approve draft message');
     } finally {
       reviewingDraftRef.current = null;
     }

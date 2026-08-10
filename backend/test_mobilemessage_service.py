@@ -51,6 +51,43 @@ def test_http_200_with_rejected_message_is_an_error(monkeypatch):
     assert mobilemessage_service.delivery_error(result)
 
 
+def test_invalid_australian_mobile_is_blocked_before_gateway_call(monkeypatch):
+    configured(monkeypatch)
+    get = Mock()
+    post = Mock()
+    monkeypatch.setattr(mobilemessage_service.requests, "get", get)
+    monkeypatch.setattr(mobilemessage_service.requests, "post", post)
+
+    result = mobilemessage_service.send_sms("+614123456789", "Hello")
+
+    assert result == {
+        "status": "error",
+        "reason": (
+            "Invalid destination phone number. Use an Australian mobile in "
+            "04xx xxx xxx or +614xx xxx xxx format."
+        ),
+    }
+    get.assert_not_called()
+    post.assert_not_called()
+
+
+def test_local_australian_mobile_is_normalized_for_gateway(monkeypatch):
+    configured(monkeypatch)
+    monkeypatch.setattr(mobilemessage_service, "_resolved_sender", "61400000000")
+    send_response = Mock(ok=True, status_code=200)
+    send_response.json.return_value = {
+        "status": "complete",
+        "results": [{"status": "success", "message_id": "one"}],
+    }
+    post = Mock(return_value=send_response)
+    monkeypatch.setattr(mobilemessage_service.requests, "post", post)
+
+    result = mobilemessage_service.send_sms("0432 172 314", "Hello")
+
+    assert result["status"] == "success"
+    assert post.call_args.kwargs["json"]["messages"][0]["to"] == "61432172314"
+
+
 def test_gateway_settings_do_not_expose_saved_password(monkeypatch):
     monkeypatch.setattr(
         main.mobilemessage_service,
