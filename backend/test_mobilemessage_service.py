@@ -1,5 +1,8 @@
 from unittest.mock import Mock
 
+import pytest
+from fastapi import HTTPException
+
 import mobilemessage_service
 import main
 
@@ -86,6 +89,23 @@ def test_local_australian_mobile_is_normalized_for_gateway(monkeypatch):
 
     assert result["status"] == "success"
     assert post.call_args.kwargs["json"]["messages"][0]["to"] == "61432172314"
+
+
+def test_booking_rejects_invalid_mobile_before_calendar_or_sms():
+    db = Mock()
+    payload = main.ManualBookingInput(
+        serviceId="service-one",
+        name="Test Customer",
+        phone="+614123456789",
+        startTime="2026-08-12T10:00:00Z",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        main.create_manual_booking(payload, db)
+
+    assert exc_info.value.status_code == 422
+    assert "valid Australian mobile" in exc_info.value.detail
+    db.rollback.assert_not_called()
 
 
 def test_gateway_settings_do_not_expose_saved_password(monkeypatch):

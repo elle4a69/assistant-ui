@@ -4193,8 +4193,18 @@ def save_sms_confirmation(payload: SmsConfirmationInput):
 
 @app.post("/api/calendar/bookings")
 def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get_db)):
+    normalized_destination = mobilemessage_service.normalize_sms_destination(payload.phone)
+    if not normalized_destination:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Enter a valid Australian mobile number in 04xx xxx xxx "
+                "or +614xx xxx xxx format."
+            ),
+        )
+
     try:
-        customer_phone = canonical_phone_number(payload.phone)
+        customer_phone = "+" + normalized_destination
         start_dt = datetime.fromisoformat(payload.startTime.replace("Z", ""))
         
         services_path = os.path.join(DATA_DIR, "services.json")

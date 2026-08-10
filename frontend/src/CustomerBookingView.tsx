@@ -17,6 +17,14 @@ type Step = 1 | 2 | 3 | 4;
 
 const TZ = 'Australia/Melbourne';
 
+const isValidAustralianMobile = (value: string) => {
+  const digits = value.replace(/\D/g, '');
+  return /^04\d{8}$/.test(digits)
+    || /^614\d{8}$/.test(digits)
+    || /^6104\d{8}$/.test(digits)
+    || /^4\d{8}$/.test(digits);
+};
+
 const melbourneFormatter = new Intl.DateTimeFormat('en-CA', {
   timeZone: TZ,
   year: 'numeric', month: '2-digit', day: '2-digit',
@@ -275,11 +283,10 @@ export default function CustomerBookingView() {
   // Validate phone
   useEffect(() => {
     if (!touched.phone) return;
-    const digits = phone.replace(/\D/g, '');
     if (!phone.trim()) {
       setPhoneError('Phone number is required');
-    } else if (digits.length < 8) {
-      setPhoneError('Valid phone number is required');
+    } else if (!isValidAustralianMobile(phone)) {
+      setPhoneError('Enter a valid Australian mobile, e.g. 0412 345 678');
     } else {
       setPhoneError('');
     }
@@ -353,9 +360,9 @@ export default function CustomerBookingView() {
     // Force validation
     setTouched({ name: true, phone: true });
     const nameOk = name.trim().length > 0;
-    const phoneOk = phone.replace(/\D/g, '').length >= 8;
+    const phoneOk = isValidAustralianMobile(phone);
     if (!nameOk) setNameError('Name is required');
-    if (!phoneOk) setPhoneError('Valid phone number is required');
+    if (!phoneOk) setPhoneError('Enter a valid Australian mobile, e.g. 0412 345 678');
     if (!nameOk || !phoneOk || !selectedService || !selectedSlot) return;
 
     setLoading(true);

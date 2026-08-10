@@ -698,7 +698,8 @@ export async function createBooking(booking: BookingPayload): Promise<{ status: 
     body: JSON.stringify(booking),
   });
   if (!response.ok) {
-    throw new Error(`Failed to create manual booking: ${response.statusText}`);
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Failed to create manual booking: ${response.statusText}`);
   }
   return response.json();
 }
