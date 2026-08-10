@@ -1,0 +1,1 @@
+Hey {name}, your booking for {service} on {time} is confirmed!

@@ -1,0 +1,57 @@
+# Local environments and secrets
+**/.env
+**/.env.*
+!**/.env.example
+**/.venv/
+**/service_account.json
+**/credentials.json
+
+# Dependencies and build output
+**/node_modules/
+frontend/dist/
+.npm-cache/
+.npm-tmp/
+.pip-cache/
+
+# Runtime data
+*.db
+*.db.*
+*.db-journal
+*.sqlite
+*.sqlite3
+backend/tmp/
+backend/messages*.csv*
+backend/data/*.json
+backend/data/*.jsonl
+!backend/data/approved_intent_examples.jsonl
+!backend/data/approved_knowledge_cards.jsonl
+
+# Training and generated datasets
+training_rag_package/
+docs/training-rag-replacement/
+backend/training_*.json
+backend/training_*.jsonl
+backend/training_pair_review_decisions.jsonl
+backend/training_review_decisions.jsonl
+backend/copy_creds.py
+backend/copy_training.py
+backend/curate_training.py
+backend/refine_training_pairs.py
+*.jsonl
+!backend/data/approved_intent_examples.jsonl
+!backend/data/approved_knowledge_cards.jsonl
+
+# Python and test caches
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local browser and editor state
+.edge-mobile-preview*/
+.remote-code-express/
+.vscode/
+.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db

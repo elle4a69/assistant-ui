@@ -1,0 +1,5 @@
+Hi {name}, your booking for {service} on {time} is confirmed!
+
+You will receive an SMS from me shortly with the address details.
+
+If you do not receive it in the next 20 minutes, please send me a message. See you then! - Tori

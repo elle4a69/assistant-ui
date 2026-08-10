@@ -1,0 +1,959 @@
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import {
+  getServices,
+  getFreeBusy,
+  createBooking,
+  Service,
+  FreeBusySlot
+} from './api';
+import { Sparkles, ChevronLeft, ChevronRight, Info, X } from 'lucide-react';
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+// Steps: 1=Service, 2=DateTime, 3=ClientDetails, 4=Success
+type Step = 1 | 2 | 3 | 4;
+
+// ─── Timezone Helpers ─────────────────────────────────────────────────────────
+
+const TZ = 'Australia/Melbourne';
+
+const melbourneFormatter = new Intl.DateTimeFormat('en-CA', {
+  timeZone: TZ,
+  year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', hour12: false,
+});
+
+/** Returns YYYY-MM-DD and HH:MM for an ISO string, in Melbourne time */
+const getSlotMelbourneParts = (isoString: string) => {
+  const parts = melbourneFormatter.formatToParts(new Date(isoString));
+  const v = (t: string) => parts.find(p => p.type === t)?.value ?? '';
+  return {
+    dateStr: `${v('year')}-${v('month')}-${v('day')}`,
+    timeStr: `${v('hour')}:${v('minute')}`,
+  };
+};
+
+const timeToMinutes = (timeStr: string) => {
+  const [h, m] = timeStr.split(':').map(Number);
+  return h * 60 + m;
+};
+
+/** Returns 0=Sun … 6=Sat weekday for year/month/day in Melbourne TZ */
+const getMelbourneWeekday = (year: number, month: number, day: number) => {
+  const fmt = new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'short' });
+  const name = fmt.format(new Date(Date.UTC(year, month, day, 12)));
+  return ({ Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 } as Record<string, number>)[name] ?? 0;
+};
+
+const getDaysInMonth = (year: number, month: number) => new Date(year, month + 1, 0).getDate();
+
+/** Returns { year, month (0-based) } for a Date in Melbourne TZ */
+const getMelbourneYearMonth = (date: Date) => {
+  const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit' });
+  const parts = fmt.formatToParts(date);
+  return {
+    year: Number(parts.find(p => p.type === 'year')?.value ?? new Date().getFullYear()),
+    month: Number(parts.find(p => p.type === 'month')?.value ?? new Date().getMonth() + 1) - 1,
+  };
+};
+
+interface CalendarCell {
+  year: number; month: number; day: number;
+  isCurrentMonth: boolean; dateStr: string;
+}
+
+/** Generates a 42-cell (6-week) calendar grid entirely in Melbourne TZ */
+const getCalendarCells = (year: number, month: number): CalendarCell[] => {
+  const startWd = getMelbourneWeekday(year, month, 1);
+  const numDays = getDaysInMonth(year, month);
+  const prevMonth = month === 0 ? 11 : month - 1;
+  const prevYear = month === 0 ? year - 1 : year;
+  const numPrevDays = getDaysInMonth(prevYear, prevMonth);
+  const nextMonth = month === 11 ? 0 : month + 1;
+  const nextYear = month === 11 ? year + 1 : year;
+
+  const cells: CalendarCell[] = [];
+  // leading
+  for (let i = startWd - 1; i >= 0; i--) {
+    const d = numPrevDays - i;
+    cells.push({ year: prevYear, month: prevMonth, day: d, isCurrentMonth: false,
+      dateStr: `${prevYear}-${String(prevMonth + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}` });
+  }
+  // current
+  for (let i = 1; i <= numDays; i++) {
+    cells.push({ year, month, day: i, isCurrentMonth: true,
+      dateStr: `${year}-${String(month + 1).padStart(2, '0')}-${String(i).padStart(2, '0')}` });
+  }
+  // trailing
+  for (let i = 1; i <= 42 - cells.length; i++) {
+    cells.push({ year: nextYear, month: nextMonth, day: i, isCurrentMonth: false,
+      dateStr: `${nextYear}-${String(nextMonth + 1).padStart(2, '0')}-${String(i).padStart(2, '0')}` });
+  }
+  return cells;
+};
+
+/** Formats an ISO string to "DD.MM.YYYY H:MM AM/PM" in Melbourne TZ */
+const formatConfirmDate = (isoString: string) => {
+  const fmt = new Intl.DateTimeFormat('en-AU', {
+    timeZone: TZ, day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: 'numeric', minute: '2-digit', hour12: true,
+  });
+  const parts = fmt.formatToParts(new Date(isoString));
+  const v = (t: string) => parts.find(p => p.type === t)?.value ?? '';
+  return `${v('day')}.${v('month')}.${v('year')} ${v('hour')}:${v('minute')} ${v('dayPeriod').toUpperCase()}`;
+};
+
+/** Formats current time as "H:MM AM/PM Australia/Melbourne" */
+const getMelbourneTime = () =>
+  new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: TZ }) + ' Australia/Melbourne';
+
+/** Returns today's date in YYYY-MM-DD format in Melbourne TZ */
+const getMelbourneTodayDateStr = () => {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: TZ,
+    year: 'numeric', month: '2-digit', day: '2-digit'
+  });
+  const parts = fmt.formatToParts(new Date());
+  const v = (t: string) => parts.find(p => p.type === t)?.value ?? '';
+  return `${v('year')}-${v('month')}-${v('day')}`;
+};
+
+/** Returns current time in HH:MM format in Melbourne TZ */
+const getMelbourneTimeStr = () => {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: TZ,
+    hour: '2-digit', minute: '2-digit', hour12: false
+  });
+  const parts = fmt.formatToParts(new Date());
+  const v = (t: string) => parts.find(p => p.type === t)?.value ?? '';
+  return `${v('hour')}:${v('minute')}`;
+};
+
+const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+// ─── Potential time slots grid (24 hours, every 15 min) ───────────────────────
+const POTENTIAL_TIMES: string[] = (() => {
+  const times: string[] = [];
+  for (let h = 0; h < 24; h++) {
+    for (let m = 0; m < 60; m += 15) {
+      times.push(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`);
+    }
+  }
+  return times;
+})();
+
+/** Formats "HH:MM" 24h to "H:MM AM/PM" */
+const fmt12h = (timeStr: string) => {
+  const [h, m] = timeStr.split(':').map(Number);
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${ampm}`;
+};
+
+// ─── Reusable step-fade wrapper ───────────────────────────────────────────────
+function StepPane({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      style={{ animation: 'stepFadeIn 0.22s ease both' }}
+      className="flex flex-col gap-4 pb-4"
+    >
+      {children}
+    </div>
+  );
+}
+
+// ─── Main Component ───────────────────────────────────────────────────────────
+
+export default function CustomerBookingView() {
+  const [step, setStep] = useState<Step>(1);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Data
+  const [services, setServices] = useState<Service[]>([]);
+  const [freeSlots, setFreeSlots] = useState<FreeBusySlot[]>([]);
+
+  // Selections
+  const [selectedService, setSelectedService] = useState<Service | null>(null);
+  const [selectedSlot, setSelectedSlot] = useState<FreeBusySlot | null>(null);
+  const [expandedServiceId, setExpandedServiceId] = useState<Service['id'] | null>(null);
+
+  // Client form
+  const [name, setName] = useState('');
+  const [phone, setPhone] = useState('+61');
+  const [notes, setNotes] = useState('');
+  const [nameError, setNameError] = useState('');
+  const [phoneError, setPhoneError] = useState('');
+  const [touched, setTouched] = useState({ name: false, phone: false });
+
+  // Calendar nav
+  const [viewYear, setViewYear] = useState(new Date().getFullYear());
+  const [viewMonth, setViewMonth] = useState(new Date().getMonth());
+  const [selectedDateStr, setSelectedDateStr] = useState<string | null>(null);
+
+  // Misc
+  const [confirmationSms, setConfirmationSms] = useState('');
+  const [confirmationWarning, setConfirmationWarning] = useState('');
+  const [showInfo, setShowInfo] = useState(false);
+  const [nowTime, setNowTime] = useState(getMelbourneTime());
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const timeSlotsScrollRef = useRef<HTMLDivElement>(null);
+  const nowLineRef = useRef<HTMLDivElement>(null);
+
+  // Tick clock every minute
+  useEffect(() => {
+    const id = setInterval(() => setNowTime(getMelbourneTime()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Scroll to top on step change
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [step]);
+
+  // Scroll to "Now" line on today's selection
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    if (step === 2 && selectedDateStr) {
+      timer = setTimeout(() => {
+        const today = getMelbourneTodayDateStr();
+        if (selectedDateStr === today) {
+          if (timeSlotsScrollRef.current && nowLineRef.current) {
+            const container = timeSlotsScrollRef.current;
+            const target = nowLineRef.current;
+            container.scrollTo({
+              top: target.offsetTop - 10,
+              behavior: 'smooth'
+            });
+          }
+        } else {
+          if (timeSlotsScrollRef.current) {
+            timeSlotsScrollRef.current.scrollTop = 0;
+          }
+        }
+      }, 120);
+    }
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, [selectedDateStr, step]);
+
+  // Load services on mount
+  useEffect(() => {
+    getServices()
+      .then(setServices)
+      .catch(() => setError('Failed to load services. Please check backend connection.'));
+  }, []);
+
+  // Load free slots when entering step 2 (DateTime selection)
+  useEffect(() => {
+    if (step !== 2) return;
+    setLoading(true);
+    setError(null);
+    getFreeBusy(selectedService?.duration)
+      .then(data => {
+        setFreeSlots(data);
+        if (data.length > 0) {
+          const byDate: Record<string, true> = {};
+          data.forEach(s => { byDate[getSlotMelbourneParts(s.startTime).dateStr] = true; });
+          const firstDate = Object.keys(byDate).sort()[0];
+          setSelectedDateStr(firstDate);
+          const { year, month } = getMelbourneYearMonth(new Date(data[0].startTime));
+          setViewYear(year);
+          setViewMonth(month);
+        }
+      })
+      .catch(() => setError('Failed to fetch availability. Please try again.'))
+      .finally(() => setLoading(false));
+  }, [step, selectedService?.duration]);
+
+  // Validate name
+  useEffect(() => {
+    if (!touched.name) return;
+    setNameError(name.trim() ? '' : 'Name is required');
+  }, [name, touched.name]);
+
+  // Validate phone
+  useEffect(() => {
+    if (!touched.phone) return;
+    const digits = phone.replace(/\D/g, '');
+    if (!phone.trim()) {
+      setPhoneError('Phone number is required');
+    } else if (digits.length < 8) {
+      setPhoneError('Valid phone number is required');
+    } else {
+      setPhoneError('');
+    }
+  }, [phone, touched.phone]);
+
+  // Scroll to top when step changes
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = 0;
+    }
+  }, [step]);
+
+  // Pre-parse slots for fast lookup to prevent lag (500,000x speed improvement!)
+  const preparsedSlots = useMemo(() => {
+    return freeSlots.map(s => {
+      const { dateStr, timeStr } = getSlotMelbourneParts(s.startTime);
+      return { slot: s, dateStr, timeStr };
+    });
+  }, [freeSlots]);
+
+  const slotsByDate = useMemo(() => {
+    const byDate: Record<string, FreeBusySlot[]> = {};
+    preparsedSlots.forEach(ps => {
+      if (!byDate[ps.dateStr]) byDate[ps.dateStr] = [];
+      byDate[ps.dateStr].push(ps.slot);
+    });
+    return byDate;
+  }, [preparsedSlots]);
+
+  const getMatchingSlot = useCallback((dateStr: string, timeStr: string) => {
+    const ps = preparsedSlots.find(ps => ps.dateStr === dateStr && ps.timeStr === timeStr);
+    return ps ? ps.slot : null;
+  }, [preparsedSlots]);
+
+  const totalAmount = selectedService?.price ?? 0;
+
+  /** Which "visible" tab step is active: 1=Service, 2=Time, 3=Client */
+  const navActive = step <= 3 ? step : 3;
+
+  // ── Handlers ─────────────────────────────────────────────────────────────
+
+  const handleReset = () => {
+    setStep(1);
+    setSelectedService(null);
+    setSelectedSlot(null);
+    setName('');
+    setPhone('+61');
+    setNotes('');
+    setNameError('');
+    setPhoneError('');
+    setTouched({ name: false, phone: false });
+    setConfirmationSms('');
+    setConfirmationWarning('');
+    setError(null);
+    setFreeSlots([]);
+    setSelectedDateStr(null);
+  };
+
+  const handleInputFocus = () => {
+    setTimeout(() => {
+      if (scrollRef.current) {
+        scrollRef.current.scrollTo({
+          top: scrollRef.current.scrollHeight,
+          behavior: 'smooth'
+        });
+      }
+    }, 150);
+  };
+
+  const handleSubmit = async () => {
+    // Force validation
+    setTouched({ name: true, phone: true });
+    const nameOk = name.trim().length > 0;
+    const phoneOk = phone.replace(/\D/g, '').length >= 8;
+    if (!nameOk) setNameError('Name is required');
+    if (!phoneOk) setPhoneError('Valid phone number is required');
+    if (!nameOk || !phoneOk || !selectedService || !selectedSlot) return;
+
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await createBooking({
+        serviceId: selectedService.id,
+        name,
+        phone,
+        startTime: selectedSlot.startTime,
+        notes: notes || undefined,
+      });
+      setConfirmationSms(res.smsSent);
+      setConfirmationWarning(res.smsError || '');
+      setStep(4);
+    } catch (err: any) {
+      setError(err?.message ?? 'Booking failed. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const prevMonth = () => {
+    if (viewMonth === 0) { setViewMonth(11); setViewYear(y => y - 1); }
+    else setViewMonth(m => m - 1);
+  };
+  const nextMonth = () => {
+    if (viewMonth === 11) { setViewMonth(0); setViewYear(y => y + 1); }
+    else setViewMonth(m => m + 1);
+  };
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
+  return (
+    <>
+      {/* Inject keyframe once */}
+      <style>{`
+        @keyframes stepFadeIn {
+          from { opacity: 0; transform: translateY(8px); }
+          to   { opacity: 1; transform: translateY(0);    }
+        }
+        .booking-scroll::-webkit-scrollbar { width: 4px; }
+        .booking-scroll::-webkit-scrollbar-track { background: transparent; }
+        .booking-scroll::-webkit-scrollbar-thumb { background: #f5d5de; border-radius: 99px; }
+      `}</style>
+
+      {/*
+        OUTER WRAPPER:
+        - Takes 100% of whatever container it sits in (standalone page or iframe).
+        - No min-h-screen, no fixed positioning.
+        - Flex column so header + nav are fixed at top, content scrolls.
+      */}
+      <div className="w-full h-full min-h-0 flex flex-col bg-[#faf6f6] font-sans text-slate-800 antialiased select-none" style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>
+
+        {/* ── Header ──────────────────────────────────────────────────────── */}
+        <div className="bg-white border-b border-slate-100 px-4 py-3 flex items-center justify-between shrink-0 z-10">
+          <button
+            onClick={handleReset}
+            className="text-[#7a0b2e] font-serif italic font-extrabold text-xl tracking-tight cursor-pointer bg-transparent border-none p-0"
+          >
+            Tori
+          </button>
+
+          <div className="flex items-center gap-2">
+            {/* Online badge */}
+            <span className="flex items-center gap-1 bg-[#7a0b2e]/10 px-2 py-0.5 rounded-full text-[#7a0b2e] text-[9px] font-bold border border-[#7a0b2e]/20">
+              <span className="w-1.5 h-1.5 bg-[#7a0b2e] rounded-full animate-pulse inline-block" />
+              online
+            </span>
+
+            {/* Reset */}
+            <button
+              onClick={handleReset}
+              title="Start over"
+              className="p-1.5 text-slate-400 hover:text-[#7a0b2e] transition-colors cursor-pointer bg-transparent border-none"
+            >
+              <svg className="w-3.5 h-3.5 stroke-[2.5]" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38" />
+              </svg>
+            </button>
+
+            {/* Info */}
+            <button
+              onClick={() => setShowInfo(true)}
+              title="Booking information"
+              className="p-1.5 text-slate-400 hover:text-[#7a0b2e] transition-colors cursor-pointer bg-transparent border-none"
+            >
+              <Info className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+
+        {/* ── Step Nav ────────────────────────────────────────────────────── */}
+        {step < 4 && (
+          <div className="bg-white border-b border-slate-100 px-5 py-0 shrink-0 z-10">
+            <div className="flex">
+              {[
+                { label: 'Service', nav: 1 },
+                { label: 'Time',    nav: 2 },
+                { label: 'Client',  nav: 3 },
+              ].map(({ label, nav }, i, arr) => (
+                <div key={nav} className="flex items-center flex-1">
+                  <button
+                    onClick={() => {
+                      if (nav === 1 && step > 1) setStep(1);
+                      if (nav === 2 && step > 2) setStep(2);
+                      // can't go forward
+                    }}
+                    disabled={nav > navActive}
+                    className={`
+                      flex-1 py-3 text-center text-xs sm:text-sm font-extrabold border-b-2 transition-colors cursor-pointer bg-transparent
+                      ${nav === navActive
+                        ? 'border-[#7a0b2e] text-[#7a0b2e]'
+                        : nav < navActive
+                          ? 'border-transparent text-slate-600 hover:text-slate-800'
+                          : 'border-transparent text-slate-400 cursor-default'
+                      }
+                    `}
+                  >
+                    {label}
+                  </button>
+                  {i < arr.length - 1 && (
+                    <div className="h-3 w-px bg-slate-150 shrink-0" />
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ── Time Banner ─────────────────────────────────────────────────── */}
+        {step < 4 && (
+          <div className="text-center py-1.5 text-[10px] sm:text-xs font-bold tracking-wider uppercase text-slate-500 bg-[#fafaf7] border-b border-slate-100 shrink-0">
+            Our time: {nowTime}
+          </div>
+        )}
+
+        {/* ── Scrollable Content ──────────────────────────────────────────── */}
+        <div
+          ref={scrollRef}
+          className="flex-1 overflow-y-auto booking-scroll p-4 pb-40"
+        >
+          {/* Global error */}
+          {error && (
+            <div className="mb-4 p-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-xl font-semibold flex items-start gap-2">
+              <svg className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+              {error}
+            </div>
+          )}
+
+          {/* ── STEP 1: Service ─────────────────────────────────────────── */}
+          {step === 1 && (
+            <StepPane>
+              {services.length === 0 && !error ? (
+                <div className="py-16 text-center text-sm text-slate-500 font-bold bg-white rounded-xl border border-slate-150">
+                  <div className="w-8 h-8 border-2 border-[#7a0b2e]/30 border-t-[#7a0b2e] rounded-full animate-spin mx-auto mb-3" />
+                  Loading services…
+                </div>
+              ) : services.length === 0 ? null : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {services.map(srv => (
+                    <div
+                      key={srv.id}
+                      onClick={() => { setSelectedService(srv); setStep(2); }}
+                      className="group bg-white rounded-xl border border-slate-150 p-4 shadow-sm hover:border-[#7a0b2e]/30 hover:shadow-md transition-all flex flex-col justify-between gap-3 cursor-pointer min-h-[140px]"
+                    >
+                      <div className="flex flex-col gap-1 min-w-0">
+                        <h3 className="font-bold text-slate-800 text-sm sm:text-base leading-snug">{srv.name}</h3>
+                        <p className={`text-xs text-slate-600 leading-relaxed font-semibold ${expandedServiceId === srv.id ? '' : 'line-clamp-3'}`}>
+                          {srv.description}
+                        </p>
+                        {srv.description && srv.description.length > 140 && (
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setExpandedServiceId(current => current === srv.id ? null : srv.id);
+                            }}
+                            aria-expanded={expandedServiceId === srv.id}
+                            className="self-start bg-transparent border-none p-0 text-[11px] font-bold text-[#7a0b2e] hover:underline cursor-pointer"
+                          >
+                            {expandedServiceId === srv.id ? 'Less' : 'More'}
+                          </button>
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between mt-auto pt-2.5 border-t border-slate-100 shrink-0">
+                        {srv.showDuration !== false && (
+                          <span className="text-xs text-slate-500 font-bold">
+                            {srv.duration >= 60 ? `${srv.duration / 60} hr.` : `${srv.duration} min.`}
+                          </span>
+                        )}
+                        <div className="ml-auto flex items-center gap-3">
+                          <span className="font-extrabold text-[#7a0b2e] text-sm sm:text-base">AU${srv.price}</span>
+                          <span className="text-xs font-bold text-[#7a0b2e] bg-[#7a0b2e]/5 px-3 py-1.5 rounded-lg border border-[#7a0b2e]/10 group-hover:bg-[#7a0b2e] group-hover:text-white transition-all">Select</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </StepPane>
+          )}
+          {/* ── STEP 2: Date & Time ─────────────────────────────────────── */}
+          {step === 2 && (
+            <StepPane>
+              <button
+                onClick={() => setStep(1)}
+                className="flex items-center gap-1 text-[#7a0b2e] text-xs font-bold hover:underline cursor-pointer bg-transparent border-none p-0 self-start"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" /> back
+              </button>
+
+              {loading ? (
+                <div className="py-16 text-center text-xs text-slate-400 font-bold bg-white rounded-xl border border-slate-150">
+                  <div className="w-8 h-8 border-2 border-[#7a0b2e]/30 border-t-[#7a0b2e] rounded-full animate-spin mx-auto mb-3" />
+                  Checking availability…
+                </div>
+              ) : freeSlots.length === 0 ? (
+                <div className="py-16 text-center text-xs text-slate-500 font-bold bg-white rounded-xl border border-slate-150">
+                  No availability right now. Please check back soon.
+                </div>
+              ) : (
+                <>
+                  {/* Calendar */}
+                  <div className="bg-white p-3.5 rounded-xl border border-slate-150 shadow-sm">
+                    {/* Month header */}
+                    <div className="flex justify-between items-center mb-3 px-0.5">
+                      <button
+                        onClick={prevMonth}
+                        className="flex items-center gap-0.5 text-xs font-bold text-[#7a0b2e] hover:underline cursor-pointer bg-transparent border-none p-0"
+                      >
+                        <ChevronLeft className="w-3.5 h-3.5" /> Prev
+                      </button>
+                      <span className="text-sm font-extrabold text-slate-850">
+                        {MONTH_NAMES[viewMonth]} {viewYear}
+                      </span>
+                      <button
+                        onClick={nextMonth}
+                        className="flex items-center gap-0.5 text-xs font-bold text-[#7a0b2e] hover:underline cursor-pointer bg-transparent border-none p-0"
+                      >
+                        Next <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    {/* Day headers */}
+                    <div className="grid grid-cols-7 text-center text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d => <span key={d}>{d}</span>)}
+                    </div>
+
+                    {/* Day cells */}
+                    <div className="grid grid-cols-7 gap-y-1 justify-items-center">
+                      {getCalendarCells(viewYear, viewMonth).map((cell, idx) => {
+                        const hasSlots = !!slotsByDate[cell.dateStr];
+                        const isSelected = selectedDateStr === cell.dateStr;
+
+                        let cls = 'w-9 h-9 flex items-center justify-center text-xs rounded-full transition-all font-semibold ';
+                        if (!cell.isCurrentMonth) {
+                          cls += 'text-slate-200 pointer-events-none opacity-0';
+                        } else if (isSelected) {
+                          cls += 'bg-[#7a0b2e] text-white font-bold shadow-sm';
+                        } else if (hasSlots) {
+                          cls += 'bg-[#7a0b2e]/10 border border-[#7a0b2e] text-[#7a0b2e] font-black hover:bg-[#7a0b2e]/20 cursor-pointer';
+                        } else {
+                          cls += 'text-slate-400 bg-slate-50/30 pointer-events-none opacity-40';
+                        }
+
+                        return (
+                          <button
+                            key={idx}
+                            type="button"
+                            onClick={() => hasSlots && setSelectedDateStr(cell.dateStr)}
+                            disabled={!cell.isCurrentMonth || !hasSlots}
+                            className={cls}
+                          >
+                            {cell.day}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Time slots */}
+                  {selectedDateStr && (() => {
+                    const today = getMelbourneTodayDateStr();
+                    const isTodaySelected = selectedDateStr === today;
+                    const currentTimeStr = getMelbourneTimeStr();
+                    const currentMinutes = timeToMinutes(currentTimeStr);
+                    const nowIndex = POTENTIAL_TIMES.findIndex(t => timeToMinutes(t) >= currentMinutes);
+                    const nowLabel = new Date().toLocaleTimeString('en-US', {
+                      timeZone: TZ,
+                      hour: 'numeric',
+                      minute: '2-digit',
+                      hour12: true
+                    });
+
+                    return (
+                      <div className="bg-white p-4 rounded-xl border border-slate-150 shadow-sm flex flex-col gap-3">
+                        <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">
+                          Available Start Times
+                        </span>
+                        
+                        <div
+                          ref={timeSlotsScrollRef}
+                          className="relative max-h-[250px] overflow-y-auto pr-1 select-none scroll-smooth"
+                        >
+                          <div className="grid grid-cols-3 gap-2 relative">
+                            {POTENTIAL_TIMES.map((t, idx) => {
+                              const match = getMatchingSlot(selectedDateStr, t);
+                              const selectable = !!match;
+                              
+                              // Determine if this time block is covered by the selected slot's duration
+                              const isSelected = !!selectedSlot && (() => {
+                                const selParts = getSlotMelbourneParts(selectedSlot.startTime);
+                                if (selParts.dateStr !== selectedDateStr) return false;
+                                const selectedStartMin = timeToMinutes(selParts.timeStr);
+                                const selectedEndMin = selectedStartMin + (selectedService?.duration ?? 30);
+                                const currentMin = timeToMinutes(t);
+                                return currentMin >= selectedStartMin && currentMin < selectedEndMin;
+                              })();
+
+                              let cls = 'py-2.5 text-xs font-bold rounded-lg border text-center transition-all ';
+                              if (isSelected) {
+                                cls += 'bg-slate-900 border-slate-900 text-white font-black shadow-md ring-2 ring-slate-900 scale-102';
+                              } else if (selectable) {
+                                cls += 'border-[#7a0b2e] text-white bg-[#7a0b2e] hover:bg-[#5c0822] cursor-pointer font-black shadow-xs';
+                              } else {
+                                cls += 'bg-slate-50/50 border-transparent text-slate-400 pointer-events-none';
+                              }
+
+                              return (
+                                <div key={idx} className="contents">
+                                  {isTodaySelected && idx === nowIndex && (
+                                    <div
+                                      ref={nowLineRef}
+                                      className="col-span-full flex items-center gap-2 my-2 py-1 select-none"
+                                    >
+                                      <span className="w-1.5 h-1.5 rounded-full bg-[#7a0b2e] animate-pulse shrink-0"></span>
+                                      <span className="text-[10px] font-black text-[#7a0b2e] uppercase tracking-wider whitespace-nowrap">
+                                        Now • {nowLabel}
+                                      </span>
+                                      <div className="flex-1 h-[2px] bg-[#7a0b2e]/20"></div>
+                                    </div>
+                                  )}
+                                  
+                                  <button
+                                    type="button"
+                                    disabled={!selectable}
+                                    onClick={() => match && setSelectedSlot(match)}
+                                    className={cls}
+                                  >
+                                    {fmt12h(t)}
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  <button
+                    type="button"
+                    disabled={!selectedSlot}
+                    onClick={() => setStep(3)}
+                    className="self-end bg-[#7a0b2e] hover:bg-[#5c0822] active:bg-[#450518] disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-bold px-7 py-3 rounded-full shadow-sm transition-colors cursor-pointer"
+                  >
+                    Next →
+                  </button>
+                </>
+              )}
+            </StepPane>
+          )}
+
+          {/* ── STEP 3: Client Details & Confirm ────────────────────────── */}
+          {step === 3 && (
+            <StepPane>
+              <button
+                onClick={() => setStep(2)}
+                className="flex items-center gap-1 text-[#7a0b2e] text-xs font-bold hover:underline cursor-pointer bg-transparent border-none p-0 self-start"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" /> back
+              </button>
+
+              <h2 className="font-bold text-slate-800 text-base tracking-tight">Please, confirm details</h2>
+
+              <div className="bg-white rounded-xl border border-slate-150 shadow-sm overflow-hidden">
+                {/* Form */}
+                <div className="p-4 flex flex-col gap-3 border-b border-slate-100">
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[11px] font-bold text-slate-650 uppercase tracking-wider">
+                      Name <span className="text-rose-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={name}
+                      onChange={e => setName(e.target.value)}
+                      onBlur={() => setTouched(t => ({ ...t, name: true }))}
+                      onFocus={handleInputFocus}
+                      placeholder="Your full name"
+                      className={`w-full text-sm bg-slate-50 rounded-lg p-3 border focus:outline-none focus:ring-1 transition-colors text-slate-800 font-semibold ${
+                        nameError ? 'border-rose-300 focus:ring-rose-300 bg-rose-50/50' : 'border-slate-200 focus:ring-[#7a0b2e]/40 focus:border-[#7a0b2e]/50'
+                      }`}
+                    />
+                    {nameError && (
+                      <span className="text-xs text-rose-600 font-semibold mt-0.5">{nameError}</span>
+                    )}
+                  </div>
+
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[11px] font-bold text-slate-650 uppercase tracking-wider">
+                      Phone <span className="text-rose-500">*</span>
+                    </label>
+                    <input
+                      type="tel"
+                      value={phone}
+                      onChange={e => {
+                        // Accept local 04xx entry after the prefilled +61 without
+                        // retaining the Australian trunk zero as +6104xx.
+                        setPhone(e.target.value.replace(/^(\+61[\s-]*)0/, '$1'));
+                      }}
+                      onBlur={() => setTouched(t => ({ ...t, phone: true }))}
+                      onFocus={handleInputFocus}
+                      placeholder="+61 400 000 000"
+                      className={`w-full text-sm bg-slate-50 rounded-lg p-3 border focus:outline-none focus:ring-1 transition-colors text-slate-800 font-semibold ${
+                        phoneError ? 'border-rose-300 focus:ring-rose-300 bg-rose-50/50' : 'border-slate-200 focus:ring-[#7a0b2e]/40 focus:border-[#7a0b2e]/50'
+                      }`}
+                    />
+                    {phoneError && (
+                      <span className="text-xs text-rose-600 font-semibold mt-0.5">{phoneError}</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Booking Summary */}
+                {selectedService && selectedSlot && (
+                  <div className="p-4 flex flex-col gap-2 text-xs text-slate-800 font-semibold font-semibold">
+                    <div className="font-extrabold text-slate-900 text-sm">{selectedService.name}</div>
+
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Date:</span>
+                      <span className="font-bold text-[#7a0b2e]">{formatConfirmDate(selectedSlot.startTime)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Provider:</span>
+                      <span className="font-bold text-slate-800 font-semibold">Tori</span>
+                    </div>
+
+                    <div className="border-t border-slate-100 my-1" />
+
+                    <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Items:</div>
+
+                    <div className="flex justify-between">
+                      <span className="text-slate-800 font-semibold">{selectedService.name}</span>
+                      <span>AU${selectedService.price}.00</span>
+                    </div>
+
+                    <div className="border-t border-slate-150 mt-1 pt-2 flex justify-between items-center text-base font-extrabold text-[#7a0b2e]">
+                      <span>Total for booking:</span>
+                      <span>AU${totalAmount}.00</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Submit */}
+                <div className="px-4 pb-4">
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={handleSubmit}
+                    className="w-full bg-[#7a0b2e] hover:bg-[#5c0822] active:bg-[#450518] disabled:opacity-50 text-white py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-colors cursor-pointer flex justify-center items-center gap-2"
+                  >
+                    {loading ? (
+                      <>
+                        <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        Processing…
+                      </>
+                    ) : 'Confirm booking'}
+                  </button>
+                </div>
+              </div>
+            </StepPane>
+          )}
+
+          {/* ── STEP 4: Success ──────────────────────────────────────────── */}
+          {step === 4 && (
+            <StepPane>
+              <div className="flex flex-col items-center text-center gap-5 py-6">
+                {/* Visual Representation of Tori */}
+                <div className="relative select-none my-1 shrink-0">
+                  {/* Outer pulsing ring */}
+                  <div className="absolute inset-0 rounded-full bg-[#7a0b2e]/10 animate-ping" style={{ animationDuration: '3s' }}></div>
+                  {/* Glowing border ring */}
+                  <div className="absolute -inset-1 rounded-full bg-gradient-to-tr from-[#7a0b2e] to-rose-400 opacity-80 blur-xs"></div>
+                  
+                  {/* Avatar image container */}
+                  <div className="relative w-20 h-20 rounded-full border-2 border-white overflow-hidden shadow-md">
+                    <img 
+                      src="/tori_avatar.jpg" 
+                      alt="Tori" 
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                  
+                  {/* Online/Verified badge */}
+                  <span className="absolute bottom-0 right-0 w-5.5 h-5.5 rounded-full bg-emerald-500 border-2 border-white flex items-center justify-center shadow-xs">
+                    <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse"></span>
+                  </span>
+                </div>
+
+                <div>
+                  <h2 className="font-bold text-lg text-slate-800 mb-1">Booking Confirmed!</h2>
+                  <p className="text-[11px] text-slate-500 leading-relaxed max-w-[280px] font-semibold">
+                    <span className="text-slate-800 font-extrabold">{name}</span>, your booking with me on <span className="font-extrabold text-[#7a0b2e]">{selectedSlot ? formatConfirmDate(selectedSlot.startTime) : ''}</span> is confirmed!<br /><br />
+                    {confirmationWarning ? 'Your booking is saved. Please message me directly for the address details.' : "You'll receive a confirmation SMS with the address details shortly."}
+                  </p>
+                </div>
+
+                {confirmationWarning && (
+                  <div className="w-full max-w-[300px] rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-800">
+                    {confirmationWarning}
+                  </div>
+                )}
+
+                {/* SMS preview card */}
+                {confirmationSms && (
+                  <div className="w-full max-w-[300px] bg-[#0e0f1a] rounded-2xl border border-gray-800 shadow-lg p-3.5 flex flex-col gap-2.5">
+                    <div className="flex items-center gap-1.5 text-[9px] font-bold text-gray-400 border-b border-gray-800 pb-2">
+                      <svg className="w-3.5 h-3.5 text-[#7a0b2e]" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M17 2H7C5.9 2 5 2.9 5 4v16l7-3 7 3V4c0-1.1-.9-2-2-2z"/>
+                      </svg>
+                      <span>Messages · Just now</span>
+                    </div>
+                    <div className="flex gap-2 items-start">
+                      <div className="w-6 h-6 rounded-full bg-[#7a0b2e] flex items-center justify-center text-[9px] font-bold text-white shrink-0">
+                        T
+                      </div>
+                      <div className="bg-[#1c1e2e] text-gray-200 text-[9px] p-2.5 rounded-xl rounded-tl-none border border-gray-800 leading-relaxed whitespace-pre-line font-medium max-w-[85%]">
+                        {confirmationSms}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <button
+                  onClick={handleReset}
+                  className="bg-[#7a0b2e] hover:bg-[#5c0822] text-white text-xs font-bold px-6 py-2.5 rounded-xl shadow-sm transition-colors cursor-pointer"
+                >
+                  Book Another Appointment
+                </button>
+              </div>
+            </StepPane>
+          )}
+        </div>
+
+        {/* ── Info Modal ──────────────────────────────────────────────────── */}
+        {/*
+          Uses absolute positioning within the widget container (not fixed),
+          so it works correctly inside iframes.
+        */}
+        {showInfo && (
+          <div
+            className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4 z-50"
+            onClick={() => setShowInfo(false)}
+          >
+            <div
+              className="bg-white rounded-2xl max-w-[300px] w-full p-5 shadow-2xl border border-slate-100 flex flex-col gap-4"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between">
+                <h3 className="font-bold text-sm text-slate-800 flex items-center gap-1.5">
+                  <Sparkles className="w-4 h-4 text-amber-500" />
+                  Booking Information
+                </h3>
+                <button onClick={() => setShowInfo(false)} className="text-slate-400 hover:text-slate-600 cursor-pointer bg-transparent border-none p-0">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <p className="text-xs text-slate-650 leading-relaxed font-semibold">
+                Welcome to Tori's booking assistant.<br /><br />
+                • Services are incall sessions located in Noble Park.<br />
+                • All selections are discrete and secure.<br />
+                • Cash or cards are accepted on arrival.<br />
+                • You will receive SMS verification upon final confirmation.
+              </p>
+              <button
+                onClick={() => setShowInfo(false)}
+                className="w-full bg-[#7a0b2e] hover:bg-[#5c0822] text-white py-2 rounded-xl text-xs font-bold uppercase tracking-wider transition-colors cursor-pointer"
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        )}
+
+      </div>
+    </>
+  );
+}

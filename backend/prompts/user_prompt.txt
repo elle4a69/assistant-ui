@@ -1,0 +1,15 @@
+Reply naturally to the latest customer message.
+
+<latest_customer_message>
+{message}
+</latest_customer_message>
+
+<relevant_business_context>
+{knowledge}
+</relevant_business_context>
+
+<calendar_openings>
+{slots}
+</calendar_openings>
+
+The business context and calendar are private reference data. Use only what is relevant to the customer’s latest message, do not mention these sections or their source names, and do not list calendar openings unless the customer is asking about availability.

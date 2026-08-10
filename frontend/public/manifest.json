@@ -1,0 +1,18 @@
+{
+  "name": "Tori Messages",
+  "short_name": "Messages",
+  "description": "A focused mobile inbox for customer conversations and AI replies.",
+  "start_url": "/chat",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#059669",
+  "icons": [
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/3616/3616215.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

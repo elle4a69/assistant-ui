@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A personal bio and booking page.">
+  <meta name="theme-color" content="#080808">
+  <title>Tori — Bio &amp; Bookings</title>
+
+  <!-- Optional: remove these two lines if you prefer to use only system fonts. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&amp;family=Playfair+Display:ital,wght@0,600;1,600&amp;display=swap" rel="stylesheet">
+
+  <style>
+    :root {
+      --black: #050505;
+      --surface: #0c0c0d;
+      --surface-soft: #121214;
+      --text: #f4f0ef;
+      --muted: #aaa4a3;
+      --crimson: #d2143a;
+      --crimson-dark: #840a24;
+      --line: rgba(255, 255, 255, 0.11);
+      --content: 1120px;
+      --radius: 18px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      color-scheme: dark;
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 75% 10%, rgba(170, 8, 43, 0.12), transparent 28rem),
+        linear-gradient(150deg, #030303 0%, #0a0a0b 45%, #030303 100%);
+      font-family: "DM Sans", system-ui, sans-serif;
+      line-height: 1.7;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      pointer-events: none;
+      opacity: 0.18;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.16'/%3E%3C/svg%3E");
+    }
+
+    img { display: block; max-width: 100%; }
+    a { color: inherit; }
+
+    .shell {
+      width: min(calc(100% - 32px), var(--content));
+      margin-inline: auto;
+    }
+
+    .hero {
+      position: relative;
+      isolation: isolate;
+      width: 100%;
+      min-height: 420px;
+      aspect-ratio: 16 / 9;
+      overflow: hidden;
+      display: grid;
+      align-items: start;
+      background: #121214;
+    }
+
+    .hero__image {
+      position: absolute;
+      inset: 0;
+      z-index: -2;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      object-position: center 35%;
+      filter: saturate(0.78) contrast(1.05);
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: -1;
+      background:
+        linear-gradient(90deg, rgba(0, 0, 0, 0.82), rgba(0, 0, 0, 0.15) 75%),
+        linear-gradient(180deg, rgba(0, 0, 0, 0.88), transparent 65%);
+    }
+
+    .hero__content {
+      width: min(calc(100% - 32px), var(--content));
+      margin-inline: auto;
+      padding-top: 24px;
+      padding-bottom: 48px;
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: #ff496c;
+      font-size: 0.74rem;
+      font-weight: 600;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+    }
+
+    h1, h2 {
+      margin: 0;
+      font-family: "Playfair Display", Georgia, serif;
+      font-weight: 600;
+      line-height: 1.08;
+    }
+
+    h1 {
+      max-width: 820px;
+      font-size: clamp(3rem, 11vw, 7.5rem);
+      letter-spacing: -0.055em;
+      text-wrap: balance;
+    }
+
+    .tagline {
+      max-width: 620px;
+      margin: 14px 0 0;
+      color: rgba(255, 255, 255, 0.78);
+      font-size: clamp(1rem, 2.3vw, 1.3rem);
+      line-height: 1.5;
+    }
+
+    main { overflow: hidden; }
+
+    .section {
+      padding-block: clamp(36px, 5vw, 64px);
+    }
+
+    .section--compact {
+      padding-top: 0;
+      padding-bottom: 8px;
+    }
+
+    section[aria-labelledby="booking-title"] {
+      padding-top: 16px;
+    }
+
+    .intro {
+      display: grid;
+      gap: 24px;
+    }
+
+    .section-heading {
+      position: relative;
+      max-width: 760px;
+      font-size: clamp(2.1rem, 6vw, 4.6rem);
+      letter-spacing: -0.04em;
+      text-wrap: balance;
+    }
+
+    .section-heading::before {
+      content: "";
+      display: block;
+      width: 42px;
+      height: 3px;
+      margin-bottom: 22px;
+      border-radius: 10px;
+      background: linear-gradient(90deg, var(--crimson), #ff6683);
+      box-shadow: 0 0 24px rgba(210, 20, 58, 0.7);
+    }
+
+    .copy {
+      max-width: 720px;
+      margin: 0;
+      color: var(--muted);
+      font-size: clamp(1rem, 2vw, 1.15rem);
+    }
+
+    .copy + .copy { margin-top: 18px; }
+
+    .gallery-header {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 28px;
+    }
+
+    .gallery-header .section-heading { font-size: clamp(2rem, 5vw, 3.5rem); }
+
+    .gallery-note {
+      display: none;
+      margin: 0 0 5px;
+      color: var(--muted);
+      font-size: 0.82rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .gallery {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .portrait {
+      position: relative;
+      overflow: hidden;
+      aspect-ratio: 3 / 4;
+      margin: 0;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface-soft);
+    }
+
+    .portrait img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      filter: saturate(0.7);
+      transition: transform 700ms cubic-bezier(.2,.7,.2,1), filter 400ms ease;
+    }
+
+    .portrait::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: linear-gradient(145deg, rgba(255, 255, 255, 0.08), transparent 32%, rgba(0, 0, 0, 0.28));
+    }
+
+    .portrait:hover img {
+      transform: scale(1.035);
+      filter: saturate(1);
+    }
+
+    .portrait--video video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .booking-card {
+      position: relative;
+      overflow: hidden;
+      padding: clamp(26px, 5vw, 64px);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: linear-gradient(145deg, rgba(255,255,255,.055), rgba(255,255,255,.012));
+      box-shadow: 0 30px 80px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255,255,255,.06);
+    }
+
+    .booking-card::before {
+      content: "";
+      position: absolute;
+      top: -180px;
+      right: -160px;
+      width: 360px;
+      height: 360px;
+      border-radius: 50%;
+      background: rgba(210, 20, 58, 0.12);
+      filter: blur(55px);
+      pointer-events: none;
+    }
+
+    .booking-copy { margin-bottom: 36px; }
+
+    .booking-frame {
+      overflow: hidden;
+      min-height: 550px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 12px;
+      background: #fff;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.3);
+    }
+
+    .booking-frame iframe {
+      display: block;
+      width: 100%;
+      height: 600px;
+      border: 0;
+      background: #fff;
+    }
+
+    .iframe-placeholder {
+      min-height: 640px;
+      display: grid;
+      place-items: center;
+      padding: 32px;
+      color: #242426;
+      text-align: center;
+      background: linear-gradient(135deg, #fafafa, #ececee);
+    }
+
+    .iframe-placeholder strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 1.2rem;
+    }
+
+    footer {
+      padding: 16px 0 24px;
+      border-top: 1px solid var(--line);
+      color: #787375;
+      font-size: 0.85rem;
+      text-align: center;
+    }
+
+    .reveal {
+      opacity: 0;
+      transform: translateY(22px);
+      transition: opacity 700ms ease, transform 700ms cubic-bezier(.2,.7,.2,1);
+    }
+
+    .reveal.is-visible {
+      opacity: 1;
+      transform: none;
+    }
+
+    @media (max-width: 719px) {
+      .section--bookings.shell {
+        width: 100% !important;
+        max-width: 100% !important;
+        margin-inline: 0 !important;
+      }
+      .section--bookings {
+        padding-inline: 0 !important;
+      }
+      .section--bookings .booking-card {
+        padding: 0 !important;
+        border: none !important;
+        border-radius: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+      }
+      .section--bookings .booking-copy {
+        padding-inline: 16px !important;
+      }
+      .section--bookings .booking-frame {
+        border: none !important;
+        border-radius: 0 !important;
+        background: #fff !important;
+        box-shadow: none !important;
+      }
+    }
+
+    @media (min-width: 720px) {
+      .shell { width: min(calc(100% - 64px), var(--content)); }
+      .hero__content { width: min(calc(100% - 64px), var(--content)); padding-top: 36px; padding-bottom: 72px; }
+      .intro { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 72px; align-items: start; }
+      .gallery { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; }
+      .gallery-note { display: block; }
+      .portrait { border-radius: 16px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+      .reveal { opacity: 1; transform: none; }
+    }
+  </style>
+</head>
+
+<body>
+  <!-- HERO: Replace this image URL with your own wide 16:9 photo. -->
+  <header class="hero">
+    <img
+      class="hero__image"
+      src="images/1000026189.jpg"
+      alt="Tori — hero banner"
+    >
+    <div class="hero__content">
+      <p class="eyebrow">Welcome to my world</p>
+      <h1>Tori</h1>
+      <p class="tagline">Indulge yourself in your next addiction.</p>
+    </div>
+  </header>
+
+  <main>
+    <section class="section shell reveal">
+      <div class="intro">
+        <h2 class="section-heading">A little about me.</h2>
+        <div>
+          <p class="copy">I'm a 32-year-old brunette with a slim, toned figure and the kind of natural curves that feel as good as they look. I’m here for the full spectrum of experiences: the soft, affectionate girlfriend experience where we laugh, connect, and take our time… or the uninhibited porn-star energy when you want things raw, filthy, and completely unrestrained.
+            Whether you’re craving slow, sensual intimacy or something more adventurous and high-energy, I adapt to whatever mood you’re in. Think of me as your private playground — affectionate when you need sweetness, wild when you want intensity, and always ready to explore whatever fantasy is on your mind.
+            No pressure, no judgment, just honest chemistry and the freedom to enjoy each other exactly the way you want.</p>
+          <p class="copy">I believe in creating a comfortable, unhurried space where you can completely let go of the outside world. Explore my services and schedule a time below.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--compact shell reveal" aria-labelledby="gallery-title">
+      <div class="gallery-header">
+        <h2 class="section-heading" id="gallery-title">Selected moments.</h2>
+        <p class="gallery-note">Photos &amp; film</p>
+      </div>
+
+      <div class="gallery">
+        <figure class="portrait"><img loading="lazy" src="images/1000026141.jpg" alt="Portrait gallery image 1"></figure>
+        <figure class="portrait"><img loading="lazy" src="images/1000026142.jpg" alt="Portrait gallery image 2"></figure>
+        <figure class="portrait"><img loading="lazy" src="images/1000026180.jpg" alt="Portrait gallery image 3"></figure>
+        <figure class="portrait portrait--video">
+          <video id="gallery-video-2" src="images/intro-video-2.mp4" autoplay loop muted playsinline preload="auto"></video>
+        </figure>
+        <figure class="portrait"><img loading="lazy" src="images/1000026192.jpg" alt="Portrait gallery image 5"></figure>
+        <figure class="portrait"><img loading="lazy" src="images/1000026143.jpg" alt="Portrait gallery image 6"></figure>
+        <figure class="portrait"><img loading="lazy" src="images/me.jpg" alt="Portrait gallery image 7"></figure>
+        <figure class="portrait portrait--video">
+          <video id="gallery-video" src="images/intro-video.mp4" autoplay loop muted playsinline preload="auto"></video>
+        </figure>
+      </div>
+    </section>
+
+    <section class="section section--bookings shell reveal" aria-labelledby="booking-title">
+      <div class="booking-card">
+        <div class="booking-copy">
+          <p class="eyebrow">Bookings</p>
+          <h2 class="section-heading" id="booking-title">Ready when you are.</h2>
+        <p class="copy">Select the service you would like and pick a time. I host From a very discreet, private, secure apartment in the Box Hill area.
+        </div>
+
+        <div class="booking-frame">
+          <!--
+            BOOKING FORM: Delete the placeholder div below and paste your iframe here.
+            Example:
+            <iframe src="https://your-booking-service.com/your-form" title="Booking form" loading="lazy"></iframe>
+          -->
+          <iframe src="https://assistant-ui-hub.fly.dev/booking" title="Booking Form" loading="lazy" style="display: block; width: 100%; height: 600px; border: 0; background: transparent;"></iframe>
+         </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="shell">&copy; <span id="year"></span> Tori. All rights reserved.</div>
+  </footer>
+
+  <script>
+    document.getElementById("year").textContent = new Date().getFullYear();
+
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const revealItems = document.querySelectorAll(".reveal");
+
+    if (reducedMotion || !("IntersectionObserver" in window)) {
+      revealItems.forEach(item => item.classList.add("is-visible"));
+    } else {
+      const observer = new IntersectionObserver((entries, currentObserver) => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add("is-visible");
+            currentObserver.unobserve(entry.target);
+          }
+        });
+      }, { threshold: 0.12 });
+
+      revealItems.forEach(item => observer.observe(item));
+    }
+
+    // Play gallery videos once when they scroll into view, and play/pause on hover
+    const videos = document.querySelectorAll(".portrait--video video");
+    videos.forEach(v => {
+      // Hover listeners
+      const parent = v.parentElement;
+      if (parent) {
+        parent.addEventListener("mouseenter", () => { v.play().catch(() => {}); });
+        parent.addEventListener("mouseleave", () => { v.pause(); });
+      }
+      
+      // Scroll observer
+      if (!reducedMotion && "IntersectionObserver" in window) {
+        let played = false;
+        const videoObserver = new IntersectionObserver(entries => {
+          entries.forEach(entry => {
+            if (entry.isIntersecting && !played) {
+              played = true;
+              v.play().catch(() => {});
+              videoObserver.disconnect();
+            }
+          });
+        }, { threshold: 0.4 });
+        videoObserver.observe(v);
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
+pydantic-settings
+google-auth
+google-api-python-client
+openai
+python-dotenv
+python-multipart
+tzdata
