@@ -556,7 +556,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
           {step === 1 && (
             <StepPane>
               {services.length === 0 && !error ? (
-                <div className="py-16 text-center text-sm text-slate-500 font-bold bg-white rounded-xl border border-slate-150">
+                <div className="rounded-xl border-[3px] border-[#d2143a] bg-slate-950/80 py-16 text-center text-sm font-bold text-slate-300">
                   <div className="w-8 h-8 border-2 border-[#7a0b2e]/30 border-t-[#7a0b2e] rounded-full animate-spin mx-auto mb-3" />
                   Loading services…
                 </div>
@@ -565,7 +565,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
                   {services.map(srv => (
                     <article
                       key={srv.id}
-                      className="group relative overflow-hidden rounded-xl border border-white/40 bg-slate-950/80 shadow-sm transition-[transform,border-color,box-shadow] duration-150 hover:scale-[1.01] hover:border-[#d2143a] hover:shadow-md"
+                      className="group relative overflow-hidden rounded-xl border-[3px] border-[#d2143a] bg-slate-950/80 shadow-sm transition-[transform,box-shadow] duration-150 hover:scale-[1.01] hover:shadow-md"
                     >
                       <button
                         type="button"
@@ -615,45 +615,45 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
             <StepPane>
               <button
                 onClick={() => setStep(1)}
-                className="flex items-center gap-1 text-[#7a0b2e] text-xs font-bold hover:underline cursor-pointer bg-transparent border-none p-0 self-start"
+                className="flex items-center gap-1 text-[#d2143a] text-xs font-bold hover:underline cursor-pointer bg-transparent border-none p-0 self-start"
               >
                 <ChevronLeft className="w-3.5 h-3.5" /> back
               </button>
 
               {loading ? (
-                <div className="py-16 text-center text-xs text-slate-400 font-bold bg-white rounded-xl border border-slate-150">
+                <div className="rounded-xl border-[3px] border-[#d2143a] bg-slate-950/80 py-16 text-center text-xs font-bold text-slate-300">
                   <div className="w-8 h-8 border-2 border-[#7a0b2e]/30 border-t-[#7a0b2e] rounded-full animate-spin mx-auto mb-3" />
                   Checking availability…
                 </div>
               ) : freeSlots.length === 0 ? (
-                <div className="py-16 text-center text-xs text-slate-500 font-bold bg-white rounded-xl border border-slate-150">
+                <div className="rounded-xl border-[3px] border-[#d2143a] bg-slate-950/80 py-16 text-center text-xs font-bold text-slate-300">
                   No availability right now. Please check back soon.
                 </div>
               ) : (
                 <>
                   {/* Calendar */}
-                  <div className="bg-white p-3.5 rounded-xl border border-slate-150 shadow-sm">
+                  <div className="rounded-xl border-[3px] border-[#d2143a] bg-slate-950/80 p-3.5 text-slate-100 shadow-sm">
                     {/* Month header */}
                     <div className="flex justify-between items-center mb-3 px-0.5">
                       <button
                         onClick={prevMonth}
-                        className="flex items-center gap-0.5 text-xs font-bold text-[#7a0b2e] hover:underline cursor-pointer bg-transparent border-none p-0"
+                        className="flex items-center gap-0.5 text-xs font-bold text-[#d2143a] hover:underline cursor-pointer bg-transparent border-none p-0"
                       >
                         <ChevronLeft className="w-3.5 h-3.5" /> Prev
                       </button>
-                      <span className="text-sm font-extrabold text-slate-850">
+                      <span className="text-balance text-sm font-extrabold text-white">
                         {MONTH_NAMES[viewMonth]} {viewYear}
                       </span>
                       <button
                         onClick={nextMonth}
-                        className="flex items-center gap-0.5 text-xs font-bold text-[#7a0b2e] hover:underline cursor-pointer bg-transparent border-none p-0"
+                        className="flex items-center gap-0.5 text-xs font-bold text-[#d2143a] hover:underline cursor-pointer bg-transparent border-none p-0"
                       >
                         Next <ChevronRight className="w-3.5 h-3.5" />
                       </button>
                     </div>
 
                     {/* Day headers */}
-                    <div className="grid grid-cols-7 text-center text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                    <div className="grid grid-cols-7 text-center text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">
                       {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d => <span key={d}>{d}</span>)}
                     </div>
 
@@ -667,11 +667,11 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
                         if (!cell.isCurrentMonth) {
                           cls += 'text-slate-200 pointer-events-none opacity-0';
                         } else if (isSelected) {
-                          cls += 'bg-[#7a0b2e] text-white font-bold shadow-sm';
+                          cls += 'bg-[#d2143a] text-white font-bold shadow-sm';
                         } else if (hasSlots) {
-                          cls += 'bg-[#7a0b2e]/10 border border-[#7a0b2e] text-[#7a0b2e] font-black hover:bg-[#7a0b2e]/20 cursor-pointer';
+                          cls += 'bg-[#d2143a]/15 border border-[#d2143a] text-rose-300 font-black hover:bg-[#d2143a]/25 cursor-pointer';
                         } else {
-                          cls += 'text-slate-400 bg-slate-50/30 pointer-events-none opacity-40';
+                          cls += 'text-slate-600 bg-slate-900/60 pointer-events-none opacity-50';
                         }
 
                         return (
@@ -704,8 +704,8 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
                     });
 
                     return (
-                      <div className="bg-white p-4 rounded-xl border border-slate-150 shadow-sm flex flex-col gap-3">
-                        <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">
+                      <div className="flex flex-col gap-3 rounded-xl border-[3px] border-[#d2143a] bg-slate-950/80 p-4 shadow-sm">
+                        <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wide">
                           Available Start Times
                         </span>
                         
@@ -730,11 +730,11 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
 
                               let cls = 'py-2.5 text-xs font-bold rounded-lg border text-center transition-all ';
                               if (isSelected) {
-                                cls += 'bg-slate-900 border-slate-900 text-white font-black shadow-md ring-2 ring-slate-900 scale-102';
+                                cls += 'bg-white border-white text-slate-950 font-black shadow-md ring-2 ring-[#d2143a] scale-102';
                               } else if (selectable) {
                                 cls += 'border-[#7a0b2e] text-white bg-[#7a0b2e] hover:bg-[#5c0822] cursor-pointer font-black shadow-xs';
                               } else {
-                                cls += 'bg-slate-50/50 border-transparent text-slate-400 pointer-events-none';
+                                cls += 'bg-slate-900 border-slate-800 text-slate-600 pointer-events-none';
                               }
 
                               return (
@@ -787,18 +787,18 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
             <StepPane>
               <button
                 onClick={() => setStep(2)}
-                className="flex items-center gap-1 text-[#7a0b2e] text-xs font-bold hover:underline cursor-pointer bg-transparent border-none p-0 self-start"
+                className="flex items-center gap-1 text-[#d2143a] text-xs font-bold hover:underline cursor-pointer bg-transparent border-none p-0 self-start"
               >
                 <ChevronLeft className="w-3.5 h-3.5" /> back
               </button>
 
-              <h2 className="font-bold text-slate-800 text-base tracking-tight">Please, confirm details</h2>
+              <h2 className="text-balance text-base font-bold text-white">Please, confirm details</h2>
 
-              <div className="bg-white rounded-xl border border-slate-150 shadow-sm overflow-hidden">
+              <div className="overflow-hidden rounded-xl border-[3px] border-[#d2143a] bg-slate-950/80 text-slate-100 shadow-sm">
                 {/* Form */}
-                <div className="p-4 flex flex-col gap-3 border-b border-slate-100">
+                <div className="flex flex-col gap-3 border-b border-white/10 p-4">
                   <div className="flex flex-col gap-1">
-                    <label className="text-[11px] font-bold text-slate-650 uppercase tracking-wider">
+                    <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">
                       Name <span className="text-rose-500">*</span>
                     </label>
                     <input
@@ -808,17 +808,17 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
                       onBlur={() => setTouched(t => ({ ...t, name: true }))}
                       onFocus={handleInputFocus}
                       placeholder="Your full name"
-                      className={`w-full text-sm bg-slate-50 rounded-lg p-3 border focus:outline-none focus:ring-1 transition-colors text-slate-800 font-semibold ${
-                        nameError ? 'border-rose-300 focus:ring-rose-300 bg-rose-50/50' : 'border-slate-200 focus:ring-[#7a0b2e]/40 focus:border-[#7a0b2e]/50'
+                      className={`w-full rounded-lg border bg-slate-900 p-3 text-sm font-semibold text-white placeholder:text-slate-500 focus:outline-none focus:ring-1 transition-colors ${
+                        nameError ? 'border-rose-400 focus:ring-rose-400 bg-rose-950/40' : 'border-slate-600 focus:ring-[#d2143a] focus:border-[#d2143a]'
                       }`}
                     />
                     {nameError && (
-                      <span className="text-xs text-rose-600 font-semibold mt-0.5">{nameError}</span>
+                      <span className="mt-0.5 text-xs font-semibold text-rose-300">{nameError}</span>
                     )}
                   </div>
 
                   <div className="flex flex-col gap-1">
-                    <label className="text-[11px] font-bold text-slate-650 uppercase tracking-wider">
+                    <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">
                       Phone <span className="text-rose-500">*</span>
                     </label>
                     <input
@@ -832,42 +832,42 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
                       onBlur={() => setTouched(t => ({ ...t, phone: true }))}
                       onFocus={handleInputFocus}
                       placeholder="+61 400 000 000"
-                      className={`w-full text-sm bg-slate-50 rounded-lg p-3 border focus:outline-none focus:ring-1 transition-colors text-slate-800 font-semibold ${
-                        phoneError ? 'border-rose-300 focus:ring-rose-300 bg-rose-50/50' : 'border-slate-200 focus:ring-[#7a0b2e]/40 focus:border-[#7a0b2e]/50'
+                      className={`w-full rounded-lg border bg-slate-900 p-3 text-sm font-semibold text-white placeholder:text-slate-500 focus:outline-none focus:ring-1 transition-colors ${
+                        phoneError ? 'border-rose-400 focus:ring-rose-400 bg-rose-950/40' : 'border-slate-600 focus:ring-[#d2143a] focus:border-[#d2143a]'
                       }`}
                     />
                     {phoneError && (
-                      <span className="text-xs text-rose-600 font-semibold mt-0.5">{phoneError}</span>
+                      <span className="mt-0.5 text-xs font-semibold text-rose-300">{phoneError}</span>
                     )}
                   </div>
                 </div>
 
                 {/* Booking Summary */}
                 {selectedService && selectedSlot && (
-                  <div className="p-4 flex flex-col gap-2 text-xs text-slate-800 font-semibold font-semibold">
-                    <div className="font-extrabold text-slate-900 text-sm">{selectedService.name}</div>
+                  <div className="flex flex-col gap-2 p-4 text-xs font-semibold text-slate-200">
+                    <div className="text-balance text-sm font-extrabold text-[#d2143a]">{selectedService.name}</div>
 
                     <div className="flex justify-between">
-                      <span className="text-slate-500">Date:</span>
-                      <span className="font-bold text-[#7a0b2e]">{formatConfirmDate(selectedSlot.startTime)}</span>
+                      <span className="text-slate-400">Date:</span>
+                      <span className="font-bold text-white">{formatConfirmDate(selectedSlot.startTime)}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-slate-500">Provider:</span>
-                      <span className="font-bold text-slate-800 font-semibold">Tori</span>
+                      <span className="text-slate-400">Provider:</span>
+                      <span className="font-bold text-white">Tori</span>
                     </div>
 
-                    <div className="border-t border-slate-100 my-1" />
+                    <div className="my-1 border-t border-white/10" />
 
-                    <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Items:</div>
+                    <div className="mb-1 text-[11px] font-bold text-slate-400 uppercase tracking-wider">Items:</div>
 
                     <div className="flex justify-between">
-                      <span className="text-slate-800 font-semibold">{selectedService.name}</span>
-                      <span>AU${selectedService.price}.00</span>
+                      <span className="font-semibold text-slate-200">{selectedService.name}</span>
+                      <span className="tabular-nums text-white">AU${selectedService.price}.00</span>
                     </div>
 
-                    <div className="border-t border-slate-150 mt-1 pt-2 flex justify-between items-center text-base font-extrabold text-[#7a0b2e]">
+                    <div className="mt-1 flex items-center justify-between border-t border-white/10 pt-2 text-base font-extrabold text-[#d2143a]">
                       <span>Total for booking:</span>
-                      <span>AU${totalAmount}.00</span>
+                      <span className="tabular-nums">AU${totalAmount}.00</span>
                     </div>
                   </div>
                 )}
@@ -895,33 +895,30 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
           {/* ── STEP 4: Success ──────────────────────────────────────────── */}
           {step === 4 && (
             <StepPane>
-              <div className="flex flex-col items-center text-center gap-5 py-6">
+              <div className="flex flex-col items-center gap-5 rounded-xl border-[3px] border-[#d2143a] bg-slate-950/80 px-5 py-6 text-center text-slate-100">
                 {/* Visual Representation of Tori */}
                 <div className="relative select-none my-1 shrink-0">
                   {/* Outer pulsing ring */}
                   <div className="absolute inset-0 rounded-full bg-[#7a0b2e]/10 animate-ping" style={{ animationDuration: '3s' }}></div>
-                  {/* Glowing border ring */}
-                  <div className="absolute -inset-1 rounded-full bg-gradient-to-tr from-[#7a0b2e] to-rose-400 opacity-80 blur-xs"></div>
-                  
                   {/* Avatar image container */}
-                  <div className="relative w-20 h-20 rounded-full border-2 border-white overflow-hidden shadow-md">
+                  <div className="relative size-20 overflow-hidden rounded-full border-[3px] border-[#d2143a] shadow-md">
                     <img 
                       src="/tori_avatar.jpg" 
                       alt="Tori" 
-                      className="w-full h-full object-cover"
+                      className="size-full object-cover"
                     />
                   </div>
                   
                   {/* Online/Verified badge */}
-                  <span className="absolute bottom-0 right-0 w-5.5 h-5.5 rounded-full bg-emerald-500 border-2 border-white flex items-center justify-center shadow-xs">
-                    <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse"></span>
+                  <span className="absolute bottom-0 right-0 flex size-5.5 items-center justify-center rounded-full border-2 border-white bg-emerald-500 shadow-xs">
+                    <span className="size-1.5 rounded-full bg-white animate-pulse"></span>
                   </span>
                 </div>
 
                 <div>
-                  <h2 className="font-bold text-lg text-slate-800 mb-1">Booking Confirmed!</h2>
-                  <p className="text-[11px] text-slate-500 leading-relaxed max-w-[280px] font-semibold">
-                    <span className="text-slate-800 font-extrabold">{name}</span>, your booking with me on <span className="font-extrabold text-[#7a0b2e]">{selectedSlot ? formatConfirmDate(selectedSlot.startTime) : ''}</span> is confirmed!<br /><br />
+                  <h2 className="text-balance mb-1 text-lg font-bold text-[#d2143a]">Booking Confirmed!</h2>
+                  <p className="text-pretty max-w-[280px] text-[11px] font-semibold leading-relaxed text-slate-300">
+                    <span className="font-extrabold text-white">{name}</span>, your booking with me on <span className="font-extrabold text-white">{selectedSlot ? formatConfirmDate(selectedSlot.startTime) : ''}</span> is confirmed!<br /><br />
                     {confirmationWarning ? 'Your booking is saved. Please message me directly for the address details.' : "You'll receive a confirmation SMS with the address details shortly."}
                   </p>
                 </div>
@@ -934,7 +931,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
 
                 {/* SMS preview card */}
                 {confirmationSms && (
-                  <div className="w-full max-w-[300px] bg-[#0e0f1a] rounded-2xl border border-gray-800 shadow-lg p-3.5 flex flex-col gap-2.5">
+                  <div className="flex w-full max-w-[300px] flex-col gap-2.5 rounded-2xl border-[3px] border-[#d2143a] bg-[#0e0f1a] p-3.5 shadow-lg">
                     <div className="flex items-center gap-1.5 text-[9px] font-bold text-gray-400 border-b border-gray-800 pb-2">
                       <svg className="w-3.5 h-3.5 text-[#7a0b2e]" viewBox="0 0 24 24" fill="currentColor">
                         <path d="M17 2H7C5.9 2 5 2.9 5 4v16l7-3 7 3V4c0-1.1-.9-2-2-2z"/>
@@ -974,19 +971,19 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
             onClick={() => setShowInfo(false)}
           >
             <div
-              className="bg-white rounded-2xl max-w-[300px] w-full p-5 shadow-2xl border border-slate-100 flex flex-col gap-4"
+              className="flex w-full max-w-[300px] flex-col gap-4 rounded-2xl border-[3px] border-[#d2143a] bg-slate-950 p-5 text-slate-100 shadow-2xl"
               onClick={e => e.stopPropagation()}
             >
               <div className="flex items-center justify-between">
-                <h3 className="font-bold text-sm text-slate-800 flex items-center gap-1.5">
+                <h3 className="text-balance flex items-center gap-1.5 text-sm font-bold text-[#d2143a]">
                   <Sparkles className="w-4 h-4 text-amber-500" />
                   Booking Information
                 </h3>
-                <button onClick={() => setShowInfo(false)} className="text-slate-400 hover:text-slate-600 cursor-pointer bg-transparent border-none p-0">
+                <button aria-label="Close booking information" onClick={() => setShowInfo(false)} className="text-slate-400 hover:text-white cursor-pointer bg-transparent border-none p-0">
                   <X className="w-4 h-4" />
                 </button>
               </div>
-              <p className="text-xs text-slate-650 leading-relaxed font-semibold">
+              <p className="text-pretty text-xs font-semibold leading-relaxed text-slate-300">
                 Welcome to Tori's booking assistant.<br /><br />
                 • Services are incall sessions located in Noble Park.<br />
                 • All selections are discrete and secure.<br />
