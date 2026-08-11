@@ -475,11 +475,25 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <p className="truncate text-[15px] font-semibold">{contactLabel(item.customerPhone)}</p>
+                        {(item.lastMessageRole === 'draft' || item.status === 'needs-review') && (
+                          <span
+                            title={item.lastMessageRole === 'draft' ? 'Unsent AI draft waiting for approval' : 'This conversation needs a human answer'}
+                            aria-label={item.lastMessageRole === 'draft' ? 'Draft waiting for approval' : 'Conversation needs review'}
+                            className="inline-flex shrink-0 items-center gap-1 rounded-full border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wide text-rose-700"
+                          >
+                            <span className="grid h-3.5 w-3.5 place-items-center rounded-full bg-rose-600 text-[10px] leading-none text-white">?</span>
+                            {item.lastMessageRole === 'draft' ? 'Draft' : 'Review'}
+                          </span>
+                        )}
                         <time className="ml-auto shrink-0 text-[10px] text-slate-400">{formatListTime(item.lastMessageAt)}</time>
                       </div>
                       <div className="mt-0.5 flex items-center gap-2">
-                        <p className="truncate text-[13px] text-slate-500">
-                          {item.lastMessageRole !== 'customer' && item.lastMessageText ? 'You: ' : ''}
+                        <p className={`truncate text-[13px] ${item.lastMessageRole === 'draft' ? 'font-semibold text-rose-700' : 'text-slate-500'}`}>
+                          {item.lastMessageRole === 'draft'
+                            ? 'Draft: '
+                            : item.lastMessageRole !== 'customer' && item.lastMessageText
+                              ? 'You: '
+                              : ''}
                           {item.lastMessageText || 'New conversation'}
                         </p>
                         {item.unreadCount > 0 && (

@@ -669,6 +669,15 @@ export default function SmsTriageDashboard() {
                 </div>
 
                 <div className="flex items-center gap-1.5 flex-wrap">
+                  {(t.lastMessageRole === 'draft' || t.status === 'needs-review') && (
+                    <span
+                      title={t.lastMessageRole === 'draft' ? 'Unsent AI draft waiting for approval' : 'This conversation needs a human answer'}
+                      className="inline-flex items-center gap-1 rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-rose-700"
+                    >
+                      <span className="grid h-3.5 w-3.5 place-items-center rounded-full bg-rose-600 text-[10px] leading-none text-white">?</span>
+                      {t.lastMessageRole === 'draft' ? 'Draft waiting' : 'Answer needed'}
+                    </span>
+                  )}
                   <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full shadow-2xs ${getStatusBadgeClass(t.status)}`}>
                     {t.status}
                   </span>
