@@ -10,6 +10,7 @@ os.environ["SQLITE_TMPDIR"] = "f:/Projects/assistant-ui/backend/tmp"
 os.makedirs("f:/Projects/assistant-ui/backend/tmp", exist_ok=True)
 
 from fastapi.testclient import TestClient
+import main
 from main import app, engine, Base, DATA_DIR, PROMPTS_DIR
 
 # Backup operational files before test run
@@ -29,8 +30,12 @@ Base.metadata.create_all(bind=engine)
 
 client = TestClient(app)
 
-def test_services_and_manual_bookings():
+def test_services_and_manual_bookings(monkeypatch):
     try:
+        monkeypatch.setattr(main.calendar_service, "create_booking", lambda **kwargs: True)
+        monkeypatch.setattr(main.mobilemessage_service, "send_sms", lambda *args, **kwargs: {"status": "success"})
+        monkeypatch.setattr(main.mobilemessage_service, "delivery_error", lambda result: None)
+
         # 1. Test GET services
         response = client.get("/api/services")
         assert response.status_code == 200
@@ -79,7 +84,7 @@ def test_services_and_manual_bookings():
             "serviceId": "test_srv_1",
             "name": "Alex Jones",
             "phone": "+61411222333",
-            "startTime": "2026-08-05T14:30:00Z",
+            "startTime": "2026-08-09T05:00:00Z",
             "notes": "Prefers medium pressure."
         }
         response = client.post("/api/calendar/bookings", json=booking_payload)
@@ -88,7 +93,7 @@ def test_services_and_manual_bookings():
         assert res_data["status"] == "success"
         assert "Alex Jones" in res_data["smsSent"]
         assert "Luxury Deep Tissue Massage" in res_data["smsSent"]
-        assert "Wednesday, Aug 05 at 02:30 PM" in res_data["smsSent"]
+        assert "Sunday, Aug 09 at 03:00 PM" in res_data["smsSent"]
 
     finally:
         # Restore operational files after test run
@@ -98,6 +103,3 @@ def test_services_and_manual_bookings():
         if os.path.exists(template_bak_path):
             shutil.copyfile(template_bak_path, template_real_path)
             os.remove(template_bak_path)
-
-if __name__ == "__main__":
-    test_services_and_manual_bookings()

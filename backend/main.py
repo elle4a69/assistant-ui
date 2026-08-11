@@ -1915,6 +1915,18 @@ def current_business_time() -> datetime:
     return datetime.now(ZoneInfo("Australia/Hobart"))
 
 
+def parse_business_datetime(value: str) -> datetime:
+    """Parse an ISO timestamp and return the same instant in Hobart local time."""
+    from zoneinfo import ZoneInfo
+
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    parsed = datetime.fromisoformat(normalized)
+    business_tz = ZoneInfo("Australia/Hobart")
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=business_tz)
+    return parsed.astimezone(business_tz)
+
+
 def build_broad_availability_guidance(
     message: str,
     now_local: datetime,
@@ -4250,7 +4262,7 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
 
     try:
         customer_phone = "+" + normalized_destination
-        start_dt = datetime.fromisoformat(payload.startTime.replace("Z", ""))
+        start_dt = parse_business_datetime(payload.startTime)
         
         services_path = os.path.join(DATA_DIR, "services.json")
         services = []
