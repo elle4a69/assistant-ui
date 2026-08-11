@@ -262,7 +262,7 @@ function NotesPanelContent({
 export default function SmsTriageDashboard() {
   // Filters & Search
   const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState('needs-review');
   const [priorityFilter, setPriorityFilter] = useState('all');
   const [showUnreadOnly, setShowUnreadOnly] = useState(false);
 
