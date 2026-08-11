@@ -565,7 +565,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
                   {services.map(srv => (
                     <article
                       key={srv.id}
-                      className="group relative overflow-hidden rounded-xl border border-white/15 bg-slate-950/80 shadow-sm transition-colors hover:border-[#7a0b2e]/70"
+                      className="group relative overflow-hidden rounded-xl border border-slate-600/70 bg-slate-950/80 shadow-sm transition-[transform,border-color,box-shadow] duration-150 hover:scale-[1.01] hover:border-[#d2143a]/80 hover:shadow-md"
                     >
                       <button
                         type="button"
@@ -574,11 +574,8 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
                         className="absolute inset-0 z-0 cursor-pointer rounded-xl bg-transparent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#d2143a]"
                       />
 
-                      <div className="relative z-10 pointer-events-none flex min-h-12 items-center bg-[#7a0b2e] px-4 py-2.5">
-                        <h3 className="text-balance text-sm font-bold leading-snug text-white sm:text-base">{srv.name}</h3>
-                      </div>
-
-                      <div className="relative z-10 pointer-events-none flex flex-col gap-3 p-3.5">
+                      <div className="relative z-10 pointer-events-none flex flex-col gap-3 p-4">
+                        <h3 className="text-balance text-sm font-extrabold leading-snug text-[#d2143a] sm:text-base">{srv.name}</h3>
                         <div className="flex min-w-0 flex-1 flex-col gap-1.5">
                           <p className={`text-pretty text-xs font-medium leading-relaxed text-slate-300 ${expandedServiceId === srv.id ? '' : 'line-clamp-4'}`}>
                             {srv.description}
