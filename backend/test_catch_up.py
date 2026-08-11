@@ -4,7 +4,15 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import main
-from main import Base, Message, Thread, ThreadEvent, catch_up_missed_messages, find_oldest_catch_up_candidate
+from main import (
+    Base,
+    Message,
+    Thread,
+    ThreadEvent,
+    WebhookSMSInput,
+    catch_up_missed_messages,
+    find_oldest_catch_up_candidate,
+)
 
 
 def make_thread(db, thread_id, phone, state="auto-reply", enabled=True):
@@ -42,11 +50,51 @@ def test_catch_up_selects_oldest_unanswered_and_skips_answered_or_managed():
 
     make_thread(db, "managed", "+1004", state="taken-over")
     add_message(db, "managed-customer", "managed", "customer", now - timedelta(minutes=30))
+    db.add(ThreadEvent(
+        id="explicit-takeover",
+        thread_id="managed",
+        type="takeover",
+        agent_id="operator",
+        meta="{}",
+        at=now - timedelta(minutes=31),
+    ))
     db.commit()
 
     thread, message = find_oldest_catch_up_candidate(db)
     assert thread.id == "old"
     assert message.id == "old-customer"
+
+
+def test_catch_up_recovers_old_automatically_stranded_taken_over_thread():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.utcnow()
+
+    make_thread(db, "stranded", "+1101", state="taken-over")
+    add_message(db, "stranded-customer", "stranded", "customer", now - timedelta(days=2))
+    db.add(ThreadEvent(
+        id="old-draft-clear",
+        thread_id="stranded",
+        type="drafts-cleared",
+        agent_id="bulk-discard",
+        meta='{"count":1}',
+        at=now - timedelta(days=3),
+    ))
+    db.add(ThreadEvent(
+        id="older-explicit-takeover",
+        thread_id="stranded",
+        type="takeover",
+        agent_id="operator",
+        meta="{}",
+        at=now - timedelta(days=4),
+    ))
+    db.commit()
+
+    thread, message = find_oldest_catch_up_candidate(db)
+    assert thread.id == "stranded"
+    assert message.id == "stranded-customer"
+    db.close()
 
 
 def test_catch_up_returns_none_when_only_drafts_or_disabled_threads_remain():
@@ -64,6 +112,43 @@ def test_catch_up_returns_none_when_only_drafts_or_disabled_threads_remain():
     db.commit()
 
     assert find_oldest_catch_up_candidate(db) is None
+
+
+def test_new_inbound_restores_only_automatic_taken_over_state(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.utcnow()
+
+    make_thread(db, "automatic", "+61400000101", state="taken-over", enabled=False)
+    make_thread(db, "explicit", "+61400000102", state="taken-over", enabled=False)
+    db.add(ThreadEvent(
+        id="explicit-event",
+        thread_id="explicit",
+        type="takeover",
+        agent_id="operator",
+        meta="{}",
+        at=now,
+    ))
+    db.commit()
+    monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
+
+    for suffix, phone in (("automatic", "+61400000101"), ("explicit", "+61400000102")):
+        main.webhook_sms(
+            WebhookSMSInput.model_validate({
+                "from": phone,
+                "body": "New inbound",
+                "providerMessageId": f"provider-{suffix}",
+                "receivedAt": now.isoformat(),
+            }),
+            main.BackgroundTasks(),
+            db,
+        )
+
+    assert db.get(Thread, "automatic").state == "auto-reply"
+    assert db.get(Thread, "explicit").state == "taken-over"
+    assert db.get(Thread, "automatic").auto_reply_enabled is False
+    db.close()
 
 
 def test_catch_up_endpoint_creates_one_draft_without_dispatch(monkeypatch):
@@ -103,6 +188,15 @@ def test_catch_up_endpoint_creates_one_draft_without_dispatch(monkeypatch):
     monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
 
     result = catch_up_missed_messages(db)
-    assert result == {"processed": True, "threadId": "waiting", "outcome": "draft"}
+    assert result == {
+        "processed": True,
+        "threadId": "waiting",
+        "outcome": "draft",
+        "remaining": 0,
+    }
     assert calls == [{"dispatch_sms": False, "draft_only": True}]
-    assert catch_up_missed_messages(db) == {"processed": False, "outcome": "complete"}
+    assert catch_up_missed_messages(db) == {
+        "processed": False,
+        "outcome": "complete",
+        "remaining": 0,
+    }

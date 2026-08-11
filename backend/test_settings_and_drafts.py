@@ -58,7 +58,7 @@ def test_clear_pending_drafts_removes_all_drafts_and_updates_threads():
     assert result == {"status": "success", "removedDrafts": 3, "affectedThreads": 2}
     assert db.query(Message).filter(Message.role == "draft").count() == 0
     assert db.query(Message).filter(Message.id == "agent-1").count() == 1
-    assert {thread.state for thread in db.query(Thread).all()} == {"taken-over"}
+    assert {thread.state for thread in db.query(Thread).all()} == {"auto-reply"}
     events = db.query(ThreadEvent).filter(ThreadEvent.type == "drafts-cleared").all()
     assert len(events) == 2
     assert sorted(json.loads(event.meta)["count"] for event in events) == [1, 2]

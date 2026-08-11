@@ -234,6 +234,7 @@ export interface CatchUpResult {
   processed: boolean;
   threadId?: string;
   outcome: 'draft' | 'information-request' | 'complete';
+  remaining: number;
 }
 
 export async function catchUpMissedMessage(): Promise<CatchUpResult> {

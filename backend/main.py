@@ -2977,49 +2977,96 @@ def run_sms_reply_logic(
     return booking_confirmed, slots_presented
 
 
-def find_oldest_catch_up_candidate(db: Session):
-    """Return the oldest conversation whose latest message is still unanswered."""
-    candidates = []
-    threads = db.query(Thread).filter(
+TAKEOVER_RELEASE_EVENT_TYPES = {
+    "resolution",
+    "draft-approved",
+    "draft-discarded",
+    "drafts-cleared",
+}
+
+
+def has_active_explicit_takeover(db: Session, thread_id: str) -> bool:
+    latest_control = db.query(ThreadEvent).filter(
+        ThreadEvent.thread_id == thread_id,
+        ThreadEvent.type.in_(["takeover", *TAKEOVER_RELEASE_EVENT_TYPES]),
+    ).order_by(ThreadEvent.at.desc(), ThreadEvent.id.desc()).first()
+    return bool(latest_control and latest_control.type == "takeover")
+
+
+def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
+    """Return unanswered conversations, excluding only genuine operator control."""
+    ranked_messages = db.query(
+        Message.id.label("message_id"),
+        Message.thread_id.label("thread_id"),
+        func.row_number().over(
+            partition_by=Message.thread_id,
+            order_by=(Message.at.desc(), Message.id.desc()),
+        ).label("row_number"),
+    ).subquery()
+    rows = db.query(Thread, Message).join(
+        ranked_messages,
+        ranked_messages.c.thread_id == Thread.id,
+    ).join(
+        Message,
+        Message.id == ranked_messages.c.message_id,
+    ).filter(
+        ranked_messages.c.row_number == 1,
+        Message.role == "customer",
         Thread.auto_reply_enabled.is_(True),
         Thread.state.in_(["auto-reply", "resolved", "taken-over"]),
     ).all()
-    for thread in threads:
-        latest = db.query(Message).filter(Message.thread_id == thread.id).order_by(
-            Message.at.desc(), Message.id.desc()
-        ).first()
-        if not latest or latest.role != "customer":
-            continue
-        cleared_draft_event = db.query(ThreadEvent).filter(
-            ThreadEvent.thread_id == thread.id,
-            ThreadEvent.type == "drafts-cleared",
-            ThreadEvent.at >= latest.at,
-        ).order_by(ThreadEvent.at.desc()).first()
-        retry_after_clear = thread.state == "taken-over" and cleared_draft_event is not None
-        if thread.state == "taken-over" and not retry_after_clear:
-            continue
-        missed_events = db.query(ThreadEvent).filter(
-            ThreadEvent.thread_id == thread.id,
-            ThreadEvent.type == "ai-reply-missed",
-        ).all()
-        explicitly_missed = False
-        for missed_event in missed_events:
+    if not rows:
+        return []
+
+    thread_ids = [thread.id for thread, _message in rows]
+    events = db.query(ThreadEvent).filter(
+        ThreadEvent.thread_id.in_(thread_ids),
+        ThreadEvent.type.in_([
+            "takeover",
+            "ai-reply-missed",
+            *TAKEOVER_RELEASE_EVENT_TYPES,
+        ]),
+    ).all()
+    latest_control_events: Dict[str, ThreadEvent] = {}
+    cleared_events: Dict[str, List[datetime]] = {}
+    explicitly_missed: set[str] = set()
+    for event_item in events:
+        if event_item.type == "takeover" or event_item.type in TAKEOVER_RELEASE_EVENT_TYPES:
+            current = latest_control_events.get(event_item.thread_id)
+            if current is None or (event_item.at, event_item.id) > (current.at, current.id):
+                latest_control_events[event_item.thread_id] = event_item
+        if event_item.type == "drafts-cleared":
+            cleared_events.setdefault(event_item.thread_id, []).append(event_item.at)
+        elif event_item.type == "ai-reply-missed":
             try:
-                missed_meta = json.loads(missed_event.meta or "{}")
+                missed_meta = json.loads(event_item.meta or "{}")
             except (TypeError, json.JSONDecodeError):
                 continue
-            if missed_meta.get("message_id") == latest.id:
-                explicitly_missed = True
-                break
-        # Old conversations predate explicit missed-message markers. Waiting
-        # three minutes keeps this fallback clear of the normal 30–120s worker.
-        old_enough = latest.at <= datetime.utcnow() - timedelta(minutes=3)
-        if explicitly_missed or old_enough or retry_after_clear:
-            candidates.append((latest.at, latest.id, thread, latest))
-    if not candidates:
-        return None
-    _, _, thread, message = min(candidates, key=lambda item: (item[0], item[1]))
-    return thread, message
+            message_id = missed_meta.get("message_id")
+            if message_id:
+                explicitly_missed.add(message_id)
+
+    cutoff = datetime.utcnow() - timedelta(minutes=3)
+    candidates = []
+    for thread, latest in rows:
+        # A taken-over state is genuine only when an operator explicitly used
+        # Take over. Draft approval/discard/cleanup historically set the same
+        # state automatically and must not strand later customer messages.
+        latest_control = latest_control_events.get(thread.id)
+        if thread.state == "taken-over" and latest_control and latest_control.type == "takeover":
+            continue
+        retry_after_clear = any(
+            cleared_at >= latest.at for cleared_at in cleared_events.get(thread.id, [])
+        )
+        if latest.id in explicitly_missed or latest.at <= cutoff or retry_after_clear:
+            candidates.append((thread, latest))
+    return sorted(candidates, key=lambda item: (item[1].at, item[1].id))
+
+
+def find_oldest_catch_up_candidate(db: Session):
+    """Return the oldest conversation whose latest message is still unanswered."""
+    candidates = list_catch_up_candidates(db)
+    return candidates[0] if candidates else None
 
 def send_first_contact_auto_reply(
     db: Session,
@@ -3230,6 +3277,11 @@ def webhook_sms(payload: WebhookSMSInput, background_tasks: BackgroundTasks, db:
 
     # Locate or create thread by customer phone
     thread = find_thread_by_phone(db, from_phone)
+    if thread and thread.state == "taken-over":
+        if not has_active_explicit_takeover(db, thread.id):
+            # Approval, discard, and bulk draft cleanup historically reused
+            # taken-over even though no operator chose to suppress AI.
+            thread.state = "auto-reply"
     if (
         thread
         and first_contact_config["enabled"]
@@ -3465,7 +3517,7 @@ def catch_up_missed_messages(db: Session = Depends(get_db)):
 
     candidate = find_oldest_catch_up_candidate(db)
     if not candidate:
-        return {"processed": False, "outcome": "complete"}
+        return {"processed": False, "outcome": "complete", "remaining": 0}
 
     thread, customer_message = candidate
     thread_id = thread.id
@@ -3497,13 +3549,23 @@ def catch_up_missed_messages(db: Session = Depends(get_db)):
                 at=datetime.utcnow(),
             ))
             db.commit()
-        return {"processed": True, "threadId": thread_id, "outcome": "information-request"}
+        return {
+            "processed": True,
+            "threadId": thread_id,
+            "outcome": "information-request",
+            "remaining": len(list_catch_up_candidates(db)),
+        }
 
     latest = db.query(Message).filter(Message.thread_id == thread_id).order_by(
         Message.at.desc(), Message.id.desc()
     ).first()
     outcome = "draft" if latest and latest.role == "draft" else "information-request"
-    return {"processed": True, "threadId": thread_id, "outcome": outcome}
+    return {
+        "processed": True,
+        "threadId": thread_id,
+        "outcome": outcome,
+        "remaining": len(list_catch_up_candidates(db)),
+    }
 
 
 @app.get("/api/threads/{thread_id}")
@@ -4189,27 +4251,13 @@ def approve_draft_message(message_id: str, db: Session = Depends(get_db)):
         msg.role = "agent"
         msg.at = datetime.utcnow()
 
-        draft_event = db.query(ThreadEvent).filter(
-            ThreadEvent.thread_id == thread.id,
-            ThreadEvent.type == "draft-created",
-        ).order_by(ThreadEvent.at.desc()).all()
-        is_catch_up_draft = False
-        for event_item in draft_event:
-            try:
-                event_meta = json.loads(event_item.meta or "{}")
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if event_meta.get("message_id") == message_id:
-                is_catch_up_draft = event_meta.get("source") == "catch-up"
-                break
-
         other_drafts = db.query(Message).filter(
             Message.thread_id == thread.id,
             Message.role == "draft",
             Message.id != message_id,
         ).count()
         if other_drafts == 0:
-            thread.state = "auto-reply" if is_catch_up_draft else "taken-over"
+            thread.state = "auto-reply"
         thread.unread_count = 0
 
         approval_event = ThreadEvent(
@@ -4243,7 +4291,7 @@ def discard_draft_message(message_id: str, db: Session = Depends(get_db)):
     # Resolve needs-review state of thread if no other drafts exist
     other_drafts = db.query(Message).filter(Message.thread_id == thread.id, Message.role == "draft", Message.id != message_id).count()
     if other_drafts == 0:
-        thread.state = "taken-over"
+        thread.state = "auto-reply"
         
     # Log discard event
     discard_event = ThreadEvent(
@@ -4273,7 +4321,7 @@ def clear_pending_draft_messages(db: Session = Depends(get_db)):
 
     for thread in affected_threads:
         if thread.state == "needs-review":
-            thread.state = "taken-over"
+            thread.state = "auto-reply"
         thread.updated_at = cleared_at
         db.add(ThreadEvent(
             id=str(uuid.uuid4()),

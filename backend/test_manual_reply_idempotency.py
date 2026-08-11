@@ -101,4 +101,5 @@ def test_draft_approval_only_dispatches_once(monkeypatch):
     assert first["duplicate"] is False
     assert repeated["duplicate"] is True
     assert db.query(Message).filter(Message.id == draft.id).one().role == "agent"
+    assert db.get(Thread, thread.id).state == "auto-reply"
     db.close()
