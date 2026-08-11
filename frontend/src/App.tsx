@@ -30,7 +30,8 @@ class BootcampErrorBoundary extends Component<{ children: ReactNode }, { failed:
 }
 
 function App() {
-  const isStandaloneBooking = typeof window !== 'undefined' && window.location.pathname === '/booking';
+  const isEmbeddedBooking = typeof window !== 'undefined' && window.location.pathname.startsWith('/v2');
+  const isStandaloneBooking = typeof window !== 'undefined' && (window.location.pathname === '/booking' || isEmbeddedBooking);
   const initialPath = typeof window !== 'undefined' ? window.location.pathname : '/';
 
   const getThreadIdFromUrl = () => {
@@ -42,7 +43,7 @@ function App() {
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(getThreadIdFromUrl());
 
   const [view, setView] = useState<'agent' | 'customer' | 'settings' | 'booking' | 'bookings' | 'chat' | 'bootcamp'>(
-    initialPath === '/booking' ? 'booking'
+    initialPath === '/booking' || initialPath.startsWith('/v2') ? 'booking'
       : initialPath === '/bookings' ? 'bookings'
       : initialPath === '/chat' ? 'chat'
       : initialPath === '/bootcamp' ? 'bootcamp'
@@ -58,7 +59,7 @@ function App() {
       const params = new URLSearchParams(window.location.search);
       setSelectedThreadId(params.get('thread'));
       
-      if (path === '/booking') setView('booking');
+      if (path === '/booking' || path.startsWith('/v2')) setView('booking');
       else if (path === '/bookings') setView('bookings');
       else if (path === '/chat') setView('chat');
       else if (path === '/bootcamp') setView('bootcamp');
@@ -107,6 +108,11 @@ function App() {
     };
   }, [isStandaloneBooking]);
 
+  useEffect(() => {
+    document.documentElement.classList.toggle('booking-embed', isEmbeddedBooking);
+    return () => document.documentElement.classList.remove('booking-embed');
+  }, [isEmbeddedBooking]);
+
   const navigateTo = (nextView: 'agent' | 'customer' | 'settings' | 'booking' | 'bookings' | 'chat' | 'bootcamp', urlPath: string) => {
     setSelectedThreadId(null);
     setView(nextView);
@@ -127,7 +133,7 @@ function App() {
   const isStandalone = isStandaloneBooking;
 
   return (
-    <div className="flex h-[100dvh] w-screen flex-col overflow-hidden bg-slate-900">
+    <div className={`flex w-full flex-col bg-slate-900 ${isEmbeddedBooking ? 'min-h-0 overflow-visible' : 'h-[100dvh] overflow-hidden'}`}>
       
       {/* Top Portal Header (Desktop Only) */}
       {!isStandalone && (
@@ -223,7 +229,7 @@ function App() {
       )}
 
       {/* View Content (Adding bottom padding on mobile to account for sticky nav bar) */}
-      <main className="flex-1 flex flex-col overflow-hidden pb-16 sm:pb-0">
+      <main className={`${isEmbeddedBooking ? 'flex flex-col overflow-visible' : 'flex-1 flex flex-col overflow-hidden pb-16 sm:pb-0'}`}>
         {view === 'agent' && <SmsTriageDashboard />}
         {view === 'customer' && <SmsClientView />}
         {view === 'settings' && <SettingsView />}

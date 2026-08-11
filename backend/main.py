@@ -1821,6 +1821,7 @@ PUBLIC_EXACT_PATHS = {
     "/api/health",
     "/booking",
     "/landing.html",
+    "/widget.js",
     "/manifest.json",
     "/sw.js",
     "/favicon.ico",
@@ -1834,6 +1835,8 @@ def is_public_request(request: Request) -> bool:
     method = request.method.upper()
 
     if path in PUBLIC_EXACT_PATHS:
+        return True
+    if path == "/v2" or path.startswith("/v2/"):
         return True
     if path.startswith("/images/") or path.startswith("/assets/"):
         return True

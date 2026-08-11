@@ -177,6 +177,7 @@ export default function SettingsView() {
   const [savingMmConfig, setSavingMmConfig] = useState(false);
   const [copiedWebhook, setCopiedWebhook] = useState(false);
   const [copiedEmbed, setCopiedEmbed] = useState(false);
+  const [copiedIframe, setCopiedIframe] = useState(false);
 
   // Q&A Rules state
   const [qaRules, setQaRules] = useState<QARule[]>([]);
@@ -783,14 +784,27 @@ export default function SettingsView() {
     setTimeout(() => setCopiedWebhook(false), 3000);
   };
 
-  const embedUrl = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-    ? 'https://assistant-ui-hub.fly.dev/booking'
-    : `${window.location.origin}/booking`;
-  const embedCode = `<iframe src="${embedUrl}" width="100%" height="700" style="border:none; border-radius:12px;"></iframe>`;
-  const copyEmbedCode = () => {
-    navigator.clipboard.writeText(embedCode);
+  const widgetScriptUrl = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    ? 'https://assistant-ui-hub.fly.dev/widget.js'
+    : `${window.location.origin}/widget.js`;
+  const widgetBaseUrl = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    ? 'https://assistant-ui-hub.fly.dev'
+    : window.location.origin;
+
+  const embedScriptCode = `<div id="booking-container"></div>\n<script src="${widgetScriptUrl}"></script>\n<script>\nnew SimplybookWidget({\n  "container_id": "booking-container",\n  "widget_type": "iframe",\n  "url": "${widgetBaseUrl}"\n});\n</script>`;
+
+  const embedIframeCode = `<iframe src="${widgetBaseUrl}/booking" width="100%" height="800" style="border:none; border-radius:12px;"></iframe>`;
+
+  const copyScriptCode = () => {
+    navigator.clipboard.writeText(embedScriptCode);
     setCopiedEmbed(true);
     setTimeout(() => setCopiedEmbed(false), 3000);
+  };
+
+  const copyIframeCode = () => {
+    navigator.clipboard.writeText(embedIframeCode);
+    setCopiedIframe(true);
+    setTimeout(() => setCopiedIframe(false), 3000);
   };
 
   return (
@@ -1533,25 +1547,52 @@ export default function SettingsView() {
                   </div>
 
                   {/* Standalone Booking Form Embedding Snippet */}
-                  <div className="mt-4 p-4 bg-slate-50 border border-slate-200 rounded-xl flex flex-col gap-2 font-sans">
-                    <div className="flex justify-between items-center">
-                      <span className="font-bold text-slate-700 text-xs flex items-center gap-1.5">
-                        <Calendar className="w-3.5 h-3.5 text-slate-400" /> Standalone Booking Embed Code
-                      </span>
-                      <button
-                        onClick={copyEmbedCode}
-                        className="flex items-center gap-1 text-[10px] font-bold text-indigo-700 hover:text-indigo-900 bg-white px-2.5 py-1 rounded border border-indigo-200 shadow-2xs transition-colors cursor-pointer"
-                      >
-                        {copiedEmbed ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
-                        {copiedEmbed ? 'Copied!' : 'Copy Snippet'}
-                      </button>
+                  <div className="mt-4 flex flex-col gap-4 font-sans">
+
+                    {/* Option 1: Dynamic Auto-Resize Script (Recommended) */}
+                    <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl flex flex-col gap-2">
+                      <div className="flex justify-between items-center">
+                        <span className="font-bold text-slate-700 text-xs flex items-center gap-1.5">
+                          <Calendar className="w-3.5 h-3.5 text-indigo-500" /> Option A: Auto-Resizing Embed (Recommended)
+                        </span>
+                        <button
+                          onClick={copyScriptCode}
+                          className="flex items-center gap-1 text-[10px] font-bold text-indigo-700 hover:text-indigo-900 bg-white px-2.5 py-1 rounded border border-indigo-200 shadow-2xs transition-colors cursor-pointer"
+                        >
+                          {copiedEmbed ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                          {copiedEmbed ? 'Copied!' : 'Copy Script'}
+                        </button>
+                      </div>
+                      <pre className="text-[10px] font-mono text-slate-700 bg-white p-2.5 rounded border border-slate-200 overflow-x-auto whitespace-pre leading-relaxed select-all">
+                        {embedScriptCode}
+                      </pre>
+                      <p className="text-[9px] text-slate-500 leading-relaxed">
+                        Uses <strong>widget.js</strong> to dynamically adjust the height of the booking form on your website so it loads seamlessly with no double scrollbars.
+                      </p>
                     </div>
-                    <code className="text-[10px] font-mono text-slate-700 bg-white p-2.5 rounded border border-slate-200 select-all break-all leading-normal">
-                      {embedCode}
-                    </code>
-                    <p className="text-[9px] text-slate-500">
-                      Copy and paste this HTML iframe snippet into your website builder to embed the standalone booking flow directly.
-                    </p>
+
+                    {/* Option 2: Standard Iframe Fallback */}
+                    <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl flex flex-col gap-2">
+                      <div className="flex justify-between items-center">
+                        <span className="font-bold text-slate-700 text-xs flex items-center gap-1.5">
+                          <Calendar className="w-3.5 h-3.5 text-slate-400" /> Option B: Simple Iframe Embed
+                        </span>
+                        <button
+                          onClick={copyIframeCode}
+                          className="flex items-center gap-1 text-[10px] font-bold text-indigo-700 hover:text-indigo-900 bg-white px-2.5 py-1 rounded border border-indigo-200 shadow-2xs transition-colors cursor-pointer"
+                        >
+                          {copiedIframe ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                          {copiedIframe ? 'Copied!' : 'Copy Iframe'}
+                        </button>
+                      </div>
+                      <code className="text-[10px] font-mono text-slate-700 bg-white p-2.5 rounded border border-slate-200 select-all break-all leading-normal">
+                        {embedIframeCode}
+                      </code>
+                      <p className="text-[9px] text-slate-500">
+                        Traditional static height iframe. Use this if your website builder blocks custom Javascript/scripts.
+                      </p>
+                    </div>
+
                   </div>
 
                 </div>

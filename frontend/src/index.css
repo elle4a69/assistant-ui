@@ -10,6 +10,14 @@ html, body {
   -webkit-overflow-scrolling: auto; /* disables default momentum bounce */
 }
 
+html.booking-embed,
+html.booking-embed body {
+  position: static;
+  height: auto;
+  min-height: 0;
+  overflow: visible;
+}
+
 /* Enable momentum scrolling ONLY inside scrollable panels */
 .overflow-y-auto, .overflow-auto {
   overscroll-behavior: contain;

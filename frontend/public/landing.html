@@ -271,7 +271,7 @@
 
     .booking-frame {
       overflow: hidden;
-      min-height: 550px;
+      min-height: 800px;
       border: 1px solid rgba(255, 255, 255, 0.14);
       border-radius: 12px;
       background: #fff;
@@ -281,7 +281,7 @@
     .booking-frame iframe {
       display: block;
       width: 100%;
-      height: 600px;
+      min-height: 800px;
       border: 0;
       background: #fff;
     }
@@ -424,13 +424,16 @@
         </div>
 
         <div class="booking-frame">
-          <!--
-            BOOKING FORM: Delete the placeholder div below and paste your iframe here.
-            Example:
-            <iframe src="https://your-booking-service.com/your-form" title="Booking form" loading="lazy"></iframe>
-          -->
-          <iframe src="https://assistant-ui-hub.fly.dev/booking" title="Booking Form" loading="lazy" style="display: block; width: 100%; height: 600px; border: 0; background: transparent;"></iframe>
-         </div>
+          <div id="booking-container"></div>
+          <script src="/widget.js"></script>
+          <script>
+            new SimplybookWidget({
+              "container_id": "booking-container",
+              "widget_type": "iframe",
+              "url": window.location.origin
+            });
+          </script>
+        </div>
       </div>
     </section>
   </main>

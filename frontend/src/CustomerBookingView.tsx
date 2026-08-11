@@ -218,6 +218,40 @@ export default function CustomerBookingView() {
     scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
   }, [step]);
 
+  // Keep the embedding iframe in sync with every layout change, including
+  // asynchronously loaded services, validation errors and expanded descriptions.
+  useEffect(() => {
+    if (typeof window === 'undefined' || window.parent === window) return;
+
+    let lastHeight = 0;
+    let animationFrame: number | null = null;
+    const updateSize = () => {
+      if (animationFrame !== null) cancelAnimationFrame(animationFrame);
+      animationFrame = requestAnimationFrame(() => {
+        animationFrame = null;
+        const height = Math.ceil(Math.max(
+          document.body.scrollHeight,
+          document.documentElement.scrollHeight,
+        ));
+        if (height === lastHeight) return;
+        lastHeight = height;
+        window.parent.postMessage({ event: 'updateWidgetSize', height }, '*');
+      });
+    };
+
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(document.body);
+    observer.observe(document.documentElement);
+    window.addEventListener('load', updateSize);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('load', updateSize);
+      if (animationFrame !== null) cancelAnimationFrame(animationFrame);
+    };
+  }, []);
+
   // Scroll to "Now" line on today's selection
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
