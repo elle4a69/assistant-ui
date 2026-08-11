@@ -278,28 +278,11 @@
       box-shadow: 0 18px 50px rgba(0, 0, 0, 0.3);
     }
 
-    .booking-frame iframe {
+    #booking-container {
       display: block;
       width: 100%;
       min-height: 800px;
-      border: 0;
-      background: #fff;
-    }
-
-    .iframe-placeholder {
-      min-height: 640px;
-      display: grid;
-      place-items: center;
-      padding: 32px;
-      color: #242426;
-      text-align: center;
-      background: linear-gradient(135deg, #fafafa, #ececee);
-    }
-
-    .iframe-placeholder strong {
-      display: block;
-      margin-bottom: 8px;
-      font-size: 1.2rem;
+      background: #faf6f6;
     }
 
     footer {
@@ -425,14 +408,6 @@
 
         <div class="booking-frame">
           <div id="booking-container"></div>
-          <script src="/widget.js"></script>
-          <script>
-            new SimplybookWidget({
-              "container_id": "booking-container",
-              "widget_type": "iframe",
-              "url": window.location.origin
-            });
-          </script>
         </div>
       </div>
     </section>
@@ -489,5 +464,6 @@
       }
     });
   </script>
+  <script type="module" src="/booking-inline.js"></script>
 </body>
 </html>

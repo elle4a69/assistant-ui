@@ -18,4 +18,16 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rollupOptions: {
+      input: {
+        main: 'index.html',
+        'booking-inline': 'src/booking-inline.tsx',
+      },
+      output: {
+        entryFileNames: (chunk) =>
+          chunk.name === 'booking-inline' ? 'booking-inline.js' : 'assets/[name]-[hash].js',
+      },
+    },
+  },
 })
