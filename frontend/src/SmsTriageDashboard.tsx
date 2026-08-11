@@ -281,6 +281,10 @@ export default function SmsTriageDashboard() {
   const [showNotesMobile, setShowNotesMobile] = useState(false);
   const sendingReplyRef = useRef(false);
   const reviewingDraftRef = useRef<string | null>(null);
+  const threadListRequestRef = useRef(0);
+  const threadDetailRequestRef = useRef(0);
+  const selectedThreadIdRef = useRef(selectedThreadId);
+  selectedThreadIdRef.current = selectedThreadId;
 
   // Tab switcher
   const [dashboardTab, setDashboardTab] = useState<'triage' | 'calendar'>('triage');
@@ -292,6 +296,7 @@ export default function SmsTriageDashboard() {
 
   // Fetch threads list
   const fetchThreadsList = useCallback(async () => {
+    const requestId = ++threadListRequestRef.current;
     try {
       const list = await listThreads({
         search: searchQuery || undefined,
@@ -299,6 +304,7 @@ export default function SmsTriageDashboard() {
         filterPriority: priorityFilter !== 'all' ? priorityFilter : undefined,
         onlyUnread: showUnreadOnly ? true : undefined
       });
+      if (requestId !== threadListRequestRef.current) return;
       setThreads(list);
     } catch (err) {
       console.error('Failed to load threads list:', err);
@@ -307,14 +313,16 @@ export default function SmsTriageDashboard() {
 
   // Fetch single thread detail
   const fetchThreadDetail = useCallback(async (id: string, isSilent = false) => {
+    const requestId = ++threadDetailRequestRef.current;
     if (!isSilent) setLoadingDetail(true);
     try {
       const detail = await getThread(id);
+      if (requestId !== threadDetailRequestRef.current || selectedThreadIdRef.current !== id) return;
       setSelectedThread(detail);
     } catch (err) {
       console.error(`Failed to load thread ${id} details:`, err);
     } finally {
-      if (!isSilent) setLoadingDetail(false);
+      if (!isSilent && requestId === threadDetailRequestRef.current) setLoadingDetail(false);
     }
   }, []);
 
@@ -338,11 +346,21 @@ export default function SmsTriageDashboard() {
     }
   }, []);
 
-  // Poll thread list
+  // Poll thread list without overlapping requests. Overlapping responses can
+  // arrive out of order and hide replies sent from another browser session.
   useEffect(() => {
-    fetchThreadsList();
-    const interval = setInterval(fetchThreadsList, 4000);
-    return () => clearInterval(interval);
+    let active = true;
+    let timeout: number | undefined;
+    const poll = async () => {
+      await fetchThreadsList();
+      if (active) timeout = window.setTimeout(poll, 4000);
+    };
+    void poll();
+    return () => {
+      active = false;
+      threadDetailRequestRef.current += 1;
+      if (timeout !== undefined) window.clearTimeout(timeout);
+    };
   }, [fetchThreadsList]);
 
   // Poll selected thread details
@@ -351,11 +369,17 @@ export default function SmsTriageDashboard() {
       setSelectedThread(null);
       return;
     }
-    fetchThreadDetail(selectedThreadId, false);
-    const interval = setInterval(() => {
-      fetchThreadDetail(selectedThreadId, true);
-    }, 4000);
-    return () => clearInterval(interval);
+    let active = true;
+    let timeout: number | undefined;
+    const poll = async (isSilent: boolean) => {
+      await fetchThreadDetail(selectedThreadId, isSilent);
+      if (active) timeout = window.setTimeout(() => void poll(true), 4000);
+    };
+    void poll(false);
+    return () => {
+      active = false;
+      if (timeout !== undefined) window.clearTimeout(timeout);
+    };
   }, [selectedThreadId, fetchThreadDetail]);
 
   // Poll calendar data

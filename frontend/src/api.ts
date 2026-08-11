@@ -223,7 +223,7 @@ export async function listThreads(params: ListThreadsParams = {}): Promise<Threa
   if (params.filterPriority) url.searchParams.append('filterPriority', params.filterPriority);
   if (params.onlyUnread !== undefined) url.searchParams.append('onlyUnread', String(params.onlyUnread));
 
-  const response = await fetch(url.toString());
+  const response = await fetch(url.toString(), { cache: 'no-store' });
   if (!response.ok) {
     throw new Error(`Failed to list threads: ${response.statusText}`);
   }
@@ -246,7 +246,7 @@ export async function catchUpMissedMessage(): Promise<CatchUpResult> {
 }
 
 export async function getThread(id: string): Promise<ThreadDetail> {
-  const response = await fetch(`${API_BASE}/api/threads/${id}`);
+  const response = await fetch(`${API_BASE}/api/threads/${id}`, { cache: 'no-store' });
   if (!response.ok) {
     throw new Error(`Failed to get thread detail: ${response.statusText}`);
   }

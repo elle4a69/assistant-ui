@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings
 import mobilemessage_service
 from sqlalchemy import (
-    create_engine, Column, String, Integer, DateTime, ForeignKey, Text, event, Boolean
+    create_engine, Column, String, Integer, DateTime, ForeignKey, Text, event, Boolean, func
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from sqlalchemy.exc import IntegrityError
@@ -1812,6 +1812,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def disable_api_response_caching(request: Request, call_next):
+    """Conversation data is shared live state and must never be browser-cached."""
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
 AUTH_USERNAME = os.getenv("APP_USERNAME", "admin")
 AUTH_PASSWORD = os.getenv("APP_PASSWORD", "")
 PUBLIC_EXACT_PATHS = {
@@ -3097,26 +3108,63 @@ def get_threads(
     
     if search:
         from sqlalchemy import or_
-        query = query.outerjoin(Message).filter(
+        query = query.filter(
             or_(
                 Thread.customer_phone.ilike(f"%{search}%"),
-                Message.text.ilike(f"%{search}%")
+                Thread.messages.any(Message.text.ilike(f"%{search}%")),
             )
-        ).distinct()
+        )
         
     threads = query.all()
+    thread_ids = [thread.id for thread in threads]
+
+    latest_messages = {}
+    latest_arrivals = {}
+    if thread_ids:
+        ranked_messages = db.query(
+            Message.thread_id.label("thread_id"),
+            Message.id.label("id"),
+            Message.role.label("role"),
+            Message.text.label("text"),
+            Message.at.label("at"),
+            func.row_number().over(
+                partition_by=Message.thread_id,
+                order_by=(Message.at.desc(), Message.id.desc()),
+            ).label("row_number"),
+        ).filter(Message.thread_id.in_(thread_ids)).subquery()
+        latest_messages = {
+            row.thread_id: row
+            for row in db.query(ranked_messages).filter(
+                ranked_messages.c.row_number == 1
+            ).all()
+        }
+
+        ranked_arrivals = db.query(
+            ThreadEvent.thread_id.label("thread_id"),
+            ThreadEvent.id.label("id"),
+            ThreadEvent.at.label("at"),
+            func.row_number().over(
+                partition_by=ThreadEvent.thread_id,
+                order_by=(ThreadEvent.at.desc(), ThreadEvent.id.desc()),
+            ).label("row_number"),
+        ).filter(
+            ThreadEvent.thread_id.in_(thread_ids),
+            ThreadEvent.type == "customer-arrived",
+        ).subquery()
+        latest_arrivals = {
+            row.thread_id: row
+            for row in db.query(ranked_arrivals).filter(
+                ranked_arrivals.c.row_number == 1
+            ).all()
+        }
+
     ordered_results = []
     
     for t in threads:
-        last_msg = db.query(Message).filter(Message.thread_id == t.id).order_by(
-            Message.at.desc(), Message.id.desc()
-        ).first()
+        last_msg = latest_messages.get(t.id)
         last_activity_at = last_msg.at if last_msg else t.created_at
         last_message_at = format_dt(last_activity_at)
-        last_arrival_event = db.query(ThreadEvent).filter(
-            ThreadEvent.thread_id == t.id,
-            ThreadEvent.type == "customer-arrived",
-        ).order_by(ThreadEvent.at.desc(), ThreadEvent.id.desc()).first()
+        last_arrival_event = latest_arrivals.get(t.id)
         
         assigned_agent_name = f"Agent {t.assigned_agent_id}" if t.assigned_agent_id else None
         

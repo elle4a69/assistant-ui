@@ -24,11 +24,17 @@ export default function SmsClientView() {
   const [composerText, setComposerText] = useState('');
   const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const threadListRequestRef = useRef(0);
+  const threadMessagesRequestRef = useRef(0);
+  const threadIdRef = useRef(threadId);
+  threadIdRef.current = threadId;
 
   // Poll threads to sync thread list and find matching threadId
   const fetchThreadsAndSync = useCallback(async () => {
+    const requestId = ++threadListRequestRef.current;
     try {
       const list = await listThreads();
+      if (requestId !== threadListRequestRef.current) return;
       setThreads(list);
       
       if (activePhone) {
@@ -45,8 +51,10 @@ export default function SmsClientView() {
   // Poll messages for current thread
   const fetchThreadMessages = useCallback(async () => {
     if (!threadId) return;
+    const requestId = ++threadMessagesRequestRef.current;
     try {
       const detail = await getThread(threadId);
+      if (requestId !== threadMessagesRequestRef.current || threadIdRef.current !== threadId) return;
       setMessages(detail.messages);
     } catch (err) {
       console.error('Failed to fetch thread messages:', err);
@@ -55,9 +63,18 @@ export default function SmsClientView() {
 
   // Run polling for threads list
   useEffect(() => {
-    fetchThreadsAndSync();
-    const interval = setInterval(fetchThreadsAndSync, 4000);
-    return () => clearInterval(interval);
+    let active = true;
+    let timeout: number | undefined;
+    const poll = async () => {
+      await fetchThreadsAndSync();
+      if (active) timeout = window.setTimeout(poll, 4000);
+    };
+    void poll();
+    return () => {
+      active = false;
+      threadMessagesRequestRef.current += 1;
+      if (timeout !== undefined) window.clearTimeout(timeout);
+    };
   }, [fetchThreadsAndSync]);
 
   // Run polling for messages
@@ -66,9 +83,17 @@ export default function SmsClientView() {
       setMessages([]);
       return;
     }
-    fetchThreadMessages();
-    const interval = setInterval(fetchThreadMessages, 4000);
-    return () => clearInterval(interval);
+    let active = true;
+    let timeout: number | undefined;
+    const poll = async () => {
+      await fetchThreadMessages();
+      if (active) timeout = window.setTimeout(poll, 4000);
+    };
+    void poll();
+    return () => {
+      active = false;
+      if (timeout !== undefined) window.clearTimeout(timeout);
+    };
   }, [threadId, fetchThreadMessages]);
 
   // Scroll to bottom when messages change

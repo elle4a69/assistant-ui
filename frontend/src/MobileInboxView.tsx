@@ -80,10 +80,15 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const endRef = useRef<HTMLDivElement>(null)
   const sendingRef = useRef(false)
   const reviewingDraftRef = useRef<string | null>(null)
+  const selectedIdRef = useRef(selectedId)
+  const threadsRequestRef = useRef(0)
+  const threadRequestRef = useRef(0)
+  selectedIdRef.current = selectedId
   const loadThreads = useCallback(async () => {
+    const requestId = ++threadsRequestRef.current
     try {
       const nextThreads = await listThreads()
-
+      if (requestId !== threadsRequestRef.current) return
       setThreads(nextThreads)
       setError('')
     } catch {
@@ -95,9 +100,10 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
 
   const loadThread = useCallback(async () => {
     if (!selectedId) return
+    const requestId = ++threadRequestRef.current
     try {
       const detail = await getThread(selectedId)
-      
+      if (requestId !== threadRequestRef.current || selectedIdRef.current !== selectedId) return
       setThread(detail)
       
       setError('')
@@ -110,9 +116,17 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   }, [selectedId, loadThreads])
 
   useEffect(() => {
-    void loadThreads()
-    const interval = window.setInterval(loadThreads, POLL_THREADS_MS)
-    return () => window.clearInterval(interval)
+    let active = true
+    let timeout: number | undefined
+    const poll = async () => {
+      await loadThreads()
+      if (active) timeout = window.setTimeout(poll, POLL_THREADS_MS)
+    }
+    void poll()
+    return () => {
+      active = false
+      if (timeout !== undefined) window.clearTimeout(timeout)
+    }
   }, [loadThreads])
 
   useEffect(() => {
@@ -144,9 +158,18 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
       setThread(null)
       return
     }
-    void loadThread()
-    const interval = window.setInterval(loadThread, POLL_MESSAGES_MS)
-    return () => window.clearInterval(interval)
+    let active = true
+    let timeout: number | undefined
+    const poll = async () => {
+      await loadThread()
+      if (active) timeout = window.setTimeout(poll, POLL_MESSAGES_MS)
+    }
+    void poll()
+    return () => {
+      active = false
+      threadRequestRef.current += 1
+      if (timeout !== undefined) window.clearTimeout(timeout)
+    }
   }, [selectedId, loadThread])
 
   useEffect(() => {
