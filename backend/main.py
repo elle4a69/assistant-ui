@@ -3,6 +3,7 @@ import os
 import base64
 import hmac
 import threading
+import asyncio
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TMP_DIR = os.path.join(BASE_DIR, "tmp")
 os.environ["SQLITE_TMPDIR"] = TMP_DIR
@@ -753,7 +754,12 @@ DB_FILE = os.path.join(PERSIST_DIR, "assistant.db")
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DB_FILE}")
 
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+sqlite_connect_args = (
+    {"check_same_thread": False, "timeout": 30}
+    if DATABASE_URL.startswith("sqlite")
+    else {}
+)
+engine = create_engine(DATABASE_URL, connect_args=sqlite_connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -762,6 +768,9 @@ Base = declarative_base()
 def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
     cursor.close()
 
 # SQLAlchemy Models
@@ -837,10 +846,11 @@ def find_thread_by_phone(db: Session, phone: str) -> Optional[Thread]:
     if not target_canonical:
         return None
 
-    threads = db.query(Thread).all()
     matching_threads = [
-        t for t in threads
-        if t.customer_phone and canonical_phone_number(t.customer_phone) == target_canonical
+        thread
+        for thread in db.query(Thread).all()
+        if thread.customer_phone
+        and canonical_phone_number(thread.customer_phone) == target_canonical
     ]
 
     if not matching_threads:
@@ -850,7 +860,7 @@ def find_thread_by_phone(db: Session, phone: str) -> Optional[Thread]:
         t = matching_threads[0]
         if t.customer_phone != target_canonical:
             t.customer_phone = target_canonical
-            db.commit()
+            db.flush()
         return t
 
     matching_threads.sort(
@@ -876,7 +886,7 @@ def find_thread_by_phone(db: Session, phone: str) -> Optional[Thread]:
     # Remove duplicate canonical values before assigning the survivor's value.
     db.flush()
     primary.customer_phone = target_canonical
-    db.commit()
+    db.flush()
     return primary
 
 class CalendarEvent(Base):
@@ -1817,6 +1827,8 @@ class WebhookSMSInput(BaseModel):
     to: Optional[str] = None
     body: Optional[str] = None
     providerMessageId: Optional[str] = None
+    originalMessageId: Optional[str] = None
+    webhookType: Optional[str] = None
     receivedAt: Optional[datetime] = None
     isSimulation: bool = False
 
@@ -1834,7 +1846,14 @@ class WebhookSMSInput(BaseModel):
                 else:
                     data["receivedAt"] = datetime.utcnow().isoformat() + "Z"
             if "providerMessageId" not in data:
-                data["providerMessageId"] = data.get("message_id") or data.get("original_message_id")
+                # Mobile Message's inbound webhook does not document an inbound
+                # message_id. original_message_id identifies the earlier outbound
+                # SMS and therefore must never be used as the inbound identity.
+                data["providerMessageId"] = data.get("message_id")
+            if "originalMessageId" not in data:
+                data["originalMessageId"] = data.get("original_message_id")
+            if "webhookType" not in data:
+                data["webhookType"] = data.get("type")
         return data
 
     class Config:
@@ -3144,19 +3163,12 @@ def send_first_contact_auto_reply(
     db.commit()
 
 
-def process_first_contact_auto_reply_delayed(
+def _process_first_contact_auto_reply(
     thread_id: str,
     customer_message_id: str,
     config: Dict[str, Any],
     dispatch_sms: bool,
 ) -> None:
-    import time
-
-    delay_seconds = max(0, min(3600, int(config.get("delaySeconds", 0))))
-    if delay_seconds:
-        print(f"[First Contact Delay] Waiting {delay_seconds}s before replying on thread {thread_id}...")
-        time.sleep(delay_seconds)
-
     db = SessionLocal()
     try:
         thread = db.query(Thread).filter(Thread.id == thread_id).first()
@@ -3188,39 +3200,79 @@ def process_first_contact_auto_reply_delayed(
         db.close()
 
 
-def process_sms_reply_delayed(thread_id: str, body: str, provider_message_id: str, received_at_naive: datetime):
-    import time
-    import random
-    
-    delay = random.randint(30, 120)
-    print(f"[Autoresponder Delay] Waiting {delay}s before replying on thread {thread_id}...")
-    time.sleep(delay)
-    
+async def process_first_contact_auto_reply_delayed(
+    thread_id: str,
+    customer_message_id: str,
+    config: Dict[str, Any],
+    dispatch_sms: bool,
+) -> None:
+    delay_seconds = max(0, min(3600, int(config.get("delaySeconds", 0))))
+    if delay_seconds:
+        print(f"[First Contact Delay] Waiting {delay_seconds}s before replying on thread {thread_id}...")
+        await asyncio.sleep(delay_seconds)
+
+    # Keep both the delay and provider/AI work away from FastAPI's sync-route
+    # thread limiter so inbound webhook requests cannot be starved by a burst.
+    await asyncio.to_thread(
+        _process_first_contact_auto_reply,
+        thread_id,
+        customer_message_id,
+        config,
+        dispatch_sms,
+    )
+
+
+def _process_sms_reply(
+    thread_id: str,
+    body: str,
+    provider_message_id: str,
+    received_at_naive: datetime,
+) -> None:
     db = SessionLocal()
     try:
         thread = db.query(Thread).filter(Thread.id == thread_id).first()
         if not thread:
             print(f"[Autoresponder Delay] Thread {thread_id} not found. Skipping auto-reply.")
             return
-            
+
         if not AUTO_REPLY_GLOBAL_ENABLED:
             print(f"[Autoresponder Delay] Global AI replies are off. Reply canceled for {thread_id}.")
             return
-            
+
         if not thread.auto_reply_enabled:
             print(f"[Autoresponder Delay] Thread auto_reply_enabled is False. Reply canceled for {thread_id}.")
             return
-            
+
         if thread.state == "taken-over":
             print(f"[Autoresponder Delay] Thread is taken-over. Reply canceled for {thread_id}.")
             return
-            
+
         run_sms_reply_logic(db, thread_id, body, provider_message_id, received_at_naive)
     except Exception as e:
         print(f"[Autoresponder Delay Error] {e}")
         db.rollback()
     finally:
         db.close()
+
+
+async def process_sms_reply_delayed(
+    thread_id: str,
+    body: str,
+    provider_message_id: str,
+    received_at_naive: datetime,
+) -> None:
+    import random
+
+    delay = random.randint(30, 120)
+    print(f"[Autoresponder Delay] Waiting {delay}s before replying on thread {thread_id}...")
+    await asyncio.sleep(delay)
+    await asyncio.to_thread(
+        _process_sms_reply,
+        thread_id,
+        body,
+        provider_message_id,
+        received_at_naive,
+    )
 
 
 def should_process_sms_synchronously(
@@ -3231,12 +3283,84 @@ def should_process_sms_synchronously(
     return is_testing or is_simulation or TRAINING_MODE_ENABLED
 
 
+def inbound_webhook_identity(
+    payload: WebhookSMSInput,
+    from_phone: str,
+    received_at_naive: datetime,
+) -> tuple[str, bool]:
+    """Return a retry-safe inbound key and whether it came from a real inbound ID."""
+    explicit_id = (payload.providerMessageId or "").strip()
+    if explicit_id:
+        return explicit_id, True
+
+    # The provider's original_message_id is correlation to an outbound SMS, not
+    # identity for this inbound reply. Hash immutable inbound fields so callback
+    # retries collapse while separate replies to the same outbound SMS survive.
+    canonical = json.dumps(
+        {
+            "body": payload.body or "",
+            "from": from_phone or "",
+            "original_message_id": (payload.originalMessageId or "").strip(),
+            "received_at": received_at_naive.isoformat(timespec="microseconds"),
+            "to": canonical_phone_number(payload.to),
+            "type": (payload.webhookType or "inbound").strip().lower(),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return f"inbound:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}", False
+
+
+def find_legacy_inbound_duplicate(
+    db: Session,
+    payload: WebhookSMSInput,
+    from_phone: str,
+    received_at_naive: datetime,
+) -> Optional[Message]:
+    """Recognize exact retries saved by the former original_message_id logic."""
+    original_id = (payload.originalMessageId or "").strip()
+    if not original_id:
+        return None
+    return (
+        db.query(Message)
+        .join(Thread, Thread.id == Message.thread_id)
+        .filter(
+            Message.provider_message_id == original_id,
+            Message.role == "customer",
+            Message.text == (payload.body or ""),
+            Message.at == received_at_naive,
+            Thread.customer_phone == from_phone,
+        )
+        .first()
+    )
+
+
 @app.post("/webhooks/sms")
 def webhook_sms(payload: WebhookSMSInput, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     import sys
     from_phone = canonical_phone_number(payload.from_phone)
     received_at_naive = to_naive_utc(payload.receivedAt)
-    provider_message_id = (payload.providerMessageId or "").strip() or None
+    provider_message_id, has_explicit_inbound_id = inbound_webhook_identity(
+        payload,
+        from_phone,
+        received_at_naive,
+    )
+
+    if not has_explicit_inbound_id:
+        legacy_duplicate = find_legacy_inbound_duplicate(
+            db,
+            payload,
+            from_phone,
+            received_at_naive,
+        )
+        if legacy_duplicate:
+            print("[Webhook Deduplicated] Exact legacy callback retry ignored.")
+            return {
+                "status": "success",
+                "thread_id": legacy_duplicate.thread_id,
+                "duplicate": True,
+            }
 
     if provider_message_id:
         existing_message = db.query(Message).filter(
@@ -3375,7 +3499,7 @@ def webhook_sms(payload: WebhookSMSInput, background_tasks: BackgroundTasks, db:
                 db,
                 thread.id,
                 payload.body,
-                payload.providerMessageId,
+                provider_message_id,
                 received_at_naive,
                 dispatch_sms=not (is_testing or payload.isSimulation),
             )
@@ -3394,7 +3518,7 @@ def webhook_sms(payload: WebhookSMSInput, background_tasks: BackgroundTasks, db:
                 process_sms_reply_delayed,
                 thread.id,
                 payload.body,
-                payload.providerMessageId,
+                provider_message_id,
                 received_at_naive
             )
         return {"status": "success", "thread_id": thread.id}
