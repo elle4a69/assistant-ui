@@ -213,9 +213,12 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     let drafts = 0
     let informationRequests = 0
     try {
-      // Process one conversation at a time and pause between calls so a backlog
-      // cannot flood either the model or this mobile UI.
-      for (let processed = 0; processed < 100; processed += 1) {
+      // Process one conversation at a time and cap each run so a large backlog
+      // cannot exhaust the small application server. The button can be used
+      // again to continue with the next batch.
+      const batchLimit = 10
+      let reachedBatchLimit = false
+      for (let processed = 0; processed < batchLimit; processed += 1) {
         const result = await catchUpMissedMessage()
         if (!result.processed) break
         if (result.outcome === 'draft') drafts += 1
@@ -223,8 +226,13 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
         setNotice(`Catch-up: ${drafts} draft${drafts === 1 ? '' : 's'}, ${informationRequests} information request${informationRequests === 1 ? '' : 's'}`)
         await loadThreads()
         await new Promise(resolve => window.setTimeout(resolve, 2000))
+        reachedBatchLimit = processed === batchLimit - 1
       }
-      setNotice(`Catch-up complete: ${drafts} draft${drafts === 1 ? '' : 's'}, ${informationRequests} information request${informationRequests === 1 ? '' : 's'}`)
+      setNotice(
+        reachedBatchLimit
+          ? `Catch-up paused after ${batchLimit} conversations. Click refresh again to continue.`
+          : `Catch-up complete: ${drafts} draft${drafts === 1 ? '' : 's'}, ${informationRequests} information request${informationRequests === 1 ? '' : 's'}`,
+      )
       await loadThreads()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not catch up missed messages')

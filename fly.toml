@@ -19,3 +19,14 @@ primary_region = "syd"
   min_machines_running = 1
   processes = ["app"]
 
+  [[http_service.checks]]
+    grace_period = "20s"
+    interval = "15s"
+    method = "GET"
+    path = "/api/health"
+    timeout = "3s"
+
+[vm]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "512mb"
