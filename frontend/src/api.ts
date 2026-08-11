@@ -456,7 +456,7 @@ export interface KnowledgeFile {
 }
 
 export async function getSettings(): Promise<SystemSettings> {
-  const response = await fetch(`${API_BASE}/api/settings`);
+  const response = await fetch(`${API_BASE}/api/settings`, { cache: 'no-store' });
   if (!response.ok) {
     throw new Error(`Failed to get settings: ${response.statusText}`);
   }
@@ -472,7 +472,13 @@ export async function updateSettings(settings: { openaiApiKey?: string; systemPr
   if (!response.ok) {
     throw new Error(`Failed to update settings: ${response.statusText}`);
   }
-  return response.json();
+  const result = await response.json();
+  if (typeof settings.showMessageAvatars === 'boolean') {
+    window.dispatchEvent(new CustomEvent('message-avatar-setting-changed', {
+      detail: { showMessageAvatars: settings.showMessageAvatars },
+    }));
+  }
+  return result;
 }
 
 export interface BusinessVariable {
@@ -818,5 +824,22 @@ export async function discardDraft(messageId: string): Promise<{ status: string 
     method: 'POST',
   });
   if (!response.ok) throw new Error(`Failed to discard draft message: ${response.statusText}`);
+  return response.json();
+}
+
+export interface ClearPendingDraftsResult {
+  status: string;
+  removedDrafts: number;
+  affectedThreads: number;
+}
+
+export async function clearPendingDrafts(): Promise<ClearPendingDraftsResult> {
+  const response = await fetch(`${API_BASE}/api/messages/drafts/pending`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Failed to clear pending drafts: ${response.statusText}`);
+  }
   return response.json();
 }

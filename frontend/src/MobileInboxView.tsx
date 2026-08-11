@@ -67,7 +67,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const [composer, setComposer] = useState('')
   const [aiEnabled, setAiEnabled] = useState(true)
   const [trainingEnabled, setTrainingEnabled] = useState(false)
-  const [showAvatars, setShowAvatars] = useState(true)
+  const [showAvatars, setShowAvatars] = useState<boolean | null>(null)
   const [loading, setLoading] = useState(true)
   const [sending, setSending] = useState(false)
   const [catchingUp, setCatchingUp] = useState(false)
@@ -117,13 +117,26 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
 
   useEffect(() => {
     let active = true
+    const handleAvatarSettingChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ showMessageAvatars?: boolean }>).detail
+      if (typeof detail?.showMessageAvatars === 'boolean') {
+        setShowAvatars(detail.showMessageAvatars)
+      }
+    }
+    window.addEventListener('message-avatar-setting-changed', handleAvatarSettingChanged)
     void getSettings().then(settings => {
       if (!active) return
       setAiEnabled(settings.autoReplyGlobalEnabled !== false)
       setTrainingEnabled(!!settings.trainingModeEnabled)
       setShowAvatars(settings.showMessageAvatars !== false)
-    }).catch(() => setError('Could not read settings'))
-    return () => { active = false }
+    }).catch(() => {
+      setShowAvatars(true)
+      setError('Could not read settings')
+    })
+    return () => {
+      active = false
+      window.removeEventListener('message-avatar-setting-changed', handleAvatarSettingChanged)
+    }
   }, [])
 
   useEffect(() => {
@@ -399,7 +412,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                 <div className="space-y-1 px-4 py-2">
                   {[1, 2, 3, 4].map(item => (
                     <div key={item} className="flex animate-pulse gap-3 py-3">
-                      <div className="h-12 w-12 rounded-full bg-slate-200" />
+                      {showAvatars === true && <div className="h-12 w-12 rounded-full bg-slate-200" />}
                       <div className="flex-1 space-y-2 py-1">
                         <div className="h-3 w-32 rounded bg-slate-200" />
                         <div className="h-3 w-4/5 rounded bg-slate-100" />

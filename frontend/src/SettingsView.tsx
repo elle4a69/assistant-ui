@@ -30,7 +30,8 @@ import {
   QARule,
   getFirstContactAutoresponder,
   saveFirstContactAutoresponder,
-  FirstContactAutoresponderConfig
+  FirstContactAutoresponderConfig,
+  clearPendingDrafts
 } from './api';
 import {
   Key,
@@ -110,6 +111,7 @@ export default function SettingsView() {
   const [hasGoogleCreds, setHasGoogleCreds] = useState(false);
   const [showMessageAvatars, setShowMessageAvatars] = useState(true);
   const [savingMessageDisplay, setSavingMessageDisplay] = useState(false);
+  const [clearingPendingDrafts, setClearingPendingDrafts] = useState(false);
   const [incomingAlarmEnabled, setIncomingAlarmEnabledState] = useState(() => getIncomingAlarmSettings().enabled);
   const [incomingAlarmVolume, setIncomingAlarmVolumeState] = useState(() => getIncomingAlarmSettings().volume);
   const [testingIncomingAlarm, setTestingIncomingAlarm] = useState(false);
@@ -287,6 +289,29 @@ export default function SettingsView() {
       triggerBanner('error', 'Failed to update message avatar setting.');
     } finally {
       setSavingMessageDisplay(false);
+    }
+  };
+
+  const handleClearPendingDrafts = async () => {
+    const confirmed = window.confirm(
+      'Remove every pending AI draft waiting for approval? This cannot be undone.'
+    );
+    if (!confirmed) return;
+
+    setClearingPendingDrafts(true);
+    try {
+      const result = await clearPendingDrafts();
+      triggerBanner(
+        'success',
+        result.removedDrafts === 0
+          ? 'There were no pending AI drafts to remove.'
+          : `Removed ${result.removedDrafts} pending AI draft${result.removedDrafts === 1 ? '' : 's'} from ${result.affectedThreads} conversation${result.affectedThreads === 1 ? '' : 's'}.`
+      );
+    } catch (err) {
+      console.error(err);
+      triggerBanner('error', 'Failed to clear pending AI drafts.');
+    } finally {
+      setClearingPendingDrafts(false);
     }
   };
 
@@ -913,6 +938,25 @@ export default function SettingsView() {
                   className={`relative h-6 w-11 shrink-0 rounded-full border-none p-0 transition-colors cursor-pointer disabled:opacity-50 ${showMessageAvatars ? 'bg-indigo-600' : 'bg-slate-300'}`}
                 >
                   <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${showMessageAvatars ? 'translate-x-5' : 'translate-x-0'}`} />
+                </button>
+              </div>
+
+              <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100">
+                <div className="flex items-start gap-3 min-w-0">
+                  <Trash2 className="w-4 h-4 text-rose-600 mt-0.5 shrink-0" />
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-slate-800">Clear pending AI drafts</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Remove every unsent AI reply currently waiting for approval.</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={clearingPendingDrafts}
+                  onClick={handleClearPendingDrafts}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-2 text-[10px] font-bold text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer shrink-0"
+                >
+                  {clearingPendingDrafts ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                  {clearingPendingDrafts ? 'Clearing…' : 'Clear all drafts'}
                 </button>
               </div>
 

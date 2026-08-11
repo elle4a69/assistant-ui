@@ -3581,6 +3581,15 @@ class BusinessVariablesInput(BaseModel):
     variables: List[BusinessVariableInput] = Field(max_length=50)
 
 
+class SettingsUpdateInput(BaseModel):
+    openaiApiKey: Optional[str] = None
+    systemPrompt: Optional[str] = None
+    userPrompt: Optional[str] = None
+    autoReplyGlobalEnabled: Optional[bool] = None
+    trainingModeEnabled: Optional[bool] = None
+    showMessageAvatars: Optional[bool] = None
+
+
 MESSAGE_UI_SETTINGS_PATH = os.path.join(DATA_DIR, "message_ui_settings.json")
 
 
@@ -3928,6 +3937,39 @@ def discard_draft_message(message_id: str, db: Session = Depends(get_db)):
     db.add(discard_event)
     db.commit()
     return {"status": "success"}
+
+
+@app.delete("/api/messages/drafts/pending")
+def clear_pending_draft_messages(db: Session = Depends(get_db)):
+    drafts = db.query(Message.id, Message.thread_id).filter(Message.role == "draft").all()
+    if not drafts:
+        return {"status": "success", "removedDrafts": 0, "affectedThreads": 0}
+
+    draft_counts = Counter(draft.thread_id for draft in drafts)
+    affected_threads = db.query(Thread).filter(Thread.id.in_(draft_counts.keys())).all()
+    cleared_at = datetime.utcnow()
+
+    db.query(Message).filter(Message.role == "draft").delete(synchronize_session=False)
+
+    for thread in affected_threads:
+        if thread.state == "needs-review":
+            thread.state = "taken-over"
+        thread.updated_at = cleared_at
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread.id,
+            type="drafts-cleared",
+            agent_id="bulk-discard",
+            meta=json.dumps({"count": draft_counts[thread.id]}),
+            at=cleared_at,
+        ))
+
+    db.commit()
+    return {
+        "status": "success",
+        "removedDrafts": len(drafts),
+        "affectedThreads": len(affected_threads),
+    }
 
 
 @app.get("/api/settings/knowledge-files")
