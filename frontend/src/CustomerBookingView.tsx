@@ -171,7 +171,7 @@ function StepPane({ children }: { children: React.ReactNode }) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export default function CustomerBookingView() {
+export default function CustomerBookingView({ embedded = false }: { embedded?: boolean }) {
   const [step, setStep] = useState<Step>(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -445,14 +445,17 @@ export default function CustomerBookingView() {
 
       {/*
         OUTER WRAPPER:
-        - Takes 100% of whatever container it sits in (standalone page or iframe).
+        - Takes 100% of whatever container it sits in (standalone or native embed).
         - No min-h-screen, no fixed positioning.
         - Flex column so header + nav are fixed at top, content scrolls.
       */}
-      <div className="w-full h-full min-h-0 flex flex-col bg-[#faf6f6] font-sans text-slate-800 antialiased select-none" style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>
+      <div
+        className={`relative w-full min-h-0 flex flex-col font-sans text-slate-800 antialiased select-none ${embedded ? 'bg-transparent' : 'h-full bg-[#faf6f6]'}`}
+        style={{ fontFamily: "'Inter', system-ui, sans-serif" }}
+      >
 
         {/* ── Header ──────────────────────────────────────────────────────── */}
-        <div className="bg-white border-b border-slate-100 px-4 py-3 flex items-center justify-between shrink-0 z-10">
+        {!embedded && <div className="bg-white border-b border-slate-100 px-4 py-3 flex items-center justify-between shrink-0 z-10">
           <button
             onClick={handleReset}
             className="text-[#7a0b2e] font-serif italic font-extrabold text-xl tracking-tight cursor-pointer bg-transparent border-none p-0"
@@ -487,11 +490,11 @@ export default function CustomerBookingView() {
               <Info className="w-3.5 h-3.5" />
             </button>
           </div>
-        </div>
+        </div>}
 
         {/* ── Step Nav ────────────────────────────────────────────────────── */}
         {step < 4 && (
-          <div className="bg-white border-b border-slate-100 px-5 py-0 shrink-0 z-10">
+          <div className={`${embedded ? 'bg-transparent border-b border-slate-300/40 px-0 mb-3' : 'bg-white border-b border-slate-100 px-5'} py-0 shrink-0 z-10`}>
             <div className="flex">
               {[
                 { label: 'Service', nav: 1 },
@@ -529,7 +532,7 @@ export default function CustomerBookingView() {
 
         {/* ── Time Banner ─────────────────────────────────────────────────── */}
         {step < 4 && (
-          <div className="text-center py-1.5 text-[10px] sm:text-xs font-bold tracking-wider uppercase text-slate-500 bg-[#fafaf7] border-b border-slate-100 shrink-0">
+          <div className={`text-center py-1.5 text-[10px] sm:text-xs font-bold tracking-wider uppercase shrink-0 ${embedded ? 'text-slate-500 bg-transparent mb-3' : 'text-slate-500 bg-[#fafaf7] border-b border-slate-100'}`}>
             Our time: {nowTime}
           </div>
         )}
@@ -537,7 +540,7 @@ export default function CustomerBookingView() {
         {/* ── Scrollable Content ──────────────────────────────────────────── */}
         <div
           ref={scrollRef}
-          className="flex-1 overflow-y-auto booking-scroll p-4 pb-40"
+          className={`flex-1 booking-scroll ${embedded ? 'overflow-visible p-0 pb-4' : 'overflow-y-auto p-4 pb-40'}`}
         >
           {/* Global error */}
           {error && (

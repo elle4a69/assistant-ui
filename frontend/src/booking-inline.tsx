@@ -17,23 +17,15 @@ style.textContent = `
   :host {
     display: block;
     width: 100%;
-    min-height: 800px;
     color-scheme: light;
-    background: #faf6f6;
+    background: transparent;
   }
 
   #booking-inline-root {
     position: relative;
     width: 100%;
-    min-height: 800px;
     overflow: visible;
-  }
-
-  @media (max-width: 719px) {
-    :host,
-    #booking-inline-root {
-      min-height: 760px;
-    }
+    background: transparent;
   }
 `
 
@@ -43,6 +35,6 @@ shadowRoot.replaceChildren(style, mount)
 
 createRoot(mount).render(
   <StrictMode>
-    <CustomerBookingView />
+    <CustomerBookingView embedded />
   </StrictMode>,
 )
