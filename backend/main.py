@@ -2080,6 +2080,13 @@ def is_public_request(request: Request) -> bool:
         return True
 
     # These three routes are the customer-facing booking widget API only.
+    public_booking_api_paths = {
+        "/api/services",
+        "/api/calendar/freebusy",
+        "/api/calendar/bookings",
+    }
+    if method == "OPTIONS" and path in public_booking_api_paths:
+        return True
     if method == "GET" and path in {"/api/services", "/api/calendar/freebusy"}:
         return True
     if method == "POST" and path == "/api/calendar/bookings":

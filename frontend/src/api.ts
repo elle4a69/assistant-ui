@@ -1,5 +1,14 @@
 const getApiBase = () => {
   if (typeof window !== 'undefined') {
+    // The native booking bundle can be embedded on a different website. In
+    // that case its API must remain the booking application's API, rather than
+    // resolving requests against the host website's origin.
+    const bookingContainer = document.getElementById('booking-container');
+    const configuredApiBase = bookingContainer?.dataset.apiBase?.trim();
+    if (configuredApiBase) {
+      return configuredApiBase.replace(/\/+$/, '');
+    }
+
     const isLocalBrowser = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
     // A production build must never call localhost on the viewer's computer,
     // even if a developer's VITE_API_BASE was present when the bundle was built.

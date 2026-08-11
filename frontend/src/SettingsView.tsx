@@ -840,14 +840,12 @@ export default function SettingsView() {
     setTimeout(() => setCopiedWebhook(false), 3000);
   };
 
-  const widgetScriptUrl = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-    ? 'https://assistant-ui-hub.fly.dev/widget.js'
-    : `${window.location.origin}/widget.js`;
   const widgetBaseUrl = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
     ? 'https://assistant-ui-hub.fly.dev'
     : window.location.origin;
+  const bookingInlineScriptUrl = `${widgetBaseUrl}/booking-inline.js`;
 
-  const embedScriptCode = `<div id="booking-container"></div>\n<script src="${widgetScriptUrl}"></script>\n<script>\nnew SimplybookWidget({\n  "container_id": "booking-container",\n  "widget_type": "iframe",\n  "url": "${widgetBaseUrl}"\n});\n</script>`;
+  const embedScriptCode = `<div id="booking-container" data-api-base="${widgetBaseUrl}"></div>\n<script type="module" src="${bookingInlineScriptUrl}"></script>`;
 
   const embedIframeCode = `<iframe src="${widgetBaseUrl}/booking" width="100%" height="800" style="border:none; border-radius:12px;"></iframe>`;
 
@@ -1694,11 +1692,11 @@ export default function SettingsView() {
                   {/* Standalone Booking Form Embedding Snippet */}
                   <div className="mt-4 flex flex-col gap-4 font-sans">
 
-                    {/* Option 1: Dynamic Auto-Resize Script (Recommended) */}
+                    {/* Option 1: Native inline booking interface (Recommended) */}
                     <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl flex flex-col gap-2">
                       <div className="flex justify-between items-center">
                         <span className="font-bold text-slate-700 text-xs flex items-center gap-1.5">
-                          <Calendar className="w-3.5 h-3.5 text-indigo-500" /> Option A: Auto-Resizing Embed (Recommended)
+                          <Calendar className="w-3.5 h-3.5 text-indigo-500" /> Option A: Native Inline Embed (Recommended)
                         </span>
                         <button
                           onClick={copyScriptCode}
@@ -1712,7 +1710,7 @@ export default function SettingsView() {
                         {embedScriptCode}
                       </pre>
                       <p className="text-[9px] text-slate-500 leading-relaxed">
-                        Uses <strong>widget.js</strong> to dynamically adjust the height of the booking form on your website so it loads seamlessly with no double scrollbars.
+                        Renders native booking cards directly on your website without an iframe. Services, prices, durations and availability are loaded live from this booking application whenever the page opens.
                       </p>
                     </div>
 
