@@ -2041,9 +2041,10 @@ app.add_middleware(
 
 @app.middleware("http")
 async def disable_api_response_caching(request: Request, call_next):
-    """Conversation data is shared live state and must never be browser-cached."""
+    """Keep shared API state and stable live booking entry points fresh."""
     response = await call_next(request)
-    if request.url.path.startswith("/api/"):
+    stable_live_paths = {"/", "/landing.html", "/booking", "/booking-inline.js"}
+    if request.url.path.startswith("/api/") or request.url.path in stable_live_paths:
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"

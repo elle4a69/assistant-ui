@@ -441,6 +441,11 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
         .booking-scroll::-webkit-scrollbar { width: 4px; }
         .booking-scroll::-webkit-scrollbar-track { background: transparent; }
         .booking-scroll::-webkit-scrollbar-thumb { background: #f5d5de; border-radius: 99px; }
+        .booking-crimson-outline {
+          border: 3px solid #d2143a !important;
+          outline: 2px solid #d2143a;
+          outline-offset: -2px;
+        }
       `}</style>
 
       {/*
@@ -556,7 +561,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
           {step === 1 && (
             <StepPane>
               {services.length === 0 && !error ? (
-                <div className="rounded-xl border-[3px] border-[#d2143a] bg-slate-950/80 py-16 text-center text-sm font-bold text-slate-300">
+                <div className="booking-crimson-outline rounded-xl bg-slate-950/80 py-16 text-center text-sm font-bold text-slate-300">
                   <div className="w-8 h-8 border-2 border-[#7a0b2e]/30 border-t-[#7a0b2e] rounded-full animate-spin mx-auto mb-3" />
                   Loading services…
                 </div>
@@ -565,7 +570,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
                   {services.map(srv => (
                     <article
                       key={srv.id}
-                      className="group relative overflow-hidden rounded-xl border-[3px] border-[#d2143a] bg-slate-950/80 shadow-sm transition-[transform,box-shadow] duration-150 hover:scale-[1.01] hover:shadow-md"
+                      className="booking-crimson-outline group relative overflow-hidden rounded-xl bg-slate-950/80 shadow-sm transition-[transform,box-shadow] duration-150 hover:scale-[1.01] hover:shadow-md"
                     >
                       <button
                         type="button"
@@ -621,18 +626,18 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
               </button>
 
               {loading ? (
-                <div className="rounded-xl border-[3px] border-[#d2143a] bg-slate-950/80 py-16 text-center text-xs font-bold text-slate-300">
+                <div className="booking-crimson-outline rounded-xl bg-slate-950/80 py-16 text-center text-xs font-bold text-slate-300">
                   <div className="w-8 h-8 border-2 border-[#7a0b2e]/30 border-t-[#7a0b2e] rounded-full animate-spin mx-auto mb-3" />
                   Checking availability…
                 </div>
               ) : freeSlots.length === 0 ? (
-                <div className="rounded-xl border-[3px] border-[#d2143a] bg-slate-950/80 py-16 text-center text-xs font-bold text-slate-300">
+                <div className="booking-crimson-outline rounded-xl bg-slate-950/80 py-16 text-center text-xs font-bold text-slate-300">
                   No availability right now. Please check back soon.
                 </div>
               ) : (
                 <>
                   {/* Calendar */}
-                  <div className="rounded-xl border-[3px] border-[#d2143a] bg-slate-950/80 p-3.5 text-slate-100 shadow-sm">
+                  <div className="booking-crimson-outline rounded-xl bg-slate-950/80 p-3.5 text-slate-100 shadow-sm">
                     {/* Month header */}
                     <div className="flex justify-between items-center mb-3 px-0.5">
                       <button
@@ -704,7 +709,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
                     });
 
                     return (
-                      <div className="flex flex-col gap-3 rounded-xl border-[3px] border-[#d2143a] bg-slate-950/80 p-4 shadow-sm">
+                      <div className="booking-crimson-outline flex flex-col gap-3 rounded-xl bg-slate-950/80 p-4 shadow-sm">
                         <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wide">
                           Available Start Times
                         </span>
@@ -794,7 +799,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
 
               <h2 className="text-balance text-base font-bold text-white">Please, confirm details</h2>
 
-              <div className="overflow-hidden rounded-xl border-[3px] border-[#d2143a] bg-slate-950/80 text-slate-100 shadow-sm">
+              <div className="booking-crimson-outline overflow-hidden rounded-xl bg-slate-950/80 text-slate-100 shadow-sm">
                 {/* Form */}
                 <div className="flex flex-col gap-3 border-b border-white/10 p-4">
                   <div className="flex flex-col gap-1">
@@ -895,13 +900,13 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
           {/* ── STEP 4: Success ──────────────────────────────────────────── */}
           {step === 4 && (
             <StepPane>
-              <div className="flex flex-col items-center gap-5 rounded-xl border-[3px] border-[#d2143a] bg-slate-950/80 px-5 py-6 text-center text-slate-100">
+              <div className="booking-crimson-outline flex flex-col items-center gap-5 rounded-xl bg-slate-950/80 px-5 py-6 text-center text-slate-100">
                 {/* Visual Representation of Tori */}
                 <div className="relative select-none my-1 shrink-0">
                   {/* Outer pulsing ring */}
                   <div className="absolute inset-0 rounded-full bg-[#7a0b2e]/10 animate-ping" style={{ animationDuration: '3s' }}></div>
                   {/* Avatar image container */}
-                  <div className="relative size-20 overflow-hidden rounded-full border-[3px] border-[#d2143a] shadow-md">
+                  <div className="booking-crimson-outline relative size-20 overflow-hidden rounded-full shadow-md">
                     <img 
                       src="/tori_avatar.jpg" 
                       alt="Tori" 
@@ -931,7 +936,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
 
                 {/* SMS preview card */}
                 {confirmationSms && (
-                  <div className="flex w-full max-w-[300px] flex-col gap-2.5 rounded-2xl border-[3px] border-[#d2143a] bg-[#0e0f1a] p-3.5 shadow-lg">
+                  <div className="booking-crimson-outline flex w-full max-w-[300px] flex-col gap-2.5 rounded-2xl bg-[#0e0f1a] p-3.5 shadow-lg">
                     <div className="flex items-center gap-1.5 text-[9px] font-bold text-gray-400 border-b border-gray-800 pb-2">
                       <svg className="w-3.5 h-3.5 text-[#7a0b2e]" viewBox="0 0 24 24" fill="currentColor">
                         <path d="M17 2H7C5.9 2 5 2.9 5 4v16l7-3 7 3V4c0-1.1-.9-2-2-2z"/>
@@ -971,7 +976,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
             onClick={() => setShowInfo(false)}
           >
             <div
-              className="flex w-full max-w-[300px] flex-col gap-4 rounded-2xl border-[3px] border-[#d2143a] bg-slate-950 p-5 text-slate-100 shadow-2xl"
+              className="booking-crimson-outline flex w-full max-w-[300px] flex-col gap-4 rounded-2xl bg-slate-950 p-5 text-slate-100 shadow-2xl"
               onClick={e => e.stopPropagation()}
             >
               <div className="flex items-center justify-between">
