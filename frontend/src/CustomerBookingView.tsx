@@ -565,7 +565,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
                   {services.map(srv => (
                     <article
                       key={srv.id}
-                      className="group relative overflow-hidden rounded-xl border border-slate-600/70 bg-slate-950/80 shadow-sm transition-[transform,border-color,box-shadow] duration-150 hover:scale-[1.01] hover:border-[#d2143a]/80 hover:shadow-md"
+                      className="group relative overflow-hidden rounded-xl border border-white/40 bg-slate-950/80 shadow-sm transition-[transform,border-color,box-shadow] duration-150 hover:scale-[1.01] hover:border-[#d2143a] hover:shadow-md"
                     >
                       <button
                         type="button"
