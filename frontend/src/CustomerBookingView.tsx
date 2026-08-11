@@ -442,9 +442,8 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
         .booking-scroll::-webkit-scrollbar-track { background: transparent; }
         .booking-scroll::-webkit-scrollbar-thumb { background: #f5d5de; border-radius: 99px; }
         .booking-crimson-outline {
-          border: 3px solid #d2143a !important;
-          outline: 2px solid #d2143a;
-          outline-offset: -2px;
+          border: 1px solid #d2143a !important;
+          outline: none;
         }
       `}</style>
 
