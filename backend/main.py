@@ -2731,13 +2731,21 @@ def find_oldest_catch_up_candidate(db: Session):
     candidates = []
     threads = db.query(Thread).filter(
         Thread.auto_reply_enabled.is_(True),
-        Thread.state.in_(["auto-reply", "resolved"]),
+        Thread.state.in_(["auto-reply", "resolved", "taken-over"]),
     ).all()
     for thread in threads:
         latest = db.query(Message).filter(Message.thread_id == thread.id).order_by(
             Message.at.desc(), Message.id.desc()
         ).first()
         if not latest or latest.role != "customer":
+            continue
+        cleared_draft_event = db.query(ThreadEvent).filter(
+            ThreadEvent.thread_id == thread.id,
+            ThreadEvent.type == "drafts-cleared",
+            ThreadEvent.at >= latest.at,
+        ).order_by(ThreadEvent.at.desc()).first()
+        retry_after_clear = thread.state == "taken-over" and cleared_draft_event is not None
+        if thread.state == "taken-over" and not retry_after_clear:
             continue
         missed_events = db.query(ThreadEvent).filter(
             ThreadEvent.thread_id == thread.id,
@@ -2755,7 +2763,7 @@ def find_oldest_catch_up_candidate(db: Session):
         # Old conversations predate explicit missed-message markers. Waiting
         # three minutes keeps this fallback clear of the normal 30–120s worker.
         old_enough = latest.at <= datetime.utcnow() - timedelta(minutes=3)
-        if explicitly_missed or old_enough:
+        if explicitly_missed or old_enough or retry_after_clear:
             candidates.append((latest.at, latest.id, thread, latest))
     if not candidates:
         return None

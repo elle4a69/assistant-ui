@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import main
-from main import Base, Message, SettingsUpdateInput, Thread, ThreadEvent
+from main import Base, Message, SettingsUpdateInput, Thread, ThreadEvent, find_oldest_catch_up_candidate
 
 
 def make_db():
@@ -44,8 +44,10 @@ def test_clear_pending_drafts_removes_all_drafts_and_updates_threads():
     add_thread(db, "thread-001")
     add_thread(db, "thread-002")
     db.add_all([
+        Message(id="customer-1", thread_id="thread-001", role="customer", text="Please reply", at=datetime.utcnow()),
         Message(id="draft-1", thread_id="thread-001", role="draft", text="First", at=datetime.utcnow()),
         Message(id="draft-2", thread_id="thread-001", role="draft", text="Second", at=datetime.utcnow()),
+        Message(id="customer-2", thread_id="thread-002", role="customer", text="Already handled", at=datetime.utcnow()),
         Message(id="draft-3", thread_id="thread-002", role="draft", text="Third", at=datetime.utcnow()),
         Message(id="agent-1", thread_id="thread-002", role="agent", text="Keep me", at=datetime.utcnow()),
     ])
@@ -60,6 +62,9 @@ def test_clear_pending_drafts_removes_all_drafts_and_updates_threads():
     events = db.query(ThreadEvent).filter(ThreadEvent.type == "drafts-cleared").all()
     assert len(events) == 2
     assert sorted(json.loads(event.meta)["count"] for event in events) == [1, 2]
+    retry_thread, retry_message = find_oldest_catch_up_candidate(db)
+    assert retry_thread.id == "thread-001"
+    assert retry_message.id == "customer-1"
     assert main.clear_pending_draft_messages(db) == {
         "status": "success",
         "removedDrafts": 0,
