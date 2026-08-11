@@ -1555,6 +1555,84 @@ class GoogleCalendarService:
         if hasattr(self, "_cache"):
             self._cache[cache_key] = (now_ts, parsed_busy)
         return parsed_busy
+
+    def get_customer_bookings(
+        self,
+        customer_phone: str,
+        start: datetime,
+        end: datetime,
+        db: Optional[Session] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return real calendar events owned by one customer, with local times."""
+        from zoneinfo import ZoneInfo
+
+        tz_hobart = ZoneInfo("Australia/Hobart")
+        start_aware = start.astimezone(tz_hobart) if start.tzinfo else start.replace(tzinfo=tz_hobart)
+        end_aware = end.astimezone(tz_hobart) if end.tzinfo else end.replace(tzinfo=tz_hobart)
+        canonical_customer = canonical_phone_number(customer_phone)
+        results: List[Dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+
+        if self.service:
+            try:
+                calendar_id = os.getenv("CALENDAR_ID", "primary")
+                response = self.service.events().list(
+                    calendarId=calendar_id,
+                    timeMin=start_aware.isoformat(),
+                    timeMax=end_aware.isoformat(),
+                    orderBy="startTime",
+                    singleEvents=True,
+                ).execute()
+                for event_item in response.get("items", []):
+                    description = event_item.get("description", "") or ""
+                    private = event_item.get("extendedProperties", {}).get("private", {})
+                    event_phone = private.get("customer_phone")
+                    if not event_phone and "Customer phone:" in description:
+                        event_phone = description.split("Customer phone:", 1)[1].splitlines()[0].strip()
+                    if canonical_phone_number(event_phone or "") != canonical_customer:
+                        continue
+                    start_raw = event_item.get("start", {}).get("dateTime")
+                    end_raw = event_item.get("end", {}).get("dateTime")
+                    if not start_raw or not end_raw:
+                        continue
+                    event_start = datetime.fromisoformat(start_raw.replace("Z", "+00:00")).astimezone(tz_hobart)
+                    event_end = datetime.fromisoformat(end_raw.replace("Z", "+00:00")).astimezone(tz_hobart)
+                    key = (event_start.isoformat(), event_end.isoformat())
+                    seen.add(key)
+                    results.append({
+                        "id": event_item.get("id"),
+                        "summary": event_item.get("summary", "Appointment"),
+                        "start": event_start,
+                        "end": event_end,
+                    })
+            except Exception as exc:
+                print(f"Error listing customer Google Calendar bookings: {exc}")
+
+        owns_session = db is None
+        local_db = db or self.db_session_factory()
+        try:
+            local_events = local_db.query(CalendarEvent).filter(
+                CalendarEvent.start_time < end_aware.replace(tzinfo=None),
+                CalendarEvent.end_time > start_aware.replace(tzinfo=None),
+            ).all()
+            for event_item in local_events:
+                if canonical_phone_number(event_item.customer_phone or "") != canonical_customer:
+                    continue
+                event_start = event_item.start_time.replace(tzinfo=tz_hobart)
+                event_end = event_item.end_time.replace(tzinfo=tz_hobart)
+                key = (event_start.isoformat(), event_end.isoformat())
+                if key in seen:
+                    continue
+                results.append({
+                    "id": event_item.id,
+                    "summary": event_item.summary,
+                    "start": event_start,
+                    "end": event_end,
+                })
+        finally:
+            if owns_session:
+                local_db.close()
+        return sorted(results, key=lambda item: item["start"])
             
     def create_booking(self, summary: str, start: datetime, end: datetime, customer_phone: str) -> bool:
         # Clear cache on modification
@@ -1574,6 +1652,9 @@ class GoogleCalendarService:
                 event_body = {
                     "summary": summary,
                     "description": f"Customer phone: {customer_phone}",
+                    "extendedProperties": {
+                        "private": {"customer_phone": canonical_phone_number(customer_phone)}
+                    },
                     "start": {
                         "dateTime": start_aware.isoformat(),
                     },
@@ -1581,7 +1662,25 @@ class GoogleCalendarService:
                         "dateTime": end_aware.isoformat(),
                     }
                 }
-                self.service.events().insert(calendarId=calendar_id, body=event_body).execute()
+                created = self.service.events().insert(calendarId=calendar_id, body=event_body).execute() or {}
+                # Mirror Google bookings locally so ownership remains available even when
+                # free/busy only returns anonymous occupied intervals.
+                db = self.db_session_factory()
+                try:
+                    booking = CalendarEvent(
+                        id=created.get("id") or str(uuid.uuid4()),
+                        customer_phone=customer_phone,
+                        summary=summary,
+                        start_time=start_aware.replace(tzinfo=None),
+                        end_time=end_aware.replace(tzinfo=None),
+                    )
+                    db.merge(booking)
+                    db.commit()
+                except Exception as mirror_exc:
+                    db.rollback()
+                    print(f"Google booking created but local ownership mirror failed: {mirror_exc}")
+                finally:
+                    db.close()
                 return True
             except Exception as e:
                 print(f"Error creating Google Calendar booking: {e}. Falling back to SQLite.")
@@ -1937,6 +2036,101 @@ def parse_business_datetime(value: str) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=business_tz)
     return parsed.astimezone(business_tz)
+
+
+UNSAFE_HOLDING_REPLY_PATTERNS = (
+    r"\b(?:i |we )?(?:can(?:not|'t)|could(?: not|n't)) check (?:that|it).*(?:right now|at the moment|properly)\b",
+    r"\b(?:i(?:'ll| will)|we(?:'ll| will)) get back to you\b",
+    r"\b(?:just|give me) (?:a sec|a second|a moment)\b",
+    r"\b(?:hang|hold) on(?: a moment)?\b",
+    r"\bi(?:'ve| have) got your message.*(?:shortly|right now|at the moment)\b",
+)
+
+
+def unsafe_ai_reply_reason(reply: str, requested_booking_confirmed: bool = False) -> Optional[str]:
+    """Reject low-information or contradictory AI text before it can become an SMS."""
+    normalized = " ".join((reply or "").casefold().replace("’", "'").split())
+    if any(re.search(pattern, normalized) for pattern in UNSAFE_HOLDING_REPLY_PATTERNS):
+        return "generic-holding-reply"
+    if requested_booking_confirmed and re.search(
+        r"\b(?:no longer available|been taken|isn't available|not available)\b",
+        normalized,
+    ):
+        return "contradicts-customer-booking"
+    return None
+
+
+def extract_requested_business_time(message: str, now_local: datetime) -> Optional[datetime]:
+    """Extract an explicit customer time such as 3:35 or 4pm in local business time."""
+    match = re.search(
+        r"(?<!\d)(1[0-2]|0?[1-9])(?:(?::|\.)([0-5]\d))\s*(am|pm)?\b",
+        (message or "").casefold(),
+    )
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    meridiem = match.group(3)
+    if meridiem:
+        hour = (hour % 12) + (12 if meridiem == "pm" else 0)
+        return now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    candidates = []
+    for candidate_hour in {hour % 12, (hour % 12) + 12}:
+        candidate = now_local.replace(hour=candidate_hour, minute=minute, second=0, microsecond=0)
+        candidates.append(candidate)
+    plausible = [candidate for candidate in candidates if candidate >= now_local - timedelta(minutes=30)]
+    return min(plausible or candidates, key=lambda candidate: abs((candidate - now_local).total_seconds()))
+
+
+def human_replied_after(db: Session, thread_id: str, received_at: datetime) -> bool:
+    """Return true when an operator has answered since the specified inbound message."""
+    event_exists = db.query(ThreadEvent.id).filter(
+        ThreadEvent.thread_id == thread_id,
+        ThreadEvent.type == "human-reply-sent",
+        ThreadEvent.at > received_at,
+    ).first()
+    if event_exists:
+        return True
+    return db.query(Message.id).filter(
+        Message.thread_id == thread_id,
+        Message.role == "agent",
+        Message.at > received_at,
+        Message.provider_message_id.like("manual-reply:%"),
+    ).first() is not None
+
+
+def customer_booking_guidance(
+    bookings: List[Dict[str, Any]],
+    requested_time: Optional[datetime],
+) -> tuple[str, bool]:
+    """Render authoritative ownership context and flag an exact booking confirmation."""
+    if not bookings:
+        return "Customer booking context: no existing booking was found for this customer.", False
+    lines = ["Customer booking context (authoritative; these bookings belong to this customer):"]
+    requested_confirmed = False
+    for booking in bookings:
+        start = booking["start"]
+        end = booking["end"]
+        lines.append(
+            f"- {start.strftime('%A %d %B at %I:%M %p')} to {end.strftime('%I:%M %p')}: "
+            f"{booking.get('summary') or 'Appointment'}"
+        )
+        if requested_time and requested_time == start:
+            requested_confirmed = True
+    if requested_time:
+        lines.append(f"Customer's explicit requested time: {requested_time.strftime('%I:%M %p')}.")
+        if requested_confirmed:
+            lines.append(
+                "That exact time is already this customer's confirmed booking. Confirm it; "
+                "never call it unavailable and never offer a replacement time."
+            )
+        elif any(booking["start"] < requested_time + timedelta(minutes=30) and booking["end"] > requested_time for booking in bookings):
+            lines.append(
+                "The requested time overlaps this customer's own booking. Do not describe it as "
+                "another customer's conflict; clarify whether they want their existing booking moved."
+            )
+    return "\n".join(lines), requested_confirmed
 
 
 def build_broad_availability_guidance(
@@ -2330,6 +2524,18 @@ def run_sms_reply_logic(
     thread = db.query(Thread).filter(Thread.id == thread_id).first()
     if not thread:
         return False, False
+    if not draft_only and human_replied_after(db, thread_id, received_at_naive):
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread_id,
+            type="ai-reply-cancelled",
+            agent_id=None,
+            meta=json.dumps({"reason": "human-replied", "received_at": received_at_naive.isoformat()}),
+            at=datetime.utcnow(),
+        ))
+        db.commit()
+        print(f"[Autoresponder Cancelled] Human already replied on {thread_id}.")
+        return False, False
         
     booking_confirmed = False
     slots_presented = False
@@ -2341,8 +2547,9 @@ def run_sms_reply_logic(
     now_local = current_business_time()
     reply_at_naive = datetime.utcnow()
     
-    # Step 2: Query next 3 available slots using configured working hours
-    dt = now_local + timedelta(hours=1)
+    # Step 2: Query next 3 available slots from the next real quarter-hour.
+    # An arbitrary one-hour lead previously hid valid openings such as 4:15 at 3:31.
+    dt = now_local
     minutes = 15 * ((dt.minute + 14) // 15)
     dt = dt.replace(minute=0, second=0, microsecond=0) + timedelta(minutes=minutes)
 
@@ -2350,6 +2557,17 @@ def run_sms_reply_logic(
     wh_by_day = {entry["day"]: entry for entry in wh}
 
     busy_slots = calendar_service.get_busy_slots(dt, dt + timedelta(days=14))
+    customer_bookings = calendar_service.get_customer_bookings(
+        thread.customer_phone,
+        now_local - timedelta(days=1),
+        now_local + timedelta(days=14),
+        db=db,
+    )
+    requested_time = extract_requested_business_time(body, now_local)
+    booking_guidance, requested_booking_confirmed = customer_booking_guidance(
+        customer_bookings,
+        requested_time,
+    )
     free_slots = []
     limit_dt = dt + timedelta(days=14)
     while dt < limit_dt and len(free_slots) < 3:
@@ -2386,6 +2604,7 @@ def run_sms_reply_logic(
     )
     if broad_availability_guidance:
         slots_str += f"\n{broad_availability_guidance}"
+    slots_str += f"\n{booking_guidance}"
 
     # Populate pending_slots and slots_presented for booking intent
     scheduling_keywords = ["book", "schedule", "appointment", "free", "busy", "slot", "when"]
@@ -2480,6 +2699,12 @@ def run_sms_reply_logic(
                 system_prompt_rendered,
                 examples,
                 STYLE_PROFILE_STORE.get_applied(),
+            )
+            instructions += (
+                "\n\nSafety rule: never send a holding response such as 'I'll get back to you', "
+                "'I can't check that right now', 'just a sec', or similar. If the supplied facts "
+                "do not support a direct, correct reply, output exactly [[HANDOFF: concise reason]]. "
+                "A human reply later than the customer's message is authoritative; do not contradict it."
             )
             if draft_only:
                 instructions += (
@@ -2586,7 +2811,15 @@ def run_sms_reply_logic(
             print(f"OpenAI error: {e}. No reply was created or sent.")
             assistant_reply = None
             
-    # Fail closed: an unavailable or invalid AI response must never be replaced
+    rejected_reply_reason = unsafe_ai_reply_reason(
+        assistant_reply or "",
+        requested_booking_confirmed=requested_booking_confirmed,
+    )
+    if rejected_reply_reason:
+        print(f"[AI Reply Rejected] {rejected_reply_reason} on thread {thread_id}.")
+        assistant_reply = None
+
+    # Fail closed: an unavailable, unsafe, or invalid AI response must never be replaced
     # with invented, canned, simulated, or mock customer-facing content.
     if not assistant_reply:
         thread.state = "needs-review"
@@ -2602,7 +2835,7 @@ def run_sms_reply_logic(
             type="ai-reply-failed",
             agent_id=None,
             meta=json.dumps({
-                "reason": "AI response unavailable; nothing was created or sent",
+                "reason": rejected_reply_reason or "AI response unavailable; nothing was created or sent",
                 "message_id": latest_customer_message.id if latest_customer_message else None,
             }),
             at=datetime.utcnow(),
@@ -2612,13 +2845,16 @@ def run_sms_reply_logic(
             
     assistant_reply = sanitize_outgoing_urls(assistant_reply)
 
-    catch_up_handoff = (
-        re.fullmatch(r"\s*\[\[HANDOFF(?::\s*(.*?))?\]\]\s*", assistant_reply or "", re.IGNORECASE)
-        if draft_only else None
+    catch_up_handoff = re.fullmatch(
+        r"\s*\[\[HANDOFF(?::\s*(.*?))?\]\]\s*",
+        assistant_reply or "",
+        re.IGNORECASE,
     )
     if catch_up_handoff:
         reason = (catch_up_handoff.group(1) or "Human guidance requested").strip()
         thread.state = "needs-review"
+        thread.pending_slots = None
+        slots_presented = False
         latest_customer_message = db.query(Message).filter(
             Message.thread_id == thread.id,
             Message.role == "customer",
@@ -2659,6 +2895,25 @@ def run_sms_reply_logic(
         )
         db.add(event_log)
     else:
+        # The model call can take several seconds. Re-check immediately before
+        # dispatch so a human answer sent while the model was working wins.
+        db.expire_all()
+        if human_replied_after(db, thread_id, received_at_naive):
+            thread = db.query(Thread).filter(Thread.id == thread_id).first()
+            if thread:
+                thread.pending_slots = None
+            db.add(ThreadEvent(
+                id=str(uuid.uuid4()),
+                thread_id=thread_id,
+                type="ai-reply-cancelled",
+                agent_id=None,
+                meta=json.dumps({"reason": "human-replied-during-generation"}),
+                at=datetime.utcnow(),
+            ))
+            db.commit()
+            print(f"[Autoresponder Cancelled] Human replied while AI was working on {thread_id}.")
+            return False, False
+
         # Store as sent only after the gateway accepts the SMS. On failure the
         # reply remains a visible draft for human retry/review.
         system_message = Message(
@@ -2678,6 +2933,7 @@ def run_sms_reply_logic(
             meta_dict["bookingConfirmed"] = True
             
         delivery_failure = None
+        dispatch_result: Dict[str, Any] = {}
         if dispatch_sms:
             # Genuine carrier webhooks are dispatched. The internal simulator
             # displays the stored reply and must never send a real SMS.
@@ -2864,6 +3120,9 @@ def process_first_contact_auto_reply_delayed(
         ).first()
         if not thread or not customer_message:
             print(f"[First Contact Delay] Thread or message no longer exists for {thread_id}. Reply canceled.")
+            return
+        if human_replied_after(db, thread_id, customer_message.at):
+            print(f"[First Contact Delay] Human already replied on {thread_id}. Reply canceled.")
             return
         if not thread.auto_reply_enabled or thread.state == "taken-over":
             print(f"[First Contact Delay] Automatic replies are off for {thread_id}. Reply canceled.")
@@ -3435,6 +3694,14 @@ def reply_thread(thread_id: str, payload: ReplyInput, db: Session = Depends(get_
             raise HTTPException(status_code=502, detail=f"SMS was not sent. {delivery_failure[:500]}")
 
         db.add(agent_message)
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread.id,
+            type="human-reply-sent",
+            agent_id=payload.agentId,
+            meta=json.dumps({"message_id": agent_message.id}),
+            at=now,
+        ))
         thread.updated_at = now
         thread.unread_count = 0
         db.commit()
