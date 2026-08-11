@@ -2496,8 +2496,13 @@ def run_sms_reply_logic(
             
             if tool_calls:
                 input_history.extend(
-                    item.model_dump() if hasattr(item, "model_dump") else item
-                    for item in (response.output or [])
+                    {
+                        "type": "function_call",
+                        "call_id": item.call_id,
+                        "name": item.name,
+                        "arguments": item.arguments,
+                    }
+                    for item in tool_calls
                 )
 
                 source_message = None
@@ -2567,12 +2572,15 @@ def run_sms_reply_logic(
                 assistant_reply = response.output_text
                 
         except Exception as e:
-            print(f"OpenAI error: {e}. Falling back to simulation.")
+            print(f"OpenAI error: {e}. No reply was created or sent.")
             assistant_reply = None
             
-    # Step 6: Simulation / Mock Fallback if OpenAI call fails/unavailable
-    if not assistant_reply and draft_only:
+    # Fail closed: an unavailable or invalid AI response must never be replaced
+    # with invented, canned, simulated, or mock customer-facing content.
+    if not assistant_reply:
         thread.state = "needs-review"
+        thread.pending_slots = None
+        slots_presented = False
         latest_customer_message = db.query(Message).filter(
             Message.thread_id == thread.id,
             Message.role == "customer",
@@ -2580,40 +2588,16 @@ def run_sms_reply_logic(
         db.add(ThreadEvent(
             id=str(uuid.uuid4()),
             thread_id=thread.id,
-            type="information-request",
+            type="ai-reply-failed",
             agent_id=None,
             meta=json.dumps({
-                "reason": "AI response unavailable",
-                "status": "pending",
-                "customer_message_id": latest_customer_message.id if latest_customer_message else None,
+                "reason": "AI response unavailable; nothing was created or sent",
+                "message_id": latest_customer_message.id if latest_customer_message else None,
             }),
             at=datetime.utcnow(),
         ))
         db.commit()
         return booking_confirmed, slots_presented
-
-    if not assistant_reply:
-        scheduling_keywords = ["book", "schedule", "appointment", "free", "busy", "slot", "when"]
-        has_scheduling_intent = any(kw in clean_body for kw in scheduling_keywords)
-        
-        if has_scheduling_intent:
-            if free_slots:
-                slot_options = []
-                readable_slots = []
-                for i, (s, e) in enumerate(free_slots):
-                    slot_options.append({
-                        "start": s.isoformat(),
-                        "end": e.isoformat()
-                    })
-                    readable_slots.append(f"{i+1}) {s.strftime('%a at %I:%M %p')}")
-                assistant_reply = (
-                    f"I've got {', '.join(readable_slots)}. Which one works for you?"
-                )
-                thread.pending_slots = json.dumps(slot_options)
-                slots_presented = True
-                
-        if not assistant_reply:
-            assistant_reply = "Hey, I've got your message but I can't check that properly right now. I'll get back to you shortly."
             
     assistant_reply = sanitize_outgoing_urls(assistant_reply)
 
@@ -4614,8 +4598,8 @@ def handle_locanto_message(payload: LocantoMessagePayload, db: Session = Depends
                 )
                 reply_text = response.output_text
             except Exception as openai_err:
-                print(f"[Locanto API Error] OpenAI failed: {openai_err}")
-                reply_text = "Hey, I've got your message but I can't check that properly right now. I'll get back to you shortly."
+                print(f"[Locanto API Error] OpenAI failed: {openai_err}. No reply was created or returned.")
+                reply_text = None
 
         reply_text = sanitize_outgoing_urls(reply_text)
         if reply_text:
@@ -4672,6 +4656,20 @@ def handle_locanto_message(payload: LocantoMessagePayload, db: Session = Depends
                     "status": "success",
                     "replyText": reply_text
                 }
+        if not reply_text and not qa_reply:
+            thread.state = "needs-review"
+            db.add(ThreadEvent(
+                id=str(uuid.uuid4()),
+                thread_id=thread.id,
+                type="ai-reply-failed",
+                agent_id=None,
+                meta=json.dumps({
+                    "reason": "AI response unavailable; nothing was created or returned",
+                    "message_id": incoming_msg.id,
+                }),
+                at=datetime.utcnow(),
+            ))
+            db.commit()
         return {"status": "success", "replyText": None}
     except Exception as e:
         db.rollback()
