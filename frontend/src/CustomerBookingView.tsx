@@ -563,42 +563,51 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
               ) : services.length === 0 ? null : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   {services.map(srv => (
-                    <div
+                    <article
                       key={srv.id}
-                      onClick={() => { setSelectedService(srv); setStep(2); }}
-                      className="group bg-white rounded-xl border border-slate-150 p-4 shadow-sm hover:border-[#7a0b2e]/30 hover:shadow-md transition-all flex flex-col justify-between gap-3 cursor-pointer min-h-[140px]"
+                      className="group relative overflow-hidden rounded-xl border border-white/15 bg-slate-950/80 shadow-sm transition-colors hover:border-[#7a0b2e]/70"
                     >
-                      <div className="flex flex-col gap-1 min-w-0">
-                        <h3 className="font-bold text-slate-800 text-sm sm:text-base leading-snug">{srv.name}</h3>
-                        <p className={`text-xs text-slate-600 leading-relaxed font-semibold ${expandedServiceId === srv.id ? '' : 'line-clamp-3'}`}>
-                          {srv.description}
-                        </p>
-                        {srv.description && srv.description.length > 140 && (
-                          <button
-                            type="button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              setExpandedServiceId(current => current === srv.id ? null : srv.id);
-                            }}
-                            aria-expanded={expandedServiceId === srv.id}
-                            className="self-start bg-transparent border-none p-0 text-[11px] font-bold text-[#7a0b2e] hover:underline cursor-pointer"
-                          >
-                            {expandedServiceId === srv.id ? 'Less' : 'More'}
-                          </button>
-                        )}
+                      <button
+                        type="button"
+                        aria-label={`Select ${srv.name}`}
+                        onClick={() => { setSelectedService(srv); setStep(2); }}
+                        className="absolute inset-0 z-0 cursor-pointer rounded-xl bg-transparent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#d2143a]"
+                      />
+
+                      <div className="relative z-10 pointer-events-none flex min-h-12 items-center bg-[#7a0b2e] px-4 py-2.5">
+                        <h3 className="text-balance text-sm font-bold leading-snug text-white sm:text-base">{srv.name}</h3>
                       </div>
-                      <div className="flex items-center justify-between mt-auto pt-2.5 border-t border-slate-100 shrink-0">
-                        {srv.showDuration !== false && (
-                          <span className="text-xs text-slate-500 font-bold">
-                            {srv.duration >= 60 ? `${srv.duration / 60} hr.` : `${srv.duration} min.`}
-                          </span>
-                        )}
-                        <div className="ml-auto flex items-center gap-3">
-                          <span className="font-extrabold text-[#7a0b2e] text-sm sm:text-base">AU${srv.price}</span>
-                          <span className="text-xs font-bold text-[#7a0b2e] bg-[#7a0b2e]/5 px-3 py-1.5 rounded-lg border border-[#7a0b2e]/10 group-hover:bg-[#7a0b2e] group-hover:text-white transition-all">Select</span>
+
+                      <div className="relative z-10 pointer-events-none flex flex-col gap-3 p-3.5">
+                        <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+                          <p className={`text-pretty text-xs font-medium leading-relaxed text-slate-300 ${expandedServiceId === srv.id ? '' : 'line-clamp-4'}`}>
+                            {srv.description}
+                          </p>
+                          {srv.description && srv.description.length > 140 && (
+                            <button
+                              type="button"
+                              onClick={() => setExpandedServiceId(current => current === srv.id ? null : srv.id)}
+                              aria-expanded={expandedServiceId === srv.id}
+                              className="pointer-events-auto self-start border-none bg-transparent p-0 text-[11px] font-bold text-rose-300 hover:text-white hover:underline cursor-pointer"
+                            >
+                              {expandedServiceId === srv.id ? 'Less' : 'More'}
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2 border-t border-white/10 pt-2.5">
+                          {srv.showDuration !== false && (
+                            <span className="text-xs font-bold text-slate-400">
+                              {srv.duration >= 60 ? `${srv.duration / 60} hr.` : `${srv.duration} min.`}
+                            </span>
+                          )}
+                          <div className="ml-auto flex items-center gap-2.5">
+                            <span className="tabular-nums text-sm font-extrabold text-white sm:text-base">AU${srv.price}</span>
+                            <span className="rounded-md border border-rose-300/20 bg-[#7a0b2e] px-3 py-1.5 text-xs font-bold text-white transition-colors group-hover:bg-[#92123b]">Select</span>
+                          </div>
                         </div>
                       </div>
-                    </div>
+                    </article>
                   ))}
                 </div>
               )}
