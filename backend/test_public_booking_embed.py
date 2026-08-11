@@ -19,6 +19,7 @@ def request_for(path: str, method: str = "GET") -> Request:
 
 
 def test_booking_embed_assets_are_public():
+    assert is_public_request(request_for("/booking-inline.js"))
     assert is_public_request(request_for("/widget.js"))
     assert is_public_request(request_for("/v2"))
     assert is_public_request(request_for("/v2/"))

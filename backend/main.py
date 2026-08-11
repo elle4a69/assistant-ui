@@ -1820,6 +1820,7 @@ PUBLIC_EXACT_PATHS = {
     "/openapi.json",
     "/api/health",
     "/booking",
+    "/booking-inline.js",
     "/landing.html",
     "/widget.js",
     "/manifest.json",
