@@ -6,9 +6,11 @@ import {
   saveBusinessVariables,
   BusinessVariable,
   listKnowledgeFiles,
+  createManualLearning,
   uploadKnowledgeFile,
   uploadCredentialsFile,
   KnowledgeFile,
+  ManualLearningEntry,
   getKnowledgeFile,
   saveKnowledgeFile,
   deleteKnowledgeFile,
@@ -128,6 +130,10 @@ export default function SettingsView() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [uploadingKnowledge, setUploadingKnowledge] = useState(false);
   const [uploadingCreds, setUploadingCreds] = useState(false);
+  const [learningTopic, setLearningTopic] = useState('');
+  const [learningGuidance, setLearningGuidance] = useState('');
+  const [savingLearning, setSavingLearning] = useState(false);
+  const [lastSavedLearning, setLastSavedLearning] = useState<ManualLearningEntry | null>(null);
 
   // Modal states for File Editor & Moderation
   const [activeEditFile, setActiveEditFile] = useState<string | null>(null);
@@ -424,6 +430,31 @@ export default function SettingsView() {
     } finally {
       setUploadingKnowledge(false);
       e.target.value = ''; // clear input
+    }
+  };
+
+  const handleCreateLearning = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const topic = learningTopic.trim();
+    const guidance = learningGuidance.trim();
+    if (!topic || !guidance) return;
+
+    setSavingLearning(true);
+    try {
+      const result = await createManualLearning(topic, guidance);
+      setLastSavedLearning(result.entry);
+      setLearningTopic('');
+      setLearningGuidance('');
+      triggerBanner('success', `Learning saved to ${result.filename} and is available to the AI now.`);
+      await fetchKnowledgeFilesList();
+    } catch (err) {
+      console.error(err);
+      triggerBanner(
+        'error',
+        err instanceof Error ? err.message : 'The learning could not be structured. Nothing was saved.',
+      );
+    } finally {
+      setSavingLearning(false);
     }
   };
 
@@ -1219,9 +1250,79 @@ export default function SettingsView() {
             <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
               <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
                 <FileText className="w-5 h-5 text-indigo-600" />
-                <h2 className="font-bold text-slate-800 text-sm">Knowledge Documents (Local RAG)</h2>
+                <div>
+                  <h2 className="font-bold text-slate-800 text-sm">Learned Material &amp; Knowledge Documents</h2>
+                  <p className="text-[10px] text-slate-500 mt-0.5">Teach a situation directly or manage the underlying Local RAG files.</p>
+                </div>
               </div>
               <div className="p-5 flex flex-col gap-5">
+
+                <form onSubmit={handleCreateLearning} className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-4 flex flex-col gap-3">
+                  <div className="flex items-start gap-2.5">
+                    <div className="mt-0.5 h-8 w-8 rounded-lg bg-indigo-100 text-indigo-700 flex items-center justify-center shrink-0">
+                      <BookOpen className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="text-xs font-bold text-indigo-950">Add learned guidance</h3>
+                      <p className="text-[10px] leading-relaxed text-indigo-800 mt-0.5">
+                        Write rough notes in your own words. The AI will turn them into a reusable instruction and only add an example reply when your notes actually provide wording.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3">
+                    <div className="flex flex-col gap-1.5">
+                      <label htmlFor="learning-topic" className="text-[10px] font-bold uppercase tracking-wider text-slate-600">Topic or situation</label>
+                      <input
+                        id="learning-topic"
+                        value={learningTopic}
+                        onChange={(event) => setLearningTopic(event.target.value)}
+                        maxLength={500}
+                        placeholder="e.g. Customer asks to change their existing booking time"
+                        className="w-full rounded-lg border border-slate-300 bg-white p-2.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <label htmlFor="learning-guidance" className="text-[10px] font-bold uppercase tracking-wider text-slate-600">What should the AI do or say?</label>
+                      <textarea
+                        id="learning-guidance"
+                        value={learningGuidance}
+                        onChange={(event) => setLearningGuidance(event.target.value)}
+                        rows={5}
+                        maxLength={6000}
+                        placeholder="Describe the action, rule, or suggested wording. It can be messy; the AI will structure it without adding new facts."
+                        className="w-full resize-y rounded-lg border border-slate-300 bg-white p-2.5 text-xs leading-relaxed text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                      <p className="text-[9px] text-slate-500">Procedures and policies are saved as instructions. Exact wording is saved as an example only when you supply it.</p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 border-t border-indigo-100 pt-3">
+                    <span className="text-[9px] font-semibold text-indigo-700">Nothing is saved if the AI cannot structure it safely.</span>
+                    <button
+                      type="submit"
+                      disabled={savingLearning || !learningTopic.trim() || !learningGuidance.trim()}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-transparent bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-45 cursor-pointer shrink-0"
+                    >
+                      {savingLearning ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                      {savingLearning ? 'Structuring...' : 'Add to learned material'}
+                    </button>
+                  </div>
+
+                  {lastSavedLearning && (
+                    <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-[10px] text-emerald-950">
+                      <div className="flex items-center gap-1.5 font-bold mb-1.5">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> Last learning added
+                      </div>
+                      <p><strong>Topic:</strong> {lastSavedLearning.topic}</p>
+                      <p className="mt-1"><strong>Applies when:</strong> {lastSavedLearning.applies_when}</p>
+                      <p className="mt-1"><strong>Instruction:</strong> {lastSavedLearning.instruction}</p>
+                      {lastSavedLearning.example_reply && (
+                        <p className="mt-1"><strong>Example reply:</strong> {lastSavedLearning.example_reply}</p>
+                      )}
+                    </div>
+                  )}
+                </form>
                 
                 {/* List of files */}
                 <div>

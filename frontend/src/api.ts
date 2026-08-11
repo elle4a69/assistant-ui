@@ -456,6 +456,20 @@ export interface KnowledgeFile {
   sizeBytes: number;
 }
 
+export interface ManualLearningEntry {
+  id: string;
+  type: 'manual_guidance';
+  topic: string;
+  applies_when: string;
+  instruction: string;
+  example_reply: string;
+  owner_topic: string;
+  owner_guidance: string;
+  text: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export async function getSettings(): Promise<SystemSettings> {
   const response = await fetch(`${API_BASE}/api/settings`, { cache: 'no-store' });
   if (!response.ok) {
@@ -539,6 +553,22 @@ export async function listKnowledgeFiles(): Promise<KnowledgeFile[]> {
   const response = await fetch(`${API_BASE}/api/settings/knowledge-files`);
   if (!response.ok) {
     throw new Error(`Failed to list knowledge files: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function createManualLearning(
+  topic: string,
+  guidance: string,
+): Promise<{ status: string; filename: string; entry: ManualLearningEntry }> {
+  const response = await fetch(`${API_BASE}/api/settings/learnings`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ topic, guidance }),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || 'The learning could not be structured. Nothing was saved.');
   }
   return response.json();
 }

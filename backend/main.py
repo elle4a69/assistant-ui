@@ -1329,6 +1329,7 @@ def build_business_context(query: str, limit: int = 3) -> str:
 
 
 LEARNED_INFORMATION_FILENAME = "learned_information.jsonl"
+LEARNED_INFORMATION_LOCK = threading.Lock()
 
 
 def _parse_json_object(text: str) -> Dict[str, Any]:
@@ -1411,8 +1412,6 @@ def save_learned_information(
     knowledge_summary: str,
 ) -> str:
     """Atomically upsert one reusable learned-information record and refresh RAG."""
-    os.makedirs(KNOWLEDGE_DIR, exist_ok=True)
-    filepath = os.path.join(KNOWLEDGE_DIR, LEARNED_INFORMATION_FILENAME)
     entry = {
         "id": request_event_id,
         "type": "information_request_resolution",
@@ -1421,27 +1420,123 @@ def save_learned_information(
         "text": knowledge_summary.strip(),
         "updated_at": datetime.utcnow().isoformat() + "Z",
     }
-    retained_lines = []
-    if os.path.exists(filepath):
-        with open(filepath, "r", encoding="utf-8") as handle:
-            for raw_line in handle:
-                line = raw_line.rstrip("\n")
-                if not line.strip():
-                    continue
-                try:
-                    existing = json.loads(line)
-                except json.JSONDecodeError:
-                    retained_lines.append(line)
-                    continue
-                if not isinstance(existing, dict) or existing.get("id") != request_event_id:
-                    retained_lines.append(line)
-    retained_lines.append(json.dumps(entry, ensure_ascii=False))
-    temp_path = f"{filepath}.{uuid.uuid4().hex}.tmp"
-    with open(temp_path, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(retained_lines) + "\n")
-    os.replace(temp_path, filepath)
-    load_knowledge_base()
+    _upsert_learned_information_entry(entry)
     return LEARNED_INFORMATION_FILENAME
+
+
+def _upsert_learned_information_entry(entry: Dict[str, Any]) -> None:
+    """Write one JSONL learning safely, retaining malformed legacy lines."""
+    entry_id = str(entry.get("id", "")).strip()
+    if not entry_id:
+        raise ValueError("A learned-information entry requires an id.")
+    os.makedirs(KNOWLEDGE_DIR, exist_ok=True)
+    filepath = os.path.join(KNOWLEDGE_DIR, LEARNED_INFORMATION_FILENAME)
+    with LEARNED_INFORMATION_LOCK:
+        retained_lines = []
+        if os.path.exists(filepath):
+            with open(filepath, "r", encoding="utf-8") as handle:
+                for raw_line in handle:
+                    line = raw_line.rstrip("\n")
+                    if not line.strip():
+                        continue
+                    try:
+                        existing = json.loads(line)
+                    except json.JSONDecodeError:
+                        retained_lines.append(line)
+                        continue
+                    if not isinstance(existing, dict) or existing.get("id") != entry_id:
+                        retained_lines.append(line)
+        retained_lines.append(json.dumps(entry, ensure_ascii=False))
+        temp_path = f"{filepath}.{uuid.uuid4().hex}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(retained_lines) + "\n")
+        os.replace(temp_path, filepath)
+    load_knowledge_base()
+
+
+def generate_manual_learning(topic: str, owner_guidance: str) -> Dict[str, str]:
+    """Structure rough owner notes without creating facts or a fallback entry."""
+    if not openai_client:
+        raise HTTPException(
+            status_code=503,
+            detail="The AI is unavailable, so nothing was added to learned material.",
+        )
+
+    instructions = (
+        "You structure authoritative business-owner guidance for a customer-service AI knowledge base. "
+        "Preserve the owner's meaning and distinguish an operational action from suggested wording. "
+        "Do not invent facts, prices, availability, policies, names, locations, promises, or steps. "
+        "Write instruction as a concise imperative describing what the AI should do. Only populate "
+        "example_reply when the owner supplied wording or clearly asked what to say; otherwise use an "
+        "empty string. Make applies_when specific enough for retrieval but broadly reusable. Return only "
+        "valid JSON with exactly these string fields: topic, applies_when, instruction, example_reply."
+    )
+    prompt = f"Owner topic or situation:\n{topic}\n\nOwner's rough guidance:\n{owner_guidance}"
+    try:
+        response = openai_client.responses.create(
+            model="gpt-5.6-terra",
+            instructions=instructions,
+            input=prompt,
+            store=False,
+        )
+        result = _parse_json_object(response.output_text or "")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="The AI could not structure this learning. Nothing was saved.",
+        ) from exc
+
+    expected_fields = {"topic", "applies_when", "instruction", "example_reply"}
+    if set(result) != expected_fields:
+        raise HTTPException(
+            status_code=502,
+            detail="The AI returned the wrong learning format. Nothing was saved.",
+        )
+    normalized = {
+        key: str(result.get(key, "")).strip()
+        for key in ("topic", "applies_when", "instruction", "example_reply")
+    }
+    if not normalized["topic"] or not normalized["applies_when"] or not normalized["instruction"]:
+        raise HTTPException(
+            status_code=502,
+            detail="The AI returned an incomplete learning. Nothing was saved.",
+        )
+    if any(len(value) > 3000 for value in normalized.values()):
+        raise HTTPException(
+            status_code=502,
+            detail="The structured learning was unexpectedly long. Nothing was saved.",
+        )
+    return normalized
+
+
+def save_manual_learning(
+    topic: str,
+    owner_guidance: str,
+    structured: Dict[str, str],
+) -> Dict[str, Any]:
+    now = datetime.utcnow().isoformat() + "Z"
+    text_parts = [
+        f"Topic: {structured['topic']}",
+        f"Applies when: {structured['applies_when']}",
+        f"Instruction: {structured['instruction']}",
+    ]
+    if structured.get("example_reply"):
+        text_parts.append(f"Example reply: {structured['example_reply']}")
+    entry = {
+        "id": f"manual-{uuid.uuid4()}",
+        "type": "manual_guidance",
+        "topic": structured["topic"],
+        "applies_when": structured["applies_when"],
+        "instruction": structured["instruction"],
+        "example_reply": structured.get("example_reply", ""),
+        "owner_topic": topic.strip(),
+        "owner_guidance": owner_guidance.strip(),
+        "text": "\n".join(text_parts),
+        "created_at": now,
+        "updated_at": now,
+    }
+    _upsert_learned_information_entry(entry)
+    return entry
 
 
 def find_pending_information_request(
@@ -1915,6 +2010,19 @@ class InformationRequestResponseInput(BaseModel):
         self.information = self.information.strip()
         if not self.information:
             raise ValueError("Information is required.")
+        return self
+
+
+class ManualLearningInput(BaseModel):
+    topic: str = Field(min_length=1, max_length=500)
+    guidance: str = Field(min_length=1, max_length=6000)
+
+    @model_validator(mode="after")
+    def clean_learning(self):
+        self.topic = self.topic.strip()
+        self.guidance = self.guidance.strip()
+        if not self.topic or not self.guidance:
+            raise ValueError("Both a topic and guidance are required.")
         return self
 
 
@@ -4461,6 +4569,17 @@ def clear_pending_draft_messages(db: Session = Depends(get_db)):
         "status": "success",
         "removedDrafts": len(drafts),
         "affectedThreads": len(affected_threads),
+    }
+
+
+@app.post("/api/settings/learnings")
+def create_manual_learning(payload: ManualLearningInput):
+    structured = generate_manual_learning(payload.topic, payload.guidance)
+    entry = save_manual_learning(payload.topic, payload.guidance, structured)
+    return {
+        "status": "success",
+        "filename": LEARNED_INFORMATION_FILENAME,
+        "entry": entry,
     }
 
 
