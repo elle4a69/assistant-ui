@@ -147,9 +147,9 @@ function AnonPage() {
                 id="anon-body-input"
                 value={body}
                 onChange={(event) => setBody(event.target.value)}
-                rows={5}
-                maxLength={600}
+                rows={12}
                 spellCheck
+                placeholder="Write as much as you need. Paragraph breaks will be preserved."
               />
             </>
           )}

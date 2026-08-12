@@ -10,8 +10,11 @@
   --paper: #e9e1cf;
   --acid: #eaff00;
   width: 100%;
-  min-height: 100dvh;
+  height: 100dvh;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior-y: auto;
+  -webkit-overflow-scrolling: touch;
   background: var(--ink);
   color: var(--ink);
   font-family: 'IBM Plex Mono', monospace;
@@ -38,6 +41,14 @@
   background: #4c4c4c;
   color: white;
   outline: none;
+}
+
+@media (min-width: 761px) {
+  .anon-image {
+    position: sticky;
+    top: 0;
+    height: calc(100dvh - clamp(32px, 8vw, 112px));
+  }
 }
 
 .anon-image.is-editable {
@@ -110,6 +121,12 @@
   resize: vertical;
 }
 
+.anon-copy textarea {
+  field-sizing: content;
+  min-height: 260px;
+  line-height: 1.55;
+}
+
 .anon-copy input:focus,
 .anon-copy textarea:focus {
   box-shadow: 5px 5px 0 var(--acid);
@@ -141,6 +158,8 @@
   margin: 0;
   font-size: clamp(0.9rem, 1.5vw, 1.1rem);
   line-height: 1.65;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .anon-error,

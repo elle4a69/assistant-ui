@@ -44,3 +44,20 @@ def test_anon_content_rejects_non_image_upload(tmp_path: Path, monkeypatch):
         files={"image": ("bad.txt", b"not an image", "text/plain")},
     )
     assert response.status_code == 415
+
+
+def test_anon_content_accepts_long_form_copy(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ANON_CONTENT_DIR", str(tmp_path))
+    app = FastAPI()
+    app.include_router(anon_content.router)
+    client = TestClient(app)
+    long_body = "First paragraph.\n\n" + ("Long-form copy with room to breathe. " * 2000)
+
+    response = client.put(
+        "/api/anon/content",
+        data={"heading": "Long read", "body": long_body},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["body"] == long_body.strip()
+    assert client.get("/api/anon/content").json()["body"] == long_body.strip()

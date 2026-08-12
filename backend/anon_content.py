@@ -103,8 +103,8 @@ async def save_anon_content(request: Request):
     body = str(form.get("body", "")).strip()
     if not heading or len(heading) > 80:
         raise HTTPException(status_code=422, detail="Heading must be 1 to 80 characters.")
-    if not body or len(body) > 600:
-        raise HTTPException(status_code=422, detail="Body must be 1 to 600 characters.")
+    if not body:
+        raise HTTPException(status_code=422, detail="Body text is required.")
 
     current = _load_content()
     image = form.get("image")
