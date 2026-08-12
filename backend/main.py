@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings
 import mobilemessage_service
+from anon_content import router as anon_content_router
 from sqlalchemy import (
     create_engine, Column, String, Integer, DateTime, ForeignKey, Text, event, Boolean, func
 )
@@ -2028,6 +2029,7 @@ class ManualLearningInput(BaseModel):
 
 # FastAPI app setup
 app = FastAPI(title="Assistant UI Backend")
+app.include_router(anon_content_router)
 
 # CORS setup
 app.add_middleware(
@@ -2077,7 +2079,12 @@ def is_public_request(request: Request) -> bool:
         return True
     if path == "/v2" or path.startswith("/v2/"):
         return True
+    if path == "/anon":
+        return True
     if path.startswith("/images/") or path.startswith("/assets/"):
+        return True
+
+    if method == "GET" and path in {"/api/anon/content", "/api/anon/image"}:
         return True
 
     # These three routes are the customer-facing booking widget API only.
