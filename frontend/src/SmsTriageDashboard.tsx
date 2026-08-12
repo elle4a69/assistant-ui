@@ -38,6 +38,7 @@ import {
   Trash2,
   X
 } from 'lucide-react';
+import { formatMessageTimestamp } from './messageTimestamp';
 
 const CURRENT_AGENT_ID = 'agent-1';
 
@@ -87,9 +88,9 @@ function SmsAssistantThread({
               return (
                 <div key={`ev-${e.id || idx}`} className="self-center my-1 max-w-[85%] bg-slate-200/90 text-slate-600 text-[10px] font-semibold px-2.5 py-1 rounded-full border border-slate-300 flex items-center gap-1.5 shadow-2xs">
                   <span>{label}</span>
-                  <span className="text-[9px] opacity-60 ml-1">
-                    {e.at ? new Date(e.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
-                  </span>
+                  <time dateTime={e.at} className="text-[9px] opacity-60 ml-1">
+                    {e.at ? formatMessageTimestamp(e.at) : ''}
+                  </time>
                 </div>
               );
             }
@@ -116,9 +117,9 @@ function SmsAssistantThread({
                   <span className={isCustomer ? 'text-emerald-600 font-extrabold' : isDraft ? 'text-amber-700 font-extrabold flex items-center gap-1' : 'text-white'}>
                     {isCustomer ? '📱 Client (Incoming)' : isAgent ? '👤 Agent Reply' : isDraft ? '🤖 Tori Draft (Needs Approve)' : '🤖 Tori (AI Auto-Reply)'}
                   </span>
-                  <span className={`text-[9px] font-normal ${isCustomer ? 'text-slate-400' : isDraft ? 'text-amber-500' : 'text-indigo-100'}`}>
-                    {m.at ? new Date(m.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
-                  </span>
+                  <time dateTime={m.at} className={`text-[9px] font-normal ${isCustomer ? 'text-slate-400' : isDraft ? 'text-amber-500' : 'text-indigo-100'}`}>
+                    {m.at ? formatMessageTimestamp(m.at) : ''}
+                  </time>
                 </div>
                 <p className="whitespace-pre-wrap font-medium leading-relaxed mt-0.5">{m.text}</p>
                 {isDraft && onApproveDraft && onDiscardDraft && (

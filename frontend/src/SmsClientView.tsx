@@ -14,6 +14,7 @@ import {
   MessageCircle,
   Plus
 } from 'lucide-react';
+import { formatMessageTimestamp } from './messageTimestamp';
 
 export default function SmsClientView() {
   const [customerPhone, setCustomerPhone] = useState('');
@@ -280,7 +281,10 @@ export default function SmsClientView() {
                     // Display system message as centered automated text
                     return (
                       <div key={m.id} className="self-center my-1 max-w-[85%] bg-slate-200/80 border border-slate-300 text-[10px] text-slate-500 px-2 py-1 rounded text-center">
-                        🤖 Auto-Reply: {m.text}
+                        <div>🤖 Auto-Reply: {m.text}</div>
+                        <time dateTime={m.at} className="mt-0.5 block text-[8px] text-slate-400">
+                          {m.at ? formatMessageTimestamp(m.at) : ''}
+                        </time>
                       </div>
                     );
                   }
@@ -294,9 +298,9 @@ export default function SmsClientView() {
                       }`}
                     >
                       <p className="whitespace-pre-wrap">{m.text}</p>
-                      <span className={`block text-[8px] text-right mt-1 ${isCustomer ? 'text-emerald-100' : 'text-slate-400'}`}>
-                        {m.at ? new Date(m.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
-                      </span>
+                      <time dateTime={m.at} className={`block text-[8px] text-right mt-1 ${isCustomer ? 'text-emerald-100' : 'text-slate-400'}`}>
+                        {m.at ? formatMessageTimestamp(m.at) : ''}
+                      </time>
                     </div>
                   );
                 })

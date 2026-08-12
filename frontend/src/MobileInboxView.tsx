@@ -24,6 +24,7 @@ import {
   ThreadDetail,
   ThreadListItem,
 } from './api'
+import { formatMessageTimestamp } from './messageTimestamp'
 
 const POLL_THREADS_MS = 5000
 const POLL_MESSAGES_MS = 3000
@@ -35,10 +36,6 @@ function formatListTime(value: string) {
     return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
   }
   return date.toLocaleDateString([], { day: 'numeric', month: 'short' })
-}
-
-function formatMessageTime(value: string) {
-  return new Date(value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
 }
 
 function contactLabel(phone: string) {
@@ -535,7 +532,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                       <div className={`mt-1 flex items-center justify-end gap-1 text-[9px] ${
                         incoming ? 'text-slate-400' : isDraft ? 'text-amber-700' : 'text-emerald-100'
                       }`}>
-                        <time>{formatMessageTime(message.at)}</time>
+                        <time dateTime={message.at}>{formatMessageTimestamp(message.at)}</time>
                         {!incoming && !isDraft && <CheckCheck className="h-3 w-3" />}
                       </div>
                       {isDraft && (
