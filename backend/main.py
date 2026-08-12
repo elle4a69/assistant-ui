@@ -20,6 +20,12 @@ from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings
 import mobilemessage_service
 from anon_content import router as anon_content_router
+from booking_tools import (
+    BOOKING_DISCOVERY_TOOL_SCHEMAS,
+    BookingToolSuite,
+    FastAPIBookingsDiscoveryProvider,
+    LegacyCalendarDiscoveryProvider,
+)
 from sqlalchemy import (
     create_engine, Column, String, Integer, DateTime, ForeignKey, Text, event, Boolean, func
 )
@@ -787,6 +793,7 @@ class Thread(Base):
     unread_count = Column(Integer, default=0, nullable=False)
     auto_reply_enabled = Column(Boolean, default=True, nullable=False)
     pending_slots = Column(Text, nullable=True) # JSON list of slots presented
+    pending_booking = Column(Text, nullable=True)  # JSON proposal awaiting explicit customer confirmation
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     
@@ -917,6 +924,16 @@ def init_db():
             conn.commit()
         except Exception as e:
             print(f"Auto-migration info: {e}")
+
+        try:
+            thread_columns = {
+                row[1] for row in conn.exec_driver_sql("PRAGMA table_info(threads)").fetchall()
+            }
+            if "pending_booking" not in thread_columns:
+                conn.exec_driver_sql("ALTER TABLE threads ADD COLUMN pending_booking TEXT")
+            conn.commit()
+        except Exception as e:
+            print(f"Thread auto-migration info: {e}")
 
     # Seed sample initial bookings & threads if empty
     db = SessionLocal()
@@ -1112,6 +1129,9 @@ def get_live_services_context() -> str:
         if not name:
             continue
         details = [name]
+        service_id = str(service.get("id", "")).strip()
+        if service_id:
+            details.append(f"Booking service ID: {service_id}")
         price = service.get("price")
         if price is not None:
             details.append(f"Price: ${price}")
@@ -2180,6 +2200,188 @@ def parse_business_datetime(value: str) -> datetime:
     return parsed.astimezone(business_tz)
 
 
+def is_explicit_booking_confirmation(message: str) -> bool:
+    """Accept a short, unambiguous confirmation of an already-presented proposal."""
+    normalized = re.sub(
+        r"[^a-z0-9' ]+",
+        " ",
+        (message or "").casefold().replace("’", "'"),
+    )
+    normalized = " ".join(normalized.split())
+    return bool(re.fullmatch(
+        r"(?:yes|yep|yeah|correct|confirmed?|go ahead|book it|please book it|"
+        r"yes please|yes that's correct|yes that is correct|that's correct|that is correct|"
+        r"yes confirm it|confirm it please)",
+        normalized,
+    ))
+
+
+def is_explicit_booking_rejection(message: str) -> bool:
+    normalized = re.sub(
+        r"[^a-z0-9' ]+",
+        " ",
+        (message or "").casefold().replace("’", "'"),
+    )
+    normalized = " ".join(normalized.split())
+    return bool(re.fullmatch(
+        r"(?:no|no thanks|cancel|cancel it|don't book it|do not book it|"
+        r"that's wrong|that is wrong|not correct)",
+        normalized,
+    ))
+
+
+def get_service_for_booking(service_id: str) -> Optional[Dict[str, Any]]:
+    services_path = os.path.join(DATA_DIR, "services.json")
+    try:
+        with open(services_path, "r", encoding="utf-8") as handle:
+            services = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return next((
+        service for service in services
+        if isinstance(service, dict) and service.get("id") == service_id
+    ), None)
+
+
+def booking_availability_error(start: datetime, duration: int) -> Optional[str]:
+    """Return a customer-safe reason when an exact proposed slot cannot be booked."""
+    now = current_business_time()
+    end = start + timedelta(minutes=duration)
+    if start < now:
+        return "That time has already passed."
+    if start > now + timedelta(days=180):
+        return "Bookings can only be made up to 180 days ahead."
+
+    working_hours = {
+        entry["day"]: entry for entry in load_working_hours()
+        if isinstance(entry, dict) and entry.get("day")
+    }
+    day_config = working_hours.get(DAY_NAMES[start.weekday()])
+    if not day_config or not day_config.get("enabled", False):
+        return "The business is closed at that time."
+    try:
+        open_hour, open_minute = map(int, day_config["open"].split(":"))
+        close_hour, close_minute = map(int, day_config["close"].split(":"))
+    except (KeyError, TypeError, ValueError):
+        return "The working hours for that day are not configured correctly."
+
+    start_minutes = start.hour * 60 + start.minute
+    end_minutes = end.hour * 60 + end.minute
+    if (
+        start.date() != end.date()
+        or start_minutes < open_hour * 60 + open_minute
+        or end_minutes > close_hour * 60 + close_minute
+    ):
+        return "The full appointment does not fit within working hours."
+
+    busy_slots = calendar_service.get_busy_slots(start, end)
+    if any(start < busy["end"] and end > busy["start"] for busy in busy_slots):
+        return "That time is no longer available."
+    return None
+
+
+def propose_conversational_booking(
+    thread: Thread,
+    *,
+    service_id: str,
+    start_time: str,
+    customer_name: str,
+    notes: Optional[str],
+) -> Dict[str, Any]:
+    """Validate and save a proposal; this function never creates a booking."""
+    service = get_service_for_booking((service_id or "").strip())
+    if not service:
+        return {"status": "rejected", "reason": "That service is not available."}
+    clean_name = (customer_name or "").strip()[:120]
+    if not clean_name:
+        return {"status": "rejected", "reason": "The customer's name is still required."}
+    try:
+        start = parse_business_datetime(start_time)
+        duration = max(1, min(1440, int(service.get("duration", 60))))
+    except (TypeError, ValueError):
+        return {"status": "rejected", "reason": "The appointment time or duration is invalid."}
+
+    availability_error = booking_availability_error(start, duration)
+    if availability_error:
+        return {"status": "rejected", "reason": availability_error}
+
+    proposal = {
+        "service_id": service["id"],
+        "service_name": str(service.get("name") or "Appointment"),
+        "duration": duration,
+        "start_time": start.isoformat(),
+        "customer_name": clean_name,
+        "customer_phone": canonical_phone_number(thread.customer_phone),
+        "notes": (notes or "").strip()[:1000],
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    return {
+        "status": "awaiting_confirmation",
+        "proposal": proposal,
+        "instruction": (
+            "Present every proposal field to the customer and ask them to confirm that it is correct. "
+            "Do not say it is booked or confirmed yet."
+        ),
+    }
+
+
+def confirm_conversational_booking(
+    db: Session,
+    thread: Thread,
+    customer_confirmation: str,
+) -> tuple[Dict[str, Any], bool]:
+    """Execute the saved proposal only after a later explicit customer confirmation."""
+    if not is_explicit_booking_confirmation(customer_confirmation):
+        return {
+            "status": "rejected",
+            "reason": "The customer's latest message was not an explicit confirmation.",
+        }, False
+    try:
+        proposal = json.loads(thread.pending_booking or "")
+        proposed_at = datetime.fromisoformat(proposal["created_at"])
+        start = parse_business_datetime(proposal["start_time"])
+        duration = int(proposal["duration"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        thread.pending_booking = None
+        return {"status": "rejected", "reason": "There is no valid booking proposal to confirm."}, False
+
+    if datetime.utcnow() - proposed_at > timedelta(hours=2):
+        thread.pending_booking = None
+        return {
+            "status": "rejected",
+            "reason": "The proposed booking expired. Check availability and present it again.",
+        }, False
+
+    existing = calendar_service.get_customer_bookings(
+        thread.customer_phone,
+        start - timedelta(minutes=1),
+        start + timedelta(minutes=duration + 1),
+        db=db,
+    )
+    if any(item["start"] == start for item in existing):
+        thread.pending_booking = None
+        return {"status": "already_confirmed", "booking": proposal}, True
+
+    availability_error = booking_availability_error(start, duration)
+    if availability_error:
+        thread.pending_booking = None
+        return {"status": "rejected", "reason": availability_error}, False
+
+    end = start + timedelta(minutes=duration)
+    success = calendar_service.create_booking(
+        summary=f"{proposal['customer_name']} - {proposal['service_name']}",
+        start=start,
+        end=end,
+        customer_phone=thread.customer_phone,
+    )
+    if not success:
+        return {"status": "failed", "reason": "The calendar did not accept the booking."}, False
+
+    thread.pending_booking = None
+    thread.pending_slots = None
+    return {"status": "confirmed", "booking": proposal}, True
+
+
 UNSAFE_HOLDING_REPLY_PATTERNS = (
     r"\b(?:i |we )?(?:can(?:not|'t)|could(?: not|n't)) check (?:that|it).*(?:right now|at the moment|properly)\b",
     r"\b(?:i(?:'ll| will)|we(?:'ll| will)) get back to you\b",
@@ -2603,6 +2805,37 @@ def load_working_hours():
     return DEFAULT_WORKING_HOURS
 
 
+def load_booking_services() -> List[Dict[str, Any]]:
+    """Load the legacy service catalogue for the booking adapter."""
+    services_path = os.path.join(DATA_DIR, "services.json")
+    try:
+        with open(services_path, "r", encoding="utf-8") as handle:
+            services = json.load(handle)
+    except (OSError, ValueError):
+        return []
+    return services if isinstance(services, list) else []
+
+
+def get_booking_tool_suite() -> BookingToolSuite:
+    """Build the configured discovery adapter without exposing credentials to the model."""
+    timezone_name = os.getenv("BOOKING_TIMEZONE", "Australia/Hobart")
+    backend_name = os.getenv("BOOKING_BACKEND", "legacy").strip().casefold()
+    if backend_name == "fastapi":
+        provider = FastAPIBookingsDiscoveryProvider(
+            base_url=os.getenv("FASTAPI_BOOKINGS_URL", ""),
+            tenant=os.getenv("FASTAPI_BOOKINGS_TENANT"),
+            token=os.getenv("FASTAPI_BOOKINGS_TOKEN"),
+        )
+    else:
+        provider = LegacyCalendarDiscoveryProvider(
+            services_loader=load_booking_services,
+            working_hours_loader=load_working_hours,
+            busy_slots_loader=calendar_service.get_busy_slots,
+            timezone_name=timezone_name,
+        )
+    return BookingToolSuite(provider, timezone_name)
+
+
 @app.get("/api/calendar/freebusy")
 def get_free_slots_endpoint(duration: int = Query(30), db: Session = Depends(get_db)):
     working_hours = load_working_hours()
@@ -2682,6 +2915,10 @@ def run_sms_reply_logic(
     booking_confirmed = False
     slots_presented = False
     clean_body = body.strip().lower()
+    if thread.pending_booking and is_explicit_booking_rejection(body):
+        thread.pending_booking = None
+    pending_booking_at_turn_start = bool(thread.pending_booking)
+    booking_proposal_candidate: Optional[str] = None
     
     # Step 1: Read uploaded knowledge plus the authoritative live Settings catalogue.
     retrieved_context = build_business_context(body)
@@ -2747,6 +2984,32 @@ def run_sms_reply_logic(
     if broad_availability_guidance:
         slots_str += f"\n{broad_availability_guidance}"
     slots_str += f"\n{booking_guidance}"
+    if thread.pending_booking:
+        try:
+            pending = json.loads(thread.pending_booking)
+            pending_start = parse_business_datetime(pending["start_time"])
+            slots_str += (
+                "\nPending conversational booking proposal (not booked yet): "
+                f"{pending['service_name']}, {pending['duration']} minutes, "
+                f"{pending_start.strftime('%A %d %B %Y at %I:%M %p')}, "
+                f"customer {pending['customer_name']}. "
+                "Only confirm_booking can finalize it, and only after an explicit customer confirmation."
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            thread.pending_booking = None
+    if clean_body in ("1", "2", "3") and thread.pending_slots:
+        try:
+            prior_slots = json.loads(thread.pending_slots)
+            selected_index = int(clean_body) - 1
+            selected_slot = prior_slots[selected_index]
+            slots_str += (
+                "\nCustomer selection from the previously presented options: "
+                f"Option {clean_body}, {selected_slot['start']} to {selected_slot['end']}. "
+                "This selects a time only; collect any missing name and service, then use "
+                "propose_booking and obtain explicit confirmation before booking."
+            )
+        except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            thread.pending_slots = None
 
     # Populate pending_slots and slots_presented for booking intent
     scheduling_keywords = ["book", "schedule", "appointment", "free", "busy", "slot", "when"]
@@ -2792,49 +3055,70 @@ def run_sms_reply_logic(
     if assistant_reply:
         print(f"[QA Rules Match] Trigger matched. Using pre-configured reply.")
         
-    # Check if booking confirmation number is received (e.g. "1", "2", "3") and there are pending slots
-    elif not draft_only and clean_body in ("1", "2", "3") and thread.pending_slots:
-        try:
-            slots = json.loads(thread.pending_slots)
-            index = int(clean_body) - 1
-            if 0 <= index < len(slots):
-                slot = slots[index]
-                start_dt = datetime.fromisoformat(slot["start"])
-                end_dt = datetime.fromisoformat(slot["end"])
-                
-                booking_success = calendar_service.create_booking(
-                    summary="Appointment",
-                    start=start_dt,
-                    end=end_dt,
-                    customer_phone=thread.customer_phone
-                )
-                if booking_success:
-                    thread.pending_slots = None
-                    booking_confirmed = True
-                    assistant_reply = f"All booked for {start_dt.strftime('%A at %I:%M %p')}."
-        except Exception as e:
-            print(f"Booking confirmation failed: {e}")
-    
     # Step 5: Chat completions via OpenAI Responses API if available
     elif openai_client:
         try:
-            flat_tools = [{
-                "type": "function",
-                "name": "signal_customer_arrival",
-                "description": (
-                    "Signal that the customer explicitly says they are physically at the service "
-                    "location now. Use only for a present, completed arrival. Do not use when they "
-                    "are travelling, nearby, running late, discussing a future arrival, asking for "
-                    "directions, or saying they have not arrived."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": False,
+            flat_tools = [
+                *BOOKING_DISCOVERY_TOOL_SCHEMAS,
+                {
+                    "type": "function",
+                    "name": "signal_customer_arrival",
+                    "description": (
+                        "Signal that the customer explicitly says they are physically at the service "
+                        "location now. Use only for a present, completed arrival. Do not use when they "
+                        "are travelling, nearby, running late, discussing a future arrival, asking for "
+                        "directions, or saying they have not arrived."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
                 },
-                "strict": True,
-            }]
+                {
+                    "type": "function",
+                    "name": "propose_booking",
+                    "description": (
+                        "Validate and save a booking proposal after the customer has supplied an exact "
+                        "service, offered start time, and name. This does not create a booking. After this "
+                        "tool succeeds, present all returned details and ask the customer to confirm them. "
+                        "Use the exact Booking service ID from the live services context."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "service_id": {"type": "string"},
+                            "start_time": {
+                                "type": "string",
+                                "description": "The exact customer-selected offered time in ISO 8601 format.",
+                            },
+                            "customer_name": {"type": "string"},
+                            "notes": {"type": ["string", "null"]},
+                        },
+                        "required": ["service_id", "start_time", "customer_name", "notes"],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                },
+                {
+                    "type": "function",
+                    "name": "confirm_booking",
+                    "description": (
+                        "Create the previously proposed booking only when the customer's latest message "
+                        "explicitly confirms the complete details that were presented on the preceding turn. "
+                        "Never use this on the same turn as propose_booking or after an ambiguous response."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                },
+            ]
             
             examples = get_style_examples(body)
             instructions = build_model_instructions(
@@ -2847,6 +3131,17 @@ def run_sms_reply_logic(
                 "'I can't check that right now', 'just a sec', or similar. If the supplied facts "
                 "do not support a direct, correct reply, output exactly [[HANDOFF: concise reason]]. "
                 "A human reply later than the customer's message is authoritative; do not contradict it."
+            )
+            instructions += (
+                "\n\nConversational booking rule: complete the booking entirely in this conversation. "
+                "Use the booking discovery tools for the current time, services, and live availability; "
+                "never invent a service or time. "
+                "First gather the customer's name, exact service, and exact offered time. Call "
+                "propose_booking, then present the complete service, date, time, duration, name, and any "
+                "notes and ask whether everything is correct. Only after the customer's next message "
+                "explicitly confirms that summary may you call confirm_booking. Never ask the customer "
+                "to visit a form or webpage. Never claim a booking is confirmed unless confirm_booking "
+                "returns confirmed or already_confirmed."
             )
             if draft_only:
                 instructions += (
@@ -2900,25 +3195,58 @@ def run_sms_reply_logic(
                 source_message_id = source_message.id if source_message else (provider_message_id or "")
                 
                 for tool_call in tool_calls:
-                    if tool_call.name == "make_calendar_booking":
+                    if tool_call.name in {
+                        "get_current_time",
+                        "list_booking_services",
+                        "get_times_today",
+                        "get_times_tomorrow",
+                        "get_next_available",
+                    }:
+                        try:
+                            args = json.loads(tool_call.arguments or "{}")
+                        except (TypeError, json.JSONDecodeError):
+                            args = {}
+                        tool_result = get_booking_tool_suite().execute(tool_call.name, args)
+                        input_history.append({
+                            "type": "function_call_output",
+                            "call_id": tool_call.call_id,
+                            "output": json.dumps(tool_result),
+                        })
+                    elif tool_call.name == "propose_booking":
                         args = json.loads(tool_call.arguments)
-                        start_time_str = args.get("start_time")
-                        summary = args.get("summary", "Appointment")
-                        
-                        slot_start_dt = datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
-                        slot_end_dt = slot_start_dt + timedelta(minutes=30)
-                        
-                        booking_success = calendar_service.create_booking(
-                            summary=summary,
-                            start=slot_start_dt,
-                            end=slot_end_dt,
-                            customer_phone=thread.customer_phone
-                        )
-                        
-                        if booking_success:
-                            booking_confirmed = True
-                            
-                        tool_result = {"status": "success" if booking_success else "failed"}
+                        if pending_booking_at_turn_start and is_explicit_booking_confirmation(body):
+                            tool_result = {
+                                "status": "rejected",
+                                "reason": "A proposal already existed when this confirmation arrived; use confirm_booking.",
+                            }
+                        else:
+                            tool_result = propose_conversational_booking(
+                                thread,
+                                service_id=args.get("service_id", ""),
+                                start_time=args.get("start_time", ""),
+                                customer_name=args.get("customer_name", ""),
+                                notes=args.get("notes"),
+                            )
+                            if tool_result.get("status") == "awaiting_confirmation":
+                                booking_proposal_candidate = json.dumps(tool_result["proposal"])
+                        input_history.append({
+                            "type": "function_call_output",
+                            "call_id": tool_call.call_id,
+                            "output": json.dumps(tool_result),
+                        })
+                    elif tool_call.name == "confirm_booking":
+                        if not pending_booking_at_turn_start:
+                            tool_result = {
+                                "status": "rejected",
+                                "reason": "No booking proposal existed before this customer message.",
+                            }
+                        else:
+                            tool_result, confirmed_now = confirm_conversational_booking(
+                                db,
+                                thread,
+                                body,
+                            )
+                            booking_confirmed = booking_confirmed or confirmed_now
                         input_history.append({
                             "type": "function_call_output",
                             "call_id": tool_call.call_id,
@@ -2938,7 +3266,11 @@ def run_sms_reply_logic(
                                 "status": "recorded" if arrival_recorded else "already-recorded"
                             }),
                         })
-                        
+
+                # Preserve confirmation/cancellation state before the later stale-read
+                # protection expires ORM objects prior to SMS dispatch.
+                db.flush()
+
                 final_response = openai_client.responses.create(
                     model="gpt-5.6-terra",
                     instructions=instructions,
@@ -2955,7 +3287,7 @@ def run_sms_reply_logic(
             
     rejected_reply_reason = unsafe_ai_reply_reason(
         assistant_reply or "",
-        requested_booking_confirmed=requested_booking_confirmed,
+        requested_booking_confirmed=requested_booking_confirmed or booking_confirmed,
     )
     if rejected_reply_reason:
         print(f"[AI Reply Rejected] {rejected_reply_reason} on thread {thread_id}.")
@@ -3104,6 +3436,9 @@ def run_sms_reply_logic(
                 at=reply_at_naive,
             )
         else:
+            if booking_proposal_candidate:
+                thread.pending_booking = booking_proposal_candidate
+                thread.pending_slots = None
             event_log = ThreadEvent(
                 id=str(uuid.uuid4()),
                 thread_id=thread.id,

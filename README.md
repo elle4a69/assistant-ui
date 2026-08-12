@@ -88,8 +88,30 @@ curl -X POST http://localhost:8000/webhooks/sms \
 
 ### 2. Verify AI Auto-Replies
 If the autoresponder is enabled, the webhook response will register a system message.
-- If the text contains scheduling intent keywords (`book`, `schedule`, `appointment`, `free`, `busy`, `slot`, `when`), the AI assistant will automatically query the Google Calendar (or local SQLite mock) and reply listing the next 3 available 30-minute slots.
-- The customer can then reply with `1`, `2`, or `3` to book a slot.
+- For booking questions, the assistant can query the current business time, services, today's times, tomorrow's times, or the next available time.
+- A reply such as `1`, `2`, or `3` selects a presented time but does not create a booking. The assistant presents the complete booking summary and only creates it after a later explicit customer confirmation.
+- The complete booking flow stays in the conversation; customers are not sent to a web form.
+
+### Booking discovery backend
+
+The assistant-facing booking tools use a stable adapter contract. The default remains the existing Google Calendar/local SQLite implementation:
+
+```env
+BOOKING_BACKEND=legacy
+BOOKING_TIMEZONE=Australia/Hobart
+```
+
+To query the FastAPI Bookings application for services and live availability, configure secrets in the runtime environment rather than committing values:
+
+```env
+BOOKING_BACKEND=fastapi
+FASTAPI_BOOKINGS_URL=https://bookings.example.com
+FASTAPI_BOOKINGS_TENANT=tenant-slug
+FASTAPI_BOOKINGS_TOKEN=<runtime-secret>
+BOOKING_TIMEZONE=Australia/Hobart
+```
+
+The FastAPI adapter currently covers discovery only. Final booking creation still uses the legacy calendar adapter until client identification, provider selection, idempotency, and confirmed booking creation are connected to FastAPI Bookings.
 
 ### 3. Verify on UI
 - Open http://localhost:5190 in your browser.
