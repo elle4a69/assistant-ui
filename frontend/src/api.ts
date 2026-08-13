@@ -910,6 +910,9 @@ export interface OperationsChatCapabilities {
   codeAccess: boolean;
   logAccess: boolean;
   diagnosticTools: boolean;
+  messageSelfDiagnosis: boolean;
+  webSearch: boolean;
+  persistentMemory: boolean;
   controlledActions: boolean;
   requiresConfirmation: boolean;
 }

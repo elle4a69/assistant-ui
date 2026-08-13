@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import main
-from main import Base, OperationsChatInput, OperationsChatMessage, Thread
+from main import Base, Message, OperationsChatInput, OperationsChatMessage, OperationsMemory, Thread, ThreadEvent
 
 
 class FakeResponses:
@@ -96,6 +96,9 @@ def test_operations_chat_persists_both_sides_and_uses_read_only_snapshot(monkeyp
         "codeAccess": False,
         "logAccess": True,
         "diagnosticTools": True,
+        "messageSelfDiagnosis": True,
+        "webSearch": True,
+        "persistentMemory": True,
         "controlledActions": True,
         "requiresConfirmation": True,
     }
@@ -105,7 +108,8 @@ def test_operations_chat_persists_both_sides_and_uses_read_only_snapshot(monkeyp
     assert call["store"] is False
     assert '"needs_review_count": 1' in call["instructions"]
     assert "cannot edit source code" in call["instructions"]
-    assert call["tools"] == main.OPERATIONS_TOOL_SCHEMAS
+    assert call["tools"] == main.OPERATIONS_AI_TOOLS
+    assert "include" not in call
     db.close()
 
 
@@ -198,6 +202,110 @@ def test_operations_chat_executes_read_tool_and_returns_evidence(monkeypatch):
     assert any(item.get("type") == "function_call_output" for item in second_input)
     assert '"status": "ok"' in str(second_input)
     db.close()
+
+
+def test_operations_message_diagnostics_find_reply_and_failure_patterns():
+    db = make_db()
+    now = datetime.utcnow()
+    thread = Thread(
+        id="diagnostic-thread",
+        customer_phone="+61412345678",
+        sms_account_key="secondary",
+        state="needs-review",
+        priority="medium",
+        sla_due_at=now + timedelta(hours=1),
+        unread_count=1,
+        updated_at=now,
+    )
+    db.add(thread)
+    db.add_all([
+        Message(id="m1", thread_id=thread.id, role="customer", text="Private text", at=now - timedelta(minutes=5)),
+        Message(id="m2", thread_id=thread.id, role="agent", text="First reply", at=now - timedelta(minutes=4)),
+        Message(id="m3", thread_id=thread.id, role="agent", text="Second reply", at=now - timedelta(minutes=3)),
+        ThreadEvent(id="e1", thread_id=thread.id, type="ai-reply-failed", at=now - timedelta(minutes=2)),
+    ])
+    db.commit()
+
+    result = main._operations_message_handling_diagnostics(db, 24, 100)
+
+    assert result["account_thread_counts"] == {"secondary": 1}
+    assert result["sequencing"]["consecutive_agent_reply_pairs"] == 1
+    assert result["reply_latency_seconds"]["samples"] == 1
+    assert result["event_counts"]["ai-reply-failed"] == 1
+    assert "Private text" not in str(result)
+    assert "+61412345678" not in str(result)
+    db.close()
+
+
+def test_operations_memory_persists_and_rejects_private_data():
+    db = make_db()
+    remembered = main.execute_operations_tool(
+        db,
+        "remember_operational_learning",
+        {
+            "category": "behavior",
+            "title": "Check availability before proposing times",
+            "content": "Booking suggestions must be supported by a fresh availability check.",
+            "evidence": "Confirmed during a message-handling diagnostic.",
+        },
+        "Remember this",
+    )
+    assert remembered["status"] == "remembered"
+    assert db.query(OperationsMemory).count() == 1
+
+    recalled = main.execute_operations_tool(
+        db,
+        "recall_operational_memory",
+        {"query": "availability", "limit": 5},
+        "Recall it",
+    )
+    assert recalled["memories"][0]["title"] == "Check availability before proposing times"
+
+    rejected = main.execute_operations_tool(
+        db,
+        "remember_operational_learning",
+        {
+            "category": "incident",
+            "title": "Customer report",
+            "content": "A customer at +61432172148 reported a problem.",
+            "evidence": "Conversation transcript",
+        },
+        "Remember it",
+    )
+    assert rejected["status"] == "rejected"
+    assert db.query(OperationsMemory).count() == 1
+    db.close()
+
+
+def test_operations_web_research_rejects_private_query_before_provider_call(monkeypatch):
+    client = FakeOpenAIClient("Should not be called")
+    monkeypatch.setattr(main, "openai_client", client)
+
+    result = main.execute_operations_tool(
+        make_db(),
+        "research_internet",
+        {"query": "Look up this customer +61432172148", "reason": "Investigate delivery"},
+        "Research it",
+    )
+
+    assert result["status"] == "rejected"
+    assert client.responses.calls == []
+
+
+def test_operations_web_research_uses_bounded_builtin_search(monkeypatch):
+    client = FakeOpenAIClient("Use a queue with per-thread serialization.")
+    monkeypatch.setattr(main, "openai_client", client)
+
+    result = main.execute_operations_tool(
+        make_db(),
+        "research_internet",
+        {"query": "reliable SMS webhook queue design", "reason": "Compare current architecture patterns"},
+        "Research it",
+    )
+
+    assert result["status"] == "ok"
+    assert client.responses.calls[0]["tools"] == [{"type": "web_search", "search_context_size": "medium"}]
+    assert client.responses.calls[0]["store"] is False
 
 
 def test_realtime_session_uses_server_key_and_current_voice_model(monkeypatch):

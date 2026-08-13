@@ -1,4 +1,4 @@
-import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
+import { FormEvent, KeyboardEvent, ReactNode, useEffect, useRef, useState } from 'react';
 import { Bot, CornerDownLeft, Mic, PhoneOff, RefreshCw, Send, ShieldCheck, UserRound, Volume2 } from 'lucide-react';
 import {
   createOperationsRealtimeSession,
@@ -6,6 +6,16 @@ import {
   OperationsChatMessage,
   sendOperationsChatMessage,
 } from './api';
+
+const OPERATIONS_URL_PATTERN = /(https?:\/\/[^\s<>\])]+)/g;
+
+function renderLinkedText(content: string): ReactNode[] {
+  return content.split(OPERATIONS_URL_PATTERN).map((part, index) => (
+    part.startsWith('https://') || part.startsWith('http://')
+      ? <a key={`${part}-${index}`} href={part} target="_blank" rel="noreferrer" className="font-semibold text-indigo-700 underline decoration-indigo-300 underline-offset-2">{part}</a>
+      : part
+  ));
+}
 
 
 export default function OperationsAIChat() {
@@ -148,7 +158,7 @@ export default function OperationsAIChat() {
               </span>
             </div>
             <p className="mt-1 text-[10px] leading-relaxed text-slate-300">
-              Discuss the assistant, bookings and improvements. Conversation history persists on the server.
+              Diagnose messaging, research current information, remember operational lessons and improve the system.
             </p>
           </div>
         </div>
@@ -199,7 +209,7 @@ export default function OperationsAIChat() {
       <div className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-3 text-[10px] leading-relaxed text-amber-900">
         <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
         <p>
-          Text chat can inspect bounded system evidence and propose allowlisted safety changes. Every change requires a separate exact confirmation and is audit logged. It cannot access secrets, run shell commands or arbitrary SQL, edit code, deploy, send SMS, modify bookings, delete data, or perform bulk actions. Voice remains advisory and is not added to persistent text history.
+          Text chat can self-diagnose message handling, search the internet with sources, and keep non-secret operational memory. Customer data is excluded from web queries and memory. Every operational setting change still requires a separate exact confirmation and is audit logged. It cannot access secrets, run arbitrary shell commands or SQL, edit code, deploy, send SMS, modify bookings, delete data, or perform bulk actions. Voice remains advisory and is not added to persistent text history.
         </p>
       </div>
 
@@ -221,7 +231,7 @@ export default function OperationsAIChat() {
             </div>
             <h3 className="text-sm font-bold text-slate-900">Start a private system conversation</h3>
             <p className="mt-2 text-xs leading-relaxed text-slate-500">
-              Ask what the assistant can currently do, question its behaviour, or discuss a possible improvement.
+              Ask it to diagnose recent message handling, research a technical issue, recall a decision, or record a durable lesson.
             </p>
           </div>
         ) : (
@@ -238,7 +248,7 @@ export default function OperationsAIChat() {
                     ? 'rounded-br-md bg-indigo-600 text-white'
                     : 'rounded-bl-md border border-slate-200 bg-white text-slate-800'
                 }`}>
-                  {message.content}
+                  {message.role === 'assistant' ? renderLinkedText(message.content) : message.content}
                 </div>
                 {message.role === 'user' && (
                   <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-200 text-slate-700">
