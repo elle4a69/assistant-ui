@@ -1727,7 +1727,13 @@ class GoogleCalendarService:
         else:
             print("Google Calendar credentials not found. Falling back to local SQLite database-backed calendar.")
             
-    def get_busy_slots(self, start: datetime, end: datetime) -> List[Dict[str, datetime]]:
+    def get_busy_slots(
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        require_authoritative: bool = False,
+    ) -> List[Dict[str, datetime]]:
         import time
         from zoneinfo import ZoneInfo
         tz_hobart = ZoneInfo("Australia/Hobart")
@@ -1739,7 +1745,7 @@ class GoogleCalendarService:
         # Cache lookup
         cache_key = (start_aware.isoformat(), end_aware.isoformat())
         now_ts = time.time()
-        if hasattr(self, "_cache") and cache_key in self._cache:
+        if not require_authoritative and hasattr(self, "_cache") and cache_key in self._cache:
             cached_ts, cached_val = self._cache[cache_key]
             if now_ts - cached_ts < 20:  # 20 seconds cache TTL
                 print("[Calendar Cache] Cache hit! Returning cached busy slots.")
@@ -1765,6 +1771,8 @@ class GoogleCalendarService:
                     parsed_busy.append({"start": b_start, "end": b_end})
                 google_success = True
             except Exception as e:
+                if require_authoritative:
+                    raise OSError("Live calendar availability could not be verified.") from e
                 print(f"Error querying Google Calendar freebusy: {e}. Falling back to SQLite.")
                 
         if not google_success:
@@ -1780,9 +1788,17 @@ class GoogleCalendarService:
                 db.close()
 
         # Cache saving
-        if hasattr(self, "_cache"):
+        if not require_authoritative and hasattr(self, "_cache"):
             self._cache[cache_key] = (now_ts, parsed_busy)
         return parsed_busy
+
+    def get_busy_slots_authoritative(
+        self,
+        start: datetime,
+        end: datetime,
+    ) -> List[Dict[str, datetime]]:
+        """Fail closed instead of treating a Google outage as an empty calendar."""
+        return self.get_busy_slots(start, end, require_authoritative=True)
 
     def get_customer_bookings(
         self,
@@ -2433,7 +2449,15 @@ def booking_availability_error(start: datetime, duration: int) -> Optional[str]:
     ):
         return "The full appointment does not fit within working hours."
 
-    busy_slots = calendar_service.get_busy_slots(start, end)
+    authoritative_loader = getattr(
+        calendar_service,
+        "get_busy_slots_authoritative",
+        calendar_service.get_busy_slots,
+    )
+    try:
+        busy_slots = authoritative_loader(start, end)
+    except (OSError, RuntimeError):
+        return "Live calendar availability could not be verified. No booking was made."
     if any(start < busy["end"] and end > busy["start"] for busy in busy_slots):
         return "That time is no longer available."
     return None
@@ -2521,6 +2545,10 @@ def confirm_conversational_booking(
         thread.pending_booking = None
         return {"status": "already_confirmed", "booking": proposal}, True
 
+    # Never confirm from the short availability cache. Fetch the calendar again
+    # immediately before the write so a newly occupied time is caught.
+    if hasattr(calendar_service, "_cache"):
+        calendar_service._cache.clear()
     availability_error = booking_availability_error(start, duration)
     if availability_error:
         thread.pending_booking = None
@@ -2986,10 +3014,15 @@ def get_booking_tool_suite() -> BookingToolSuite:
             token=os.getenv("FASTAPI_BOOKINGS_TOKEN"),
         )
     else:
+        busy_slots_loader = getattr(
+            calendar_service,
+            "get_busy_slots_authoritative",
+            calendar_service.get_busy_slots,
+        )
         provider = LegacyCalendarDiscoveryProvider(
             services_loader=load_booking_services,
             working_hours_loader=load_working_hours,
-            busy_slots_loader=calendar_service.get_busy_slots,
+            busy_slots_loader=busy_slots_loader,
             timezone_name=timezone_name,
         )
     return BookingToolSuite(provider, timezone_name)
@@ -3061,6 +3094,31 @@ def booking_slots_from_tool_result(result: Dict[str, Any]) -> List[Dict[str, Any
         for slot in candidates
         if isinstance(slot, dict) and slot.get("start_time") and slot.get("end_time")
     ]
+
+
+def booking_proposal_has_live_evidence(
+    service_id: str,
+    start_time: str,
+    verified_slots: List[Dict[str, Any]],
+) -> bool:
+    """Require an exact provider-validated service/time before saving a proposal."""
+    try:
+        proposed_start = parse_business_datetime(start_time).replace(second=0, microsecond=0)
+    except (TypeError, ValueError):
+        return False
+    for slot in verified_slots:
+        if str(slot.get("service_id") or "") != str(service_id or ""):
+            continue
+        try:
+            verified_start = parse_business_datetime(str(slot["start"])).replace(
+                second=0,
+                microsecond=0,
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        if verified_start == proposed_start:
+            return True
+    return False
 
 
 def requested_duration_minutes(messages: List[Any], current_body: str) -> Optional[int]:
@@ -3139,6 +3197,7 @@ def run_sms_reply_logic(
     received_at_naive: datetime,
     dispatch_sms: bool = True,
     draft_only: bool = False,
+    is_simulation: bool = False,
 ):
     import json
     thread = db.query(Thread).filter(Thread.id == thread_id).first()
@@ -3165,6 +3224,19 @@ def run_sms_reply_logic(
     pending_booking_at_turn_start = bool(thread.pending_booking)
     booking_proposal_candidate: Optional[str] = None
     availability_tool_slots: List[Dict[str, Any]] = []
+    if thread.pending_slots:
+        try:
+            prior_verified_slots = json.loads(thread.pending_slots)
+            if isinstance(prior_verified_slots, list):
+                availability_tool_slots.extend(
+                    slot for slot in prior_verified_slots
+                    if isinstance(slot, dict)
+                    and slot.get("service_id")
+                    and slot.get("start")
+                    and slot.get("end")
+                )
+        except (TypeError, json.JSONDecodeError):
+            thread.pending_slots = None
     
     # Step 1: Read uploaded knowledge plus the authoritative live Settings catalogue.
     retrieved_context = build_business_context(body)
@@ -3362,10 +3434,39 @@ def run_sms_reply_logic(
                 tools=flat_tools,
                 store=False
             )
-            
-            tool_calls = [item for item in (response.output or []) if item.type == "function_call"]
-            
-            if tool_calls:
+
+            source_message = None
+            if provider_message_id:
+                source_message = db.query(Message).filter(
+                    Message.thread_id == thread.id,
+                    Message.role == "customer",
+                    Message.provider_message_id == provider_message_id,
+                ).first()
+            if not source_message:
+                source_message = db.query(Message).filter(
+                    Message.thread_id == thread.id,
+                    Message.role == "customer",
+                    Message.text == body,
+                    Message.at == received_at_naive,
+                ).first()
+            source_message_id = source_message.id if source_message else (provider_message_id or "")
+
+            max_tool_rounds = 6
+            tool_round = 0
+            while True:
+                tool_calls = [
+                    item for item in (response.output or [])
+                    if item.type == "function_call"
+                ]
+                if not tool_calls:
+                    assistant_reply = response.output_text
+                    break
+                if tool_round >= max_tool_rounds:
+                    rejected_reply_reason = "AI exceeded the safe booking tool-step limit"
+                    assistant_reply = None
+                    break
+                tool_round += 1
+
                 input_history.extend(
                     {
                         "type": "function_call",
@@ -3376,23 +3477,21 @@ def run_sms_reply_logic(
                     for item in tool_calls
                 )
 
-                source_message = None
-                if provider_message_id:
-                    source_message = db.query(Message).filter(
-                        Message.thread_id == thread.id,
-                        Message.role == "customer",
-                        Message.provider_message_id == provider_message_id,
-                    ).first()
-                if not source_message:
-                    source_message = db.query(Message).filter(
-                        Message.thread_id == thread.id,
-                        Message.role == "customer",
-                        Message.text == body,
-                        Message.at == received_at_naive,
-                    ).first()
-                source_message_id = source_message.id if source_message else (provider_message_id or "")
-                
-                for tool_call in tool_calls:
+                # Availability calls run first even if the model emitted parallel calls.
+                # That lets a proposal in the same response use only freshly verified evidence.
+                discovery_names = {
+                    "get_current_time",
+                    "list_booking_services",
+                    "get_times_today",
+                    "get_times_tomorrow",
+                    "get_next_available",
+                }
+                ordered_tool_calls = sorted(
+                    tool_calls,
+                    key=lambda call: 0 if call.name in discovery_names else 1,
+                )
+                tool_results: Dict[str, Dict[str, Any]] = {}
+                for tool_call in ordered_tool_calls:
                     if tool_call.name in {
                         "get_current_time",
                         "list_booking_services",
@@ -3410,14 +3509,24 @@ def run_sms_reply_logic(
                             availability_tool_slots.extend(verified_slots)
                             thread.pending_slots = json.dumps(verified_slots)
                             slots_presented = True
-                        input_history.append({
-                            "type": "function_call_output",
-                            "call_id": tool_call.call_id,
-                            "output": json.dumps(tool_result),
-                        })
                     elif tool_call.name == "propose_booking":
-                        args = json.loads(tool_call.arguments)
-                        if pending_booking_at_turn_start and is_explicit_booking_confirmation(body):
+                        try:
+                            args = json.loads(tool_call.arguments or "{}")
+                        except (TypeError, json.JSONDecodeError):
+                            args = {}
+                        if not booking_proposal_has_live_evidence(
+                            args.get("service_id", ""),
+                            args.get("start_time", ""),
+                            availability_tool_slots,
+                        ):
+                            tool_result = {
+                                "status": "rejected",
+                                "reason": (
+                                    "The live availability must be checked first, and the exact service/time "
+                                    "must match a returned complete appointment time."
+                                ),
+                            }
+                        elif pending_booking_at_turn_start and is_explicit_booking_confirmation(body):
                             tool_result = {
                                 "status": "rejected",
                                 "reason": "A proposal already existed when this confirmation arrived; use confirm_booking.",
@@ -3432,11 +3541,6 @@ def run_sms_reply_logic(
                             )
                             if tool_result.get("status") == "awaiting_confirmation":
                                 booking_proposal_candidate = json.dumps(tool_result["proposal"])
-                        input_history.append({
-                            "type": "function_call_output",
-                            "call_id": tool_call.call_id,
-                            "output": json.dumps(tool_result),
-                        })
                     elif tool_call.name == "confirm_booking":
                         if not pending_booking_at_turn_start:
                             tool_result = {
@@ -3450,11 +3554,6 @@ def run_sms_reply_logic(
                                 body,
                             )
                             booking_confirmed = booking_confirmed or confirmed_now
-                        input_history.append({
-                            "type": "function_call_output",
-                            "call_id": tool_call.call_id,
-                            "output": json.dumps(tool_result),
-                        })
                     elif tool_call.name == "signal_customer_arrival":
                         arrival_recorded = record_customer_arrival_event(
                             db,
@@ -3462,27 +3561,31 @@ def run_sms_reply_logic(
                             source_message_id,
                             "ai",
                         )
-                        input_history.append({
-                            "type": "function_call_output",
-                            "call_id": tool_call.call_id,
-                            "output": json.dumps({
-                                "status": "recorded" if arrival_recorded else "already-recorded"
-                            }),
-                        })
+                        tool_result = {
+                            "status": "recorded" if arrival_recorded else "already-recorded"
+                        }
+                    else:
+                        tool_result = {"status": "rejected", "reason": "Unknown tool call."}
+                    tool_results[tool_call.call_id] = tool_result
+
+                for tool_call in tool_calls:
+                    input_history.append({
+                        "type": "function_call_output",
+                        "call_id": tool_call.call_id,
+                        "output": json.dumps(tool_results[tool_call.call_id]),
+                    })
 
                 # Preserve confirmation/cancellation state before the later stale-read
                 # protection expires ORM objects prior to SMS dispatch.
                 db.flush()
 
-                final_response = openai_client.responses.create(
+                response = openai_client.responses.create(
                     model="gpt-5.6-terra",
                     instructions=instructions,
                     input=input_history,
+                    tools=flat_tools,
                     store=False
                 )
-                assistant_reply = final_response.output_text
-            else:
-                assistant_reply = response.output_text
 
             availability_error = None if requested_booking_confirmed else validate_availability_claim(
                 assistant_reply or "",
@@ -3582,6 +3685,12 @@ def run_sms_reply_logic(
             at=reply_at_naive,
         )
         db.add(event_log)
+        if is_simulation and booking_proposal_candidate:
+            # The simulator renders drafts as the customer's visible reply, so it
+            # must retain the proposal for the simulated customer's next turn.
+            # Genuine approval-queue drafts are not treated as presented.
+            thread.pending_booking = booking_proposal_candidate
+            thread.pending_slots = None
     else:
         # The model call can take several seconds. Re-check immediately before
         # dispatch so a human answer sent while the model was working wins.
@@ -4184,6 +4293,7 @@ def webhook_sms(payload: WebhookSMSInput, background_tasks: BackgroundTasks, db:
                 provider_message_id,
                 received_at_naive,
                 dispatch_sms=not (is_testing or payload.isSimulation),
+                is_simulation=payload.isSimulation,
             )
             res = {"status": "success", "thread_id": thread.id}
             if booking_confirmed:

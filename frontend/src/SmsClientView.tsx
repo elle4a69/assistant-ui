@@ -16,6 +16,12 @@ import {
 } from 'lucide-react';
 import { formatMessageTimestamp } from './messageTimestamp';
 
+function canonicalPhone(phone: string) {
+  let digits = phone.replace(/\D/g, '');
+  if (digits.startsWith('0')) digits = `61${digits.slice(1)}`;
+  return digits;
+}
+
 export default function SmsClientView() {
   const [customerPhone, setCustomerPhone] = useState('');
   const [activePhone, setActivePhone] = useState<string | null>(null);
@@ -39,8 +45,10 @@ export default function SmsClientView() {
       setThreads(list);
       
       if (activePhone) {
-        const matched = list.find(t => t.customerPhone === activePhone);
+        const activeCanonicalPhone = canonicalPhone(activePhone);
+        const matched = list.find(t => canonicalPhone(t.customerPhone) === activeCanonicalPhone);
         if (matched) {
+          setActivePhone(matched.customerPhone);
           setThreadId(matched.id);
         }
       }
@@ -107,8 +115,10 @@ export default function SmsClientView() {
     const formatted = phone.trim();
     setActivePhone(formatted);
     // Find if thread already exists
-    const matched = threads.find(t => t.customerPhone === formatted);
+    const formattedCanonicalPhone = canonicalPhone(formatted);
+    const matched = threads.find(t => canonicalPhone(t.customerPhone) === formattedCanonicalPhone);
     if (matched) {
+      setActivePhone(matched.customerPhone);
       setThreadId(matched.id);
     } else {
       setThreadId(null);

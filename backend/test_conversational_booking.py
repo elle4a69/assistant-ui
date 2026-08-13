@@ -242,6 +242,45 @@ def test_availability_is_rechecked_after_confirmation(tmp_path, monkeypatch):
     db.close()
 
 
+def test_proposal_fails_closed_when_live_calendar_cannot_be_verified(tmp_path, monkeypatch):
+    (tmp_path / "services.json").write_text(
+        '[{"id":"service","name":"Service","duration":30,"price":100}]',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "load_working_hours", lambda: [
+        {"day": day, "enabled": True, "open": "00:00", "close": "23:59"}
+        for day in main.DAY_NAMES
+    ])
+
+    class UnavailableCalendar(FakeCalendar):
+        def get_busy_slots_authoritative(self, start, end):
+            raise OSError("calendar unavailable")
+
+    calendar = UnavailableCalendar()
+    monkeypatch.setattr(main, "calendar_service", calendar)
+    db = make_db()
+    thread = add_thread(db)
+    start = (current_business_time() + timedelta(days=2)).replace(
+        hour=14, minute=0, second=0, microsecond=0,
+    )
+
+    result = propose_conversational_booking(
+        thread,
+        service_id="service",
+        start_time=start.isoformat(),
+        customer_name="Example Customer",
+        notes=None,
+    )
+
+    assert result == {
+        "status": "rejected",
+        "reason": "Live calendar availability could not be verified. No booking was made.",
+    }
+    assert calendar.created == []
+    db.close()
+
+
 def test_live_reply_flow_proposes_then_confirms_on_the_next_customer_turn(tmp_path, monkeypatch):
     service = {"id": "service", "name": "Service", "duration": 30, "price": 100}
     (tmp_path / "services.json").write_text(json.dumps([service]), encoding="utf-8")
@@ -259,6 +298,11 @@ def test_live_reply_flow_proposes_then_confirms_on_the_next_customer_turn(tmp_pa
     start = (current_business_time() + timedelta(days=2)).replace(
         hour=14, minute=0, second=0, microsecond=0,
     )
+    thread.pending_slots = json.dumps([{
+        "service_id": "service",
+        "start": start.isoformat(),
+        "end": (start + timedelta(minutes=30)).isoformat(),
+    }])
     first_customer = Message(
         id="proposal-message",
         thread_id=thread.id,
@@ -378,6 +422,198 @@ def test_live_reply_flow_executes_booking_discovery_tool(monkeypatch):
 
     assert booked is False
     assert "2026-08-12T10:00:00+10:00" in json.dumps(client.calls[1]["input"])
+    db.close()
+
+
+def test_live_reply_flow_can_discover_then_propose_in_separate_tool_rounds(tmp_path, monkeypatch):
+    service = {"id": "service", "name": "Service", "duration": 60, "price": 200}
+    (tmp_path / "services.json").write_text(json.dumps([service]), encoding="utf-8")
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "load_working_hours", lambda: [
+        {"day": day, "enabled": True, "open": "00:00", "close": "23:59"}
+        for day in main.DAY_NAMES
+    ])
+    calendar = FakeCalendar()
+    monkeypatch.setattr(main, "calendar_service", calendar)
+    monkeypatch.setattr(main, "build_business_context", lambda query: main.get_live_services_context())
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
+    start = (current_business_time() + timedelta(days=2)).replace(
+        hour=14, minute=0, second=0, microsecond=0,
+    )
+
+    class ExactSlotSuite:
+        def execute(self, tool_name, arguments):
+            assert tool_name == "get_times_today"
+            assert arguments == {"service_id": "service"}
+            return {
+                "status": "ok",
+                "service_id": "service",
+                "slots": [{
+                    "service_id": "service",
+                    "start_time": start.isoformat(),
+                    "end_time": (start + timedelta(minutes=60)).isoformat(),
+                }],
+            }
+
+    monkeypatch.setattr(main, "get_booking_tool_suite", lambda: ExactSlotSuite())
+    db = make_db()
+    thread = add_thread(db)
+    customer = Message(
+        id="discover-then-propose-message",
+        thread_id=thread.id,
+        role="customer",
+        text="Book the one hour Service at 2pm. My name is Example Customer.",
+        provider_message_id="discover-then-propose-provider",
+        at=main.datetime.utcnow(),
+    )
+    db.add(customer)
+    db.commit()
+    client = SequenceClient([
+        FakeResponse(output=[FakeFunctionCall(
+            "get_times_today", {"service_id": "service"}, "availability-call",
+        )]),
+        FakeResponse(output=[FakeFunctionCall(
+            "propose_booking",
+            {
+                "service_id": "service",
+                "start_time": start.isoformat(),
+                "customer_name": "Example Customer",
+                "notes": None,
+            },
+            "proposal-call",
+        )]),
+        FakeResponse(output_text="Service for Example Customer at 2:00 PM for 60 minutes. Is that correct?"),
+    ])
+    monkeypatch.setattr(main, "openai_client", client)
+
+    booked, _ = run_sms_reply_logic(
+        db,
+        thread.id,
+        customer.text,
+        customer.provider_message_id,
+        customer.at,
+        dispatch_sms=False,
+    )
+
+    db.refresh(thread)
+    assert booked is False
+    assert thread.pending_booking is not None
+    assert json.loads(thread.pending_booking)["start_time"] == start.isoformat()
+    assert len(client.calls) == 3
+    assert all("tools" in call for call in client.calls[:2])
+    assert calendar.created == []
+    db.close()
+
+
+def test_proposal_without_verified_live_time_is_rejected(monkeypatch):
+    monkeypatch.setattr(main, "build_business_context", lambda query: "")
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
+    db = make_db()
+    thread = add_thread(db)
+    start = (current_business_time() + timedelta(days=2)).replace(
+        hour=14, minute=0, second=0, microsecond=0,
+    )
+    customer = Message(
+        id="unverified-proposal-message",
+        thread_id=thread.id,
+        role="customer",
+        text="Book it for 2pm. My name is Example Customer.",
+        provider_message_id="unverified-proposal-provider",
+        at=main.datetime.utcnow(),
+    )
+    db.add(customer)
+    db.commit()
+    client = SequenceClient([
+        FakeResponse(output=[FakeFunctionCall(
+            "propose_booking",
+            {
+                "service_id": "service",
+                "start_time": start.isoformat(),
+                "customer_name": "Example Customer",
+                "notes": None,
+            },
+            "proposal-call",
+        )]),
+        FakeResponse(output_text="I need to check that time before I can prepare the booking."),
+    ])
+    monkeypatch.setattr(main, "openai_client", client)
+
+    booked, _ = run_sms_reply_logic(
+        db,
+        thread.id,
+        customer.text,
+        customer.provider_message_id,
+        customer.at,
+        dispatch_sms=False,
+    )
+
+    db.refresh(thread)
+    assert booked is False
+    assert thread.pending_booking is None
+    tool_output = json.dumps(client.calls[1]["input"])
+    assert "live availability must be checked first" in tool_output
+    db.close()
+
+
+def test_simulator_retains_proposal_while_training_mode_creates_a_draft(tmp_path, monkeypatch):
+    service = {"id": "service", "name": "Service", "duration": 30, "price": 100}
+    (tmp_path / "services.json").write_text(json.dumps([service]), encoding="utf-8")
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "load_working_hours", lambda: [
+        {"day": day, "enabled": True, "open": "00:00", "close": "23:59"}
+        for day in main.DAY_NAMES
+    ])
+    monkeypatch.setattr(main, "calendar_service", FakeCalendar())
+    monkeypatch.setattr(main, "build_business_context", lambda query: main.get_live_services_context())
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", True)
+    start = (current_business_time() + timedelta(days=2)).replace(
+        hour=14, minute=0, second=0, microsecond=0,
+    )
+    db = make_db()
+    thread = add_thread(db)
+    thread.pending_slots = json.dumps([{
+        "service_id": "service",
+        "start": start.isoformat(),
+        "end": (start + timedelta(minutes=30)).isoformat(),
+    }])
+    customer = Message(
+        id="simulator-proposal-message",
+        thread_id=thread.id,
+        role="customer",
+        text="Book that Service at 2pm. My name is Example Customer.",
+        provider_message_id="simulator-proposal-provider",
+        at=main.datetime.utcnow(),
+    )
+    db.add(customer)
+    db.commit()
+    client = SequenceClient([
+        FakeResponse(output=[FakeFunctionCall(
+            "propose_booking",
+            {
+                "service_id": "service",
+                "start_time": start.isoformat(),
+                "customer_name": "Example Customer",
+                "notes": None,
+            },
+            "proposal-call",
+        )]),
+        FakeResponse(output_text="Service for Example Customer at 2:00 PM for 30 minutes. Is that correct?"),
+    ])
+    monkeypatch.setattr(main, "openai_client", client)
+
+    run_sms_reply_logic(
+        db,
+        thread.id,
+        customer.text,
+        customer.provider_message_id,
+        customer.at,
+        dispatch_sms=False,
+        is_simulation=True,
+    )
+
+    db.refresh(thread)
+    assert thread.pending_booking is not None
+    assert db.query(Message).filter(Message.role == "draft").count() == 1
     db.close()
 
 
