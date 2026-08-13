@@ -829,19 +829,30 @@ export interface FirstContactAutoresponderConfig {
   message: string;
 }
 
-export async function getFirstContactAutoresponder(): Promise<FirstContactAutoresponderConfig> {
+export interface FirstContactAutoresponderSettings {
+  accounts: {
+    primary: FirstContactAutoresponderConfig;
+    secondary: FirstContactAutoresponderConfig;
+  };
+  labels: {
+    primary: string;
+    secondary: string;
+  };
+}
+
+export async function getFirstContactAutoresponder(): Promise<FirstContactAutoresponderSettings> {
   const response = await fetch(`${API_BASE}/api/settings/first-contact-autoresponder`);
   if (!response.ok) throw new Error(`Failed to fetch first-contact auto-responder: ${response.statusText}`);
   return response.json();
 }
 
 export async function saveFirstContactAutoresponder(
-  config: FirstContactAutoresponderConfig
+  config: FirstContactAutoresponderSettings
 ): Promise<{ status: string }> {
   const response = await fetch(`${API_BASE}/api/settings/first-contact-autoresponder`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(config),
+    body: JSON.stringify({ accounts: config.accounts }),
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);

@@ -1998,27 +1998,70 @@ FIRST_CONTACT_AUTORESPONDER_DEFAULT = {
     "message": "",
 }
 
-def load_first_contact_autoresponder() -> Dict[str, Any]:
-    config = dict(FIRST_CONTACT_AUTORESPONDER_DEFAULT)
+FIRST_CONTACT_ACCOUNT_KEYS = ("primary", "secondary")
+
+
+def normalize_first_contact_autoresponder(config: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(FIRST_CONTACT_AUTORESPONDER_DEFAULT)
+    normalized.update(config)
+    try:
+        normalized["cooldownDays"] = max(1, min(3650, int(normalized.get("cooldownDays", 30))))
+    except (TypeError, ValueError):
+        normalized["cooldownDays"] = 30
+    try:
+        normalized["delaySeconds"] = max(0, min(3600, int(normalized.get("delaySeconds", 0))))
+    except (TypeError, ValueError):
+        normalized["delaySeconds"] = 0
+    normalized["enabled"] = bool(normalized.get("enabled", False))
+    normalized["message"] = str(normalized.get("message", "")).strip()
+    return normalized
+
+
+def load_first_contact_autoresponders() -> Dict[str, Dict[str, Any]]:
+    accounts = {
+        key: dict(FIRST_CONTACT_AUTORESPONDER_DEFAULT)
+        for key in FIRST_CONTACT_ACCOUNT_KEYS
+    }
+    saved: Dict[str, Any] = {}
     if os.path.exists(FIRST_CONTACT_AUTORESPONDER_PATH):
         try:
             with open(FIRST_CONTACT_AUTORESPONDER_PATH, "r", encoding="utf-8") as f:
-                saved = json.load(f)
-            if isinstance(saved, dict):
-                config.update(saved)
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                saved = loaded
         except Exception as e:
             print(f"Failed to read first-contact auto-responder settings: {e}")
-    try:
-        config["cooldownDays"] = max(1, min(3650, int(config.get("cooldownDays", 30))))
-    except (TypeError, ValueError):
-        config["cooldownDays"] = 30
-    try:
-        config["delaySeconds"] = max(0, min(3600, int(config.get("delaySeconds", 0))))
-    except (TypeError, ValueError):
-        config["delaySeconds"] = 0
-    config["enabled"] = bool(config.get("enabled", False))
-    config["message"] = str(config.get("message", "")).strip()
-    return config
+
+    if isinstance(saved.get("accounts"), dict):
+        for key in FIRST_CONTACT_ACCOUNT_KEYS:
+            if isinstance(saved["accounts"].get(key), dict):
+                accounts[key].update(saved["accounts"][key])
+    elif saved:
+        # The original single responder belongs to the original Tori account.
+        accounts["primary"].update(saved)
+
+    return {
+        key: normalize_first_contact_autoresponder(config)
+        for key, config in accounts.items()
+    }
+
+
+def load_first_contact_autoresponder(account_key: str = "primary") -> Dict[str, Any]:
+    accounts = load_first_contact_autoresponders()
+    return accounts.get(account_key, accounts["primary"])
+
+
+def save_first_contact_autoresponders(accounts: Dict[str, Dict[str, Any]]) -> None:
+    normalized = {
+        key: normalize_first_contact_autoresponder(accounts.get(key, {}))
+        for key in FIRST_CONTACT_ACCOUNT_KEYS
+    }
+    os.makedirs(os.path.dirname(FIRST_CONTACT_AUTORESPONDER_PATH), exist_ok=True)
+    temp_path = f"{FIRST_CONTACT_AUTORESPONDER_PATH}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump({"accounts": normalized}, f, indent=2)
+    os.replace(temp_path, FIRST_CONTACT_AUTORESPONDER_PATH)
+
 
 # Pydantic Schemas for Requests
 class WebhookSMSInput(BaseModel):
@@ -2114,6 +2157,20 @@ class InformationRequestResponseInput(BaseModel):
         self.information = self.information.strip()
         if not self.information:
             raise ValueError("Information is required.")
+        return self
+
+
+class FirstContactAutoresponderAccountsInput(BaseModel):
+    accounts: Dict[str, FirstContactAutoresponderInput]
+
+    @model_validator(mode="after")
+    def require_known_accounts(self):
+        unknown = set(self.accounts) - set(FIRST_CONTACT_ACCOUNT_KEYS)
+        if unknown:
+            raise ValueError(f"Unknown SMS account: {sorted(unknown)[0]}")
+        for key in FIRST_CONTACT_ACCOUNT_KEYS:
+            if key not in self.accounts:
+                raise ValueError(f"Missing SMS account: {key}")
         return self
 
 
@@ -3730,12 +3787,12 @@ def _process_first_contact_auto_reply(
             print(f"[First Contact Delay] Automatic replies are off for {thread_id}. Reply canceled.")
             return
 
-        current_config = load_first_contact_autoresponder()
+        current_config = load_first_contact_autoresponder(thread.sms_account_key)
         if not current_config["enabled"]:
             print(f"[First Contact Delay] First-contact responder is off. Reply canceled for {thread_id}.")
             return
 
-        send_first_contact_auto_reply(db, thread, customer_message, config, dispatch_sms)
+        send_first_contact_auto_reply(db, thread, customer_message, current_config, dispatch_sms)
     except Exception as e:
         print(f"[First Contact Delay Error] {e}")
         db.rollback()
@@ -3946,7 +4003,7 @@ def webhook_sms(payload: WebhookSMSInput, background_tasks: BackgroundTasks, db:
                 "duplicate": True,
             }
     
-    first_contact_config = load_first_contact_autoresponder()
+    first_contact_config = load_first_contact_autoresponder(sms_account_key)
     first_contact_eligible = False
 
     # Locate or create thread by customer phone
@@ -5087,18 +5144,28 @@ def save_qa_rules(rules: list[QARuleItem]):
 
 @app.get("/api/settings/first-contact-autoresponder")
 def get_first_contact_autoresponder():
-    return load_first_contact_autoresponder()
+    accounts = load_first_contact_autoresponders()
+    return {
+        **accounts["primary"],
+        "accounts": accounts,
+        "labels": {"primary": "Tori", "secondary": "Anonymous"},
+    }
 
 @app.post("/api/settings/first-contact-autoresponder")
-def save_first_contact_autoresponder(payload: FirstContactAutoresponderInput):
-    config = payload.model_dump()
+def save_first_contact_autoresponder(
+    payload: FirstContactAutoresponderInput | FirstContactAutoresponderAccountsInput,
+):
+    if isinstance(payload, FirstContactAutoresponderAccountsInput):
+        accounts = {
+            key: config.model_dump()
+            for key, config in payload.accounts.items()
+        }
+    else:
+        accounts = load_first_contact_autoresponders()
+        accounts["primary"] = payload.model_dump()
     try:
-        os.makedirs(os.path.dirname(FIRST_CONTACT_AUTORESPONDER_PATH), exist_ok=True)
-        temp_path = f"{FIRST_CONTACT_AUTORESPONDER_PATH}.tmp"
-        with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)
-        os.replace(temp_path, FIRST_CONTACT_AUTORESPONDER_PATH)
-        return {"status": "success", **config}
+        save_first_contact_autoresponders(accounts)
+        return {"status": "success", "accounts": load_first_contact_autoresponders()}
     except Exception as e:
         raise HTTPException(
             status_code=500,

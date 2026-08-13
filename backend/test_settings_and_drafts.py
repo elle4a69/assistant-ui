@@ -55,6 +55,47 @@ def test_avatar_setting_can_be_saved_as_false(monkeypatch, tmp_path):
     assert json.loads(settings_path.read_text(encoding="utf-8")) == {"showMessageAvatars": False}
 
 
+def test_legacy_first_contact_settings_migrate_to_tori_only(monkeypatch, tmp_path):
+    settings_path = tmp_path / "first_contact_autoresponder.json"
+    settings_path.write_text(json.dumps({
+        "enabled": True,
+        "cooldownDays": 45,
+        "delaySeconds": 12,
+        "message": "Existing Tori greeting",
+    }), encoding="utf-8")
+    monkeypatch.setattr(main, "FIRST_CONTACT_AUTORESPONDER_PATH", str(settings_path))
+
+    accounts = main.load_first_contact_autoresponders()
+
+    assert accounts["primary"] == {
+        "enabled": True,
+        "cooldownDays": 45,
+        "delaySeconds": 12,
+        "message": "Existing Tori greeting",
+    }
+    assert accounts["secondary"] == main.FIRST_CONTACT_AUTORESPONDER_DEFAULT
+
+
+def test_first_contact_settings_save_independent_accounts(monkeypatch, tmp_path):
+    settings_path = tmp_path / "first_contact_autoresponder.json"
+    monkeypatch.setattr(main, "FIRST_CONTACT_AUTORESPONDER_PATH", str(settings_path))
+    payload = main.FirstContactAutoresponderAccountsInput(accounts={
+        "primary": main.FirstContactAutoresponderInput(
+            enabled=True, cooldownDays=30, delaySeconds=5, message="Tori hello",
+        ),
+        "secondary": main.FirstContactAutoresponderInput(
+            enabled=True, cooldownDays=7, delaySeconds=20, message="Anonymous hello",
+        ),
+    })
+
+    result = main.save_first_contact_autoresponder(payload)
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+
+    assert result["status"] == "success"
+    assert saved["accounts"]["primary"]["message"] == "Tori hello"
+    assert saved["accounts"]["secondary"]["message"] == "Anonymous hello"
+
+
 def test_clear_pending_drafts_removes_all_drafts_and_updates_threads():
     db = make_db()
     add_thread(db, "thread-001")

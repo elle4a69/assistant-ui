@@ -33,6 +33,7 @@ import {
   getFirstContactAutoresponder,
   saveFirstContactAutoresponder,
   FirstContactAutoresponderConfig,
+  FirstContactAutoresponderSettings,
   clearPendingDrafts
 } from './api';
 import {
@@ -195,11 +196,12 @@ export default function SettingsView() {
   const [savingQaRules, setSavingQaRules] = useState(false);
 
   // First-contact auto-responder state
-  const [firstContactConfig, setFirstContactConfig] = useState<FirstContactAutoresponderConfig>({
-    enabled: false,
-    cooldownDays: 30,
-    delaySeconds: 0,
-    message: ''
+  const [firstContactConfig, setFirstContactConfig] = useState<FirstContactAutoresponderSettings>({
+    accounts: {
+      primary: { enabled: false, cooldownDays: 30, delaySeconds: 0, message: '' },
+      secondary: { enabled: false, cooldownDays: 30, delaySeconds: 0, message: '' }
+    },
+    labels: { primary: 'Tori', secondary: 'Anonymous' }
   });
   const [savingFirstContact, setSavingFirstContact] = useState(false);
 
@@ -772,17 +774,21 @@ export default function SettingsView() {
   };
 
   const handleSaveFirstContact = async () => {
-    if (firstContactConfig.enabled && !firstContactConfig.message.trim()) {
-      triggerBanner('error', 'Enter a first-contact reply message before enabling it.');
-      return;
+    for (const key of ['primary', 'secondary'] as const) {
+      const account = firstContactConfig.accounts[key];
+      if (account.enabled && !account.message.trim()) {
+        triggerBanner('error', `Enter a first-contact reply message for ${firstContactConfig.labels[key]} before enabling it.`);
+        return;
+      }
     }
     setSavingFirstContact(true);
     try {
       const config = {
         ...firstContactConfig,
-        cooldownDays: Math.max(1, Math.min(3650, Number(firstContactConfig.cooldownDays) || 1)),
-        delaySeconds: Math.max(0, Math.min(3600, Number(firstContactConfig.delaySeconds) || 0)),
-        message: firstContactConfig.message.trim()
+        accounts: {
+          primary: normalizeFirstContactAccount(firstContactConfig.accounts.primary),
+          secondary: normalizeFirstContactAccount(firstContactConfig.accounts.secondary)
+        }
       };
       await saveFirstContactAutoresponder(config);
       setFirstContactConfig(config);
@@ -793,6 +799,28 @@ export default function SettingsView() {
     } finally {
       setSavingFirstContact(false);
     }
+  };
+
+  const normalizeFirstContactAccount = (
+    account: FirstContactAutoresponderConfig
+  ): FirstContactAutoresponderConfig => ({
+    ...account,
+    cooldownDays: Math.max(1, Math.min(3650, Number(account.cooldownDays) || 1)),
+    delaySeconds: Math.max(0, Math.min(3600, Number(account.delaySeconds) || 0)),
+    message: account.message.trim()
+  });
+
+  const updateFirstContactAccount = (
+    key: 'primary' | 'secondary',
+    update: Partial<FirstContactAutoresponderConfig>
+  ) => {
+    setFirstContactConfig(current => ({
+      ...current,
+      accounts: {
+        ...current.accounts,
+        [key]: { ...current.accounts[key], ...update }
+      }
+    }));
   };
 
   const updateWorkingHourField = (index: number, field: keyof WorkingHourEntry, value: string | boolean) => {
@@ -2017,97 +2045,97 @@ export default function SettingsView() {
 
         {/* First Contact Auto-Responder Card */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-          <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center justify-between gap-3">
+          <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-3">
             <div className="flex items-center gap-2">
               <MessageSquare className="w-5 h-5 text-emerald-600" />
               <div>
-                <h2 className="font-bold text-slate-800 text-sm">First Contact Auto-Responder</h2>
-                <p className="text-[10px] text-slate-500">Send one fixed reply after a phone number has been quiet for the chosen number of days.</p>
+                <h2 className="font-bold text-slate-800 text-sm">First Contact Auto-Responders</h2>
+                <p className="text-[10px] text-slate-500">Each SMS number sends its own fixed greeting before normal AI replies begin.</p>
               </div>
             </div>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={firstContactConfig.enabled}
-              onClick={() => setFirstContactConfig(current => ({ ...current, enabled: !current.enabled }))}
-              className={`relative h-6 w-11 shrink-0 rounded-full border-none p-0 transition-colors cursor-pointer ${
-                firstContactConfig.enabled ? 'bg-emerald-500' : 'bg-slate-300'
-              }`}
-            >
-              <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${
-                firstContactConfig.enabled ? 'translate-x-5' : 'translate-x-0'
-              }`} />
-            </button>
           </div>
 
-          <div className="p-5 flex flex-col gap-4 font-sans">
-            <div className="grid grid-cols-1 sm:grid-cols-[180px_180px_1fr] gap-4">
-              <div className="flex flex-col gap-1.5">
-                <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wider">Quiet Period</label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min={1}
-                    max={3650}
-                    value={firstContactConfig.cooldownDays}
-                    onChange={(e) => setFirstContactConfig(current => ({
-                      ...current,
-                      cooldownDays: Number(e.target.value)
-                    }))}
-                    className="w-24 text-xs border border-slate-300 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-slate-50"
-                  />
-                  <span className="text-xs font-semibold text-slate-600">days</span>
-                </div>
-                <p className="text-[10px] text-slate-400">The same number can receive this reply again only after this many days without messaging.</p>
-              </div>
+          <div className="p-5 flex flex-col gap-5 font-sans">
+            {(['primary', 'secondary'] as const).map((key) => {
+              const account = firstContactConfig.accounts[key];
+              const label = firstContactConfig.labels[key];
+              return (
+                <section key={key} className="rounded-xl border border-slate-200 bg-slate-50/40 p-4">
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-extrabold text-slate-800">{label}</h3>
+                      <p className="text-[10px] text-slate-500">{key === 'primary' ? 'Original SMS account · Line 1' : 'Second SMS account · Line 2'}</p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-label={`Enable ${label} first-contact reply`}
+                      aria-checked={account.enabled}
+                      onClick={() => updateFirstContactAccount(key, { enabled: !account.enabled })}
+                      className={`relative h-6 w-11 shrink-0 rounded-full border-none p-0 transition-colors cursor-pointer ${account.enabled ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                    >
+                      <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${account.enabled ? 'translate-x-5' : 'translate-x-0'}`} />
+                    </button>
+                  </div>
 
-              <div className="flex flex-col gap-1.5">
-                <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wider">Response Delay</label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min={0}
-                    max={3600}
-                    step={1}
-                    value={firstContactConfig.delaySeconds}
-                    onChange={(e) => setFirstContactConfig(current => ({
-                      ...current,
-                      delaySeconds: Number(e.target.value)
-                    }))}
-                    className="w-24 text-xs border border-slate-300 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-slate-50"
-                  />
-                  <span className="text-xs font-semibold text-slate-600">seconds</span>
-                </div>
-                <p className="text-[10px] text-slate-400">Wait this long after the first message before sending the fixed reply.</p>
-              </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-[180px_180px_1fr] gap-4">
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wider">Quiet Period</label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          min={1}
+                          max={3650}
+                          value={account.cooldownDays}
+                          onChange={(event) => updateFirstContactAccount(key, { cooldownDays: Number(event.target.value) })}
+                          className="w-24 text-xs border border-slate-300 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
+                        />
+                        <span className="text-xs font-semibold text-slate-600">days</span>
+                      </div>
+                      <p className="text-[10px] text-slate-400">Send again only after this many quiet days on this SMS line.</p>
+                    </div>
 
-              <div className="flex flex-col gap-1.5">
-                <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wider">Fixed Reply Message</label>
-                <textarea
-                  value={firstContactConfig.message}
-                  onChange={(e) => setFirstContactConfig(current => ({ ...current, message: e.target.value }))}
-                  rows={4}
-                  maxLength={1600}
-                  placeholder="Type the exact reply to send on first contact..."
-                  className="text-xs border border-slate-300 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-slate-50"
-                />
-                <p className="text-[10px] text-slate-400">This reply is sent instead of an AI reply for that first message, preventing duplicate responses.</p>
-              </div>
-            </div>
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wider">Response Delay</label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          min={0}
+                          max={3600}
+                          value={account.delaySeconds}
+                          onChange={(event) => updateFirstContactAccount(key, { delaySeconds: Number(event.target.value) })}
+                          className="w-24 text-xs border border-slate-300 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
+                        />
+                        <span className="text-xs font-semibold text-slate-600">seconds</span>
+                      </div>
+                      <p className="text-[10px] text-slate-400">Wait before sending this line's greeting.</p>
+                    </div>
 
-            <div className="flex items-center justify-between gap-3 pt-2 border-t border-slate-150">
-              <span className={`text-[10px] font-extrabold px-2.5 py-1 rounded-full ${
-                firstContactConfig.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'
-              }`}>
-                {firstContactConfig.enabled ? 'Enabled' : 'Off'}
-              </span>
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wider">{label} Fixed Reply</label>
+                      <textarea
+                        value={account.message}
+                        onChange={(event) => updateFirstContactAccount(key, { message: event.target.value })}
+                        rows={4}
+                        maxLength={1600}
+                        placeholder={`Type the exact first reply for ${label}...`}
+                        className="text-xs border border-slate-300 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
+                      />
+                      <p className="text-[10px] text-slate-400">Sent instead of an AI reply for the first message on this line.</p>
+                    </div>
+                  </div>
+                </section>
+              );
+            })}
+
+            <div className="flex justify-end border-t border-slate-200 pt-4">
               <button
                 type="button"
                 onClick={handleSaveFirstContact}
                 disabled={savingFirstContact}
                 className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-bold text-xs px-4 py-2.5 rounded-lg shadow-sm transition-all cursor-pointer border border-transparent"
               >
-                {savingFirstContact ? 'Saving...' : 'Save First Contact Reply'}
+                {savingFirstContact ? 'Saving...' : 'Save Both First Contact Replies'}
               </button>
             </div>
           </div>

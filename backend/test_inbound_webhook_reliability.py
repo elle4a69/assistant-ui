@@ -101,6 +101,52 @@ def test_same_customer_on_two_inbound_numbers_creates_separate_threads(monkeypat
     db.close()
 
 
+def test_first_contact_greeting_is_selected_by_inbound_sms_account(monkeypatch):
+    db = make_db()
+    monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "load_accounts_config",
+        lambda: {
+            "primary": {"sender": "61400000010", "enabled": True},
+            "secondary": {"sender": "61420136756", "enabled": True},
+        },
+    )
+    configs = {
+        "primary": {"enabled": True, "cooldownDays": 30, "delaySeconds": 5, "message": "Tori hello"},
+        "secondary": {"enabled": True, "cooldownDays": 7, "delaySeconds": 20, "message": "Anonymous hello"},
+    }
+    selected = []
+
+    def account_config(key="primary"):
+        selected.append(key)
+        return configs[key]
+
+    monkeypatch.setattr(main, "load_first_contact_autoresponder", account_config)
+
+    primary_tasks = BackgroundTasks()
+    primary = webhook_sms(WebhookSMSInput.model_validate({
+        "sender": "0412 345 678",
+        "to": "61400000010",
+        "message": "Hello Tori",
+        "received_at": "2026-08-11 10:00:00",
+    }), primary_tasks, db)
+    secondary_tasks = BackgroundTasks()
+    secondary = webhook_sms(WebhookSMSInput.model_validate({
+        "sender": "0412 345 678",
+        "to": "61420136756",
+        "message": "Hello Anonymous",
+        "received_at": "2026-08-11 10:00:01",
+    }), secondary_tasks, db)
+
+    assert selected == ["primary", "secondary"]
+    assert primary["first_contact_delay_seconds"] == 5
+    assert secondary["first_contact_delay_seconds"] == 20
+    assert primary_tasks.tasks[0].args[2]["message"] == "Tori hello"
+    assert secondary_tasks.tasks[0].args[2]["message"] == "Anonymous hello"
+    db.close()
+
+
 def test_real_inbound_message_id_still_deduplicates_retries(monkeypatch):
     db = make_db()
     monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", False)
