@@ -308,6 +308,24 @@ def test_operations_web_research_uses_bounded_builtin_search(monkeypatch):
     assert client.responses.calls[0]["store"] is False
 
 
+def test_duplicate_improvement_proposal_reuses_existing_record():
+    db = make_db()
+    arguments = {
+        "title": "Enforce line identity isolation",
+        "description": "Keep every prompt and sender tied to its receiving SMS account.",
+    }
+    first = main.execute_operations_tool(db, "create_improvement_proposal", arguments, "Do it")
+    second = main.execute_operations_tool(db, "create_improvement_proposal", arguments, "Proceed")
+
+    assert first["status"] == "proposed"
+    assert second["status"] == "already_proposed"
+    assert second["proposal_id"] == first["proposal_id"]
+    assert db.query(main.OperationsAction).filter(
+        main.OperationsAction.action_type == "improvement_proposal"
+    ).count() == 1
+    db.close()
+
+
 def test_realtime_session_uses_server_key_and_current_voice_model(monkeypatch):
     captured = {}
 

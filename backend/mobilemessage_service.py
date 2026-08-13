@@ -111,14 +111,22 @@ def save_accounts_config(updated_accounts: Dict[str, Dict[str, Any]]) -> bool:
         print(f"Error saving mobilemessage.json: {e}")
         return False
 
-def account_key_for_inbound_number(to_phone: str) -> str:
+def matched_account_key_for_inbound_number(to_phone: str) -> Optional[str]:
     destination = normalize_sms_destination(to_phone)
     if not destination:
-        return "primary"
+        return None
     for key, config in load_accounts_config().items():
         sender = normalize_sms_destination(str(config.get("sender", "")))
         if config.get("enabled") and sender == destination:
             return key
+    return None
+
+
+def account_key_for_inbound_number(to_phone: str) -> str:
+    """Compatibility resolver. Live webhook routing performs strict matching."""
+    matched = matched_account_key_for_inbound_number(to_phone)
+    if matched:
+        return matched
     return "primary"
 
 
@@ -160,6 +168,8 @@ def send_sms(
     idempotency_key: Optional[str] = None,
     account_key: str = "primary",
 ) -> Dict[str, Any]:
+    if account_key not in ACCOUNT_KEYS:
+        return {"status": "error", "reason": "Unknown SMS account"}
     # Calling without an argument for primary preserves compatibility with
     # existing wrappers that pre-date multi-account support.
     cfg = load_config() if account_key == "primary" else load_config(account_key)
@@ -185,11 +195,17 @@ def send_sms(
             ),
         }
 
+    configured_sender = str(cfg.get("sender", "")).strip()
+    if custom_sender and configured_sender:
+        requested_sender = normalize_sms_destination(custom_sender)
+        expected_sender = normalize_sms_destination(configured_sender)
+        if requested_sender != expected_sender:
+            return {"status": "error", "reason": "Sender does not belong to the selected SMS account"}
     sender_id = _resolve_sender(
         account_key,
         username,
         password,
-        (custom_sender or cfg.get("sender", "")).strip(),
+        (custom_sender or configured_sender).strip(),
     )
     if not sender_id:
         print("MobileMessage dispatch failed (no registered sender available).")

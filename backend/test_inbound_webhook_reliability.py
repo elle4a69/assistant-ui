@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime
 
+import pytest
 from fastapi import BackgroundTasks
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -33,6 +34,11 @@ def receive(db, raw_payload):
 def test_original_outbound_id_does_not_collapse_separate_inbound_messages(monkeypatch):
     db = make_db()
     monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", False)
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "load_accounts_config",
+        lambda: {"primary": {"sender": "61400000010", "enabled": True}},
+    )
     common = {
         "sender": "0412 345 678",
         "to": "61400000010",
@@ -200,6 +206,31 @@ def test_secondary_line_is_anonymous_autoresponder_only(monkeypatch):
         main.ThreadEvent.type == "ai-reply-skipped",
     ).one()
     assert "account-autoresponder-only" in skipped.meta
+    db.close()
+
+
+def test_unknown_supplied_inbound_number_is_rejected_not_routed_to_tori(monkeypatch):
+    db = make_db()
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "load_accounts_config",
+        lambda: {
+            "primary": {"sender": "61400000010", "enabled": True},
+            "secondary": {"sender": "61420136756", "enabled": True},
+        },
+    )
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        receive(db, {
+            "sender": "0412 345 678",
+            "to": "61499999999",
+            "message": "Do not route this to Tori",
+            "message_id": "unknown-destination",
+            "received_at": "2026-08-13 10:00:00",
+        })
+
+    assert exc_info.value.status_code == 422
+    assert db.query(main.Thread).count() == 0
     db.close()
 
 
