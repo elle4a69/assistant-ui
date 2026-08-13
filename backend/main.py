@@ -635,9 +635,9 @@ def build_model_input(
     history_messages: list[Any],
     current_history_text: str,
     enriched_current_prompt: str,
-    history_limit: int = 12,
+    history_limit: int = 100,
 ) -> list[dict[str, str]]:
-    """Map stored chat history and replace the latest inbound text with its context, validating zero unresolved placeholders."""
+    """Map deep chronological history and consolidate the active customer burst."""
     selected = list(history_messages[-history_limit:])
     current_index = None
     for index in range(len(selected) - 1, -1, -1):
@@ -648,9 +648,17 @@ def build_model_input(
             current_index = index
             break
 
+    burst_start = current_index
+    if current_index is not None:
+        while burst_start and getattr(selected[burst_start - 1], "role", None) == "customer":
+            burst_start -= 1
+
     model_input: list[dict[str, str]] = []
     for index, message in enumerate(selected):
         role = getattr(message, "role", None)
+        if current_index is not None and burst_start <= index < current_index and role == "customer":
+            # The enriched current prompt already contains the complete burst.
+            continue
         if role == "customer":
             api_role = "user"
         elif role in ("agent", "system", "draft"):
@@ -677,6 +685,19 @@ def build_model_input(
         validate_no_unresolved_placeholders(item["content"], context_label=f"input role '{item['role']}'")
 
     return model_input
+
+
+def current_customer_burst(history_messages: List[Any], fallback: str) -> str:
+    """Combine consecutive customer fragments since the most recent reply."""
+    fragments: List[str] = []
+    for message in reversed(history_messages):
+        if getattr(message, "role", None) != "customer":
+            break
+        text = str(getattr(message, "text", "")).strip()
+        if text:
+            fragments.append(text)
+    fragments.reverse()
+    return "\n".join(fragments) or fallback
 
 
 def assemble_safe_prompt(
@@ -2664,6 +2685,35 @@ def human_replied_after(db: Session, thread_id: str, received_at: datetime) -> b
     ).first() is not None
 
 
+def latest_customer_message(db: Session, thread_id: str) -> Optional[Message]:
+    return (
+        db.query(Message)
+        .filter(Message.thread_id == thread_id, Message.role == "customer")
+        .order_by(Message.at.desc(), Message.id.desc())
+        .first()
+    )
+
+
+def is_latest_customer_turn(
+    db: Session,
+    thread_id: str,
+    provider_message_id: str,
+    received_at: datetime,
+    body: str,
+) -> bool:
+    """Only the newest inbound message may own the reply for a customer burst."""
+    latest = latest_customer_message(db, thread_id)
+    if not latest:
+        return False
+    if provider_message_id and latest.provider_message_id:
+        return latest.provider_message_id == provider_message_id
+    return latest.at == received_at and latest.text == body
+
+
+class SupersededCustomerTurn(Exception):
+    """Stop work whose source message is no longer the newest customer turn."""
+
+
 def customer_booking_guidance(
     bookings: List[Dict[str, Any]],
     requested_time: Optional[datetime],
@@ -3239,6 +3289,17 @@ def run_sms_reply_logic(
     if not account_allows_conversational_ai(thread.sms_account_key):
         print(f"[Autoresponder Skipped] Conversational AI is disabled for {thread.sms_account_key}.")
         return False, False
+    if not is_latest_customer_turn(db, thread_id, provider_message_id, received_at_naive, body):
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread_id,
+            type="ai-reply-cancelled",
+            agent_id=None,
+            meta=json.dumps({"reason": "superseded-by-newer-customer-message"}),
+            at=datetime.utcnow(),
+        ))
+        db.commit()
+        return False, False
     if not draft_only and human_replied_after(db, thread_id, received_at_naive):
         db.add(ThreadEvent(
             id=str(uuid.uuid4()),
@@ -3254,8 +3315,15 @@ def run_sms_reply_logic(
         
     booking_confirmed = False
     slots_presented = False
-    clean_body = body.strip().lower()
-    if thread.pending_booking and is_explicit_booking_rejection(body):
+    history_msgs = (
+        db.query(Message)
+        .filter(Message.thread_id == thread.id)
+        .order_by(Message.at.asc(), Message.id.asc())
+        .all()
+    )
+    effective_body = current_customer_burst(history_msgs, body)
+    clean_body = effective_body.strip().lower()
+    if thread.pending_booking and is_explicit_booking_rejection(effective_body):
         thread.pending_booking = None
     pending_booking_at_turn_start = bool(thread.pending_booking)
     booking_proposal_candidate: Optional[str] = None
@@ -3275,7 +3343,7 @@ def run_sms_reply_logic(
             thread.pending_slots = None
     
     # Step 1: Read uploaded knowledge plus the authoritative live Settings catalogue.
-    retrieved_context = build_business_context(body)
+    retrieved_context = build_business_context(effective_body)
     
     now_local = current_business_time()
     reply_at_naive = datetime.utcnow()
@@ -3289,7 +3357,7 @@ def run_sms_reply_logic(
         now_local + timedelta(days=14),
         db=db,
     )
-    requested_time = extract_requested_business_time(body, now_local)
+    requested_time = extract_requested_business_time(effective_body, now_local)
     booking_guidance, requested_booking_confirmed = customer_booking_guidance(
         customer_bookings,
         requested_time,
@@ -3349,13 +3417,13 @@ def run_sms_reply_logic(
     })
     user_prompt_rendered = render_template_variables(user_prompt_tmpl, {
         **business_variables,
-        "message": body,
+        "message": effective_body,
         "knowledge": retrieved_context,
         "slots": slots_str,
     })
     
     # Check Q&A Rules first
-    assistant_reply = match_qa_rule(body)
+    assistant_reply = match_qa_rule(effective_body)
     rejected_reply_reason: Optional[str] = None
     if assistant_reply:
         print(f"[QA Rules Match] Trigger matched. Using pre-configured reply.")
@@ -3425,7 +3493,7 @@ def run_sms_reply_logic(
                 },
             ]
             
-            examples = get_style_examples(body)
+            examples = get_style_examples(effective_body)
             instructions = build_model_instructions(
                 system_prompt_rendered,
                 examples,
@@ -3436,6 +3504,11 @@ def run_sms_reply_logic(
                 "'I can't check that right now', 'just a sec', or similar. If the supplied facts "
                 "do not support a direct, correct reply, output exactly [[HANDOFF: concise reason]]. "
                 "A human reply later than the customer's message is authoritative; do not contradict it."
+            )
+            instructions += (
+                "\n\nConversation context rule: read the supplied conversation in chronological order before "
+                "replying. Consecutive customer messages form one combined turn. Address all relevant details in "
+                "that combined turn and do not answer one fragment in isolation."
             )
             instructions += (
                 "\n\nConversational booking rule: complete the booking entirely in this conversation. "
@@ -3455,8 +3528,7 @@ def run_sms_reply_logic(
                     "exactly [[HANDOFF: concise reason]] instead of a customer-facing holding message."
                 )
 
-            history_msgs = db.query(Message).filter(Message.thread_id == thread.id).order_by(Message.at.asc()).all()
-            requested_duration = requested_duration_minutes(history_msgs, body)
+            requested_duration = requested_duration_minutes(history_msgs, effective_body)
             input_history = build_model_input(
                 history_msgs,
                 current_history_text=body,
@@ -3528,6 +3600,12 @@ def run_sms_reply_logic(
                 )
                 tool_results: Dict[str, Dict[str, Any]] = {}
                 for tool_call in ordered_tool_calls:
+                    if tool_call.name in {"propose_booking", "confirm_booking", "signal_customer_arrival"}:
+                        db.expire_all()
+                        if not is_latest_customer_turn(
+                            db, thread_id, provider_message_id, received_at_naive, body
+                        ):
+                            raise SupersededCustomerTurn()
                     if tool_call.name in {
                         "get_current_time",
                         "list_booking_services",
@@ -3562,7 +3640,7 @@ def run_sms_reply_logic(
                                     "must match a returned complete appointment time."
                                 ),
                             }
-                        elif pending_booking_at_turn_start and is_explicit_booking_confirmation(body):
+                        elif pending_booking_at_turn_start and is_explicit_booking_confirmation(effective_body):
                             tool_result = {
                                 "status": "rejected",
                                 "reason": "A proposal already existed when this confirmation arrived; use confirm_booking.",
@@ -3587,7 +3665,7 @@ def run_sms_reply_logic(
                             tool_result, confirmed_now = confirm_conversational_booking(
                                 db,
                                 thread,
-                                body,
+                                effective_body,
                             )
                             booking_confirmed = booking_confirmed or confirmed_now
                     elif tool_call.name == "signal_customer_arrival":
@@ -3634,10 +3712,28 @@ def run_sms_reply_logic(
                 assistant_reply = None
                 rejected_reply_reason = availability_error
                 
+        except SupersededCustomerTurn:
+            assistant_reply = None
         except Exception as e:
             print(f"OpenAI error: {e}. No reply was created or sent.")
             assistant_reply = None
             
+    # A newer fragment may arrive while the model is working. The newer job owns
+    # the combined reply; this result must not create a draft, failure, or SMS.
+    db.expire_all()
+    if not is_latest_customer_turn(db, thread_id, provider_message_id, received_at_naive, body):
+        db.rollback()
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread_id,
+            type="ai-reply-cancelled",
+            agent_id=None,
+            meta=json.dumps({"reason": "newer-customer-message-during-generation"}),
+            at=datetime.utcnow(),
+        ))
+        db.commit()
+        return False, False
+
     rejected_reply_reason = rejected_reply_reason or unsafe_ai_reply_reason(
         assistant_reply or "",
         requested_booking_confirmed=requested_booking_confirmed or booking_confirmed,
@@ -4041,7 +4137,10 @@ async def process_first_contact_auto_reply_delayed(
     )
 
 
-def _process_sms_reply(
+SMS_REPLY_THREAD_LOCKS: Dict[str, threading.Lock] = defaultdict(threading.Lock)
+
+
+def _process_sms_reply_unlocked(
     thread_id: str,
     body: str,
     provider_message_id: str,
@@ -4079,6 +4178,17 @@ def _process_sms_reply(
         db.rollback()
     finally:
         db.close()
+
+
+def _process_sms_reply(
+    thread_id: str,
+    body: str,
+    provider_message_id: str,
+    received_at_naive: datetime,
+) -> None:
+    """Serialize reply generation per thread so competing jobs cannot both send."""
+    with SMS_REPLY_THREAD_LOCKS[thread_id]:
+        _process_sms_reply_unlocked(thread_id, body, provider_message_id, received_at_naive)
 
 
 async def process_sms_reply_delayed(
@@ -5059,6 +5169,7 @@ def build_operations_ai_memory_context(db: Session, limit: int = 20) -> str:
 
 
 OPERATIONS_OWNER_WORKING_STYLE_TITLE = "Owner prefers practical outcome-first operation"
+OPERATIONS_MESSAGE_CONTEXT_RULE_TITLE = "Use complete chronological thread context"
 
 
 def ensure_operations_owner_working_style(db: Session) -> None:
@@ -5069,19 +5180,39 @@ def ensure_operations_owner_working_style(db: Session) -> None:
         OperationsMemory.active.is_(True),
     ).first()
     if existing:
-        return
-    db.add(OperationsMemory(
-        category="preference",
-        title=OPERATIONS_OWNER_WORKING_STYLE_TITLE,
-        content=(
-            "The owner normally states the outcome they want. Investigate quietly, make reasonable assumptions, "
-            "use authorised tools, complete and verify the work, then report the result briefly. Avoid academic "
-            "explanations, repeated plans, excessive caveats and implementation detail unless requested. "
-            "Treat 'proceed', 'do it' and equivalent language as approval to carry out already-authorised work."
-        ),
-        evidence="The owner explicitly requested a practical get-it-done working style.",
-    ))
-    db.commit()
+        owner_style_added = False
+    else:
+        db.add(OperationsMemory(
+            category="preference",
+            title=OPERATIONS_OWNER_WORKING_STYLE_TITLE,
+            content=(
+                "The owner normally states the outcome they want. Investigate quietly, make reasonable assumptions, "
+                "use authorised tools, complete and verify the work, then report the result briefly. Avoid academic "
+                "explanations, repeated plans, excessive caveats and implementation detail unless requested. "
+                "Treat 'proceed', 'do it' and equivalent language as approval to carry out already-authorised work."
+            ),
+            evidence="The owner explicitly requested a practical get-it-done working style.",
+        ))
+        owner_style_added = True
+
+    message_rule = db.query(OperationsMemory).filter(
+        OperationsMemory.category == "behavior",
+        OperationsMemory.title == OPERATIONS_MESSAGE_CONTEXT_RULE_TITLE,
+        OperationsMemory.active.is_(True),
+    ).first()
+    if not message_rule:
+        db.add(OperationsMemory(
+            category="behavior",
+            title=OPERATIONS_MESSAGE_CONTEXT_RULE_TITLE,
+            content=(
+                "Every customer response must consider the complete relevant thread in chronological order. "
+                "Consecutive incoming fragments form one combined turn, and only the newest turn may produce a "
+                "reply. Messaging identities, prompts, knowledge and booking context remain isolated by SMS account."
+            ),
+            evidence="Owner-approved messaging behaviour implemented and covered by automated tests.",
+        ))
+    if owner_style_added or not message_rule:
+        db.commit()
 
 
 def operations_ai_instructions(snapshot: str, memory: str = "[]", *, tool_access: bool = True) -> str:

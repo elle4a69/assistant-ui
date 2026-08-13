@@ -318,3 +318,77 @@ def test_typing_delay_yields_without_occupying_request_worker(monkeypatch):
 
     assert calls[0] == ("sleep", 30)
     assert calls[1][0:2] == ("to_thread", "_process_sms_reply")
+
+
+def test_superseded_customer_fragment_cannot_generate_a_reply(monkeypatch):
+    db = make_db()
+    now = datetime.utcnow()
+    thread = main.Thread(
+        id="burst-thread",
+        customer_phone="+61412345678",
+        sms_account_key="primary",
+        state="auto-reply",
+        priority="medium",
+        sla_due_at=now,
+        unread_count=2,
+    )
+    db.add(thread)
+    db.add_all([
+        Message(
+            id="old-fragment",
+            thread_id=thread.id,
+            role="customer",
+            text="Can I book tomorrow",
+            provider_message_id="old-provider",
+            at=now,
+        ),
+        Message(
+            id="new-fragment",
+            thread_id=thread.id,
+            role="customer",
+            text="At 3pm please",
+            provider_message_id="new-provider",
+            at=now + main.timedelta(milliseconds=1),
+        ),
+    ])
+    db.commit()
+
+    result = main.run_sms_reply_logic(
+        db, thread.id, "Can I book tomorrow", "old-provider", now, dispatch_sms=False
+    )
+
+    assert result == (False, False)
+    assert db.query(Message).filter(
+        Message.thread_id == thread.id,
+        Message.role.in_(["system", "draft"]),
+    ).count() == 0
+    cancelled = db.query(main.ThreadEvent).filter(main.ThreadEvent.type == "ai-reply-cancelled").one()
+    assert "superseded-by-newer-customer-message" in cancelled.meta
+    db.close()
+
+
+def test_model_input_consolidates_latest_customer_burst_with_deep_history():
+    now = datetime.utcnow()
+    history = []
+    for index in range(15):
+        history.append(type("Stored", (), {
+            "role": "customer" if index % 2 == 0 else "system",
+            "text": f"historical-{index}",
+        })())
+    history.extend([
+        type("Stored", (), {"role": "customer", "text": "Tomorrow"})(),
+        type("Stored", (), {"role": "customer", "text": "At 3pm"})(),
+    ])
+
+    model_input = main.build_model_input(
+        history,
+        current_history_text="At 3pm",
+        enriched_current_prompt="Combined customer turn:\nTomorrow\nAt 3pm",
+    )
+
+    assert any(item["content"] == "historical-0" for item in model_input)
+    assert model_input[-1] == {
+        "role": "user",
+        "content": "Combined customer turn:\nTomorrow\nAt 3pm",
+    }
+    assert not any(item["content"] == "Tomorrow" for item in model_input)
