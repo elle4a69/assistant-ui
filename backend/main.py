@@ -909,6 +909,16 @@ class CalendarEvent(Base):
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
+
+class OperationsChatMessage(Base):
+    """Persistent, admin-only conversation with the operations adviser."""
+    __tablename__ = "operations_chat_messages"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    role = Column(String, nullable=False)  # user | assistant
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
 def init_db():
     Base.metadata.create_all(bind=engine)
     
@@ -4554,6 +4564,10 @@ class SettingsUpdateInput(BaseModel):
     showMessageAvatars: Optional[bool] = None
 
 
+class OperationsChatInput(BaseModel):
+    message: str = Field(min_length=1, max_length=8000)
+
+
 MESSAGE_UI_SETTINGS_PATH = os.path.join(DATA_DIR, "message_ui_settings.json")
 
 
@@ -4568,6 +4582,208 @@ def load_message_ui_settings() -> dict[str, bool]:
     except Exception:
         pass
     return {"showMessageAvatars": True}
+
+
+def serialize_operations_chat_message(message: OperationsChatMessage) -> Dict[str, str]:
+    return {
+        "id": message.id,
+        "role": message.role,
+        "content": message.content,
+        "createdAt": message.created_at.isoformat() + "Z",
+    }
+
+
+def build_operations_ai_snapshot(db: Session) -> str:
+    """Return bounded, non-secret evidence the adviser may accurately discuss."""
+    services = load_booking_services()
+    working_hours = load_working_hours()
+    backend_name = os.getenv("BOOKING_BACKEND", "legacy").strip().casefold() or "legacy"
+    thread_count = db.query(Thread).count()
+    needs_review = db.query(Thread).filter(Thread.state == "needs-review").count()
+    pending_drafts = db.query(Message).filter(Message.role == "draft").count()
+    pending_bookings = db.query(Thread).filter(Thread.pending_booking.isnot(None)).count()
+    recent_events = (
+        db.query(ThreadEvent)
+        .order_by(ThreadEvent.at.desc())
+        .limit(20)
+        .all()
+    )
+    event_summary = [
+        {"type": item.type, "at": item.at.isoformat() + "Z"}
+        for item in recent_events
+    ]
+    return json.dumps({
+        "observed_at": datetime.utcnow().isoformat() + "Z",
+        "booking_backend": backend_name,
+        "fastapi_bookings_discovery_configured": bool(os.getenv("FASTAPI_BOOKINGS_URL")),
+        "google_calendar_connected": bool(calendar_service.service),
+        "auto_reply_globally_enabled": AUTO_REPLY_GLOBAL_ENABLED,
+        "training_mode_enabled": TRAINING_MODE_ENABLED,
+        "thread_count": thread_count,
+        "needs_review_count": needs_review,
+        "pending_draft_count": pending_drafts,
+        "pending_booking_proposal_count": pending_bookings,
+        "services": [
+            {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "duration": item.get("duration"),
+                "price": item.get("price"),
+            }
+            for item in services[:50]
+            if isinstance(item, dict)
+        ],
+        "working_hours": working_hours,
+        "recent_event_types": event_summary,
+    }, ensure_ascii=False)
+
+
+def operations_ai_instructions(snapshot: str) -> str:
+    return (
+        "You are the private Operations AI for the application owner. You are separate from the "
+        "customer-facing SMS assistant. Discuss system behaviour, booking configuration, customer-response "
+        "quality and improvement ideas clearly and directly. This version is advisory and read-only: you "
+        "cannot change settings, edit code, deploy, send messages, or run investigations. Never claim you "
+        "performed an action. When asked why something happened, distinguish facts in the supplied live "
+        "snapshot from hypotheses. If the snapshot does not contain enough evidence, say exactly what evidence "
+        "would be needed. Never reveal or request secret values. Keep spoken answers conversational and concise.\n\n"
+        "Known architecture: FastAPI/Python backend; React/TypeScript/Vite frontend; persistent SQLite under "
+        "/data; Uvicorn on port 8080; Google Calendar with SQLite fallback is the current booking write path. "
+        "The customer booking agent uses read-only discovery tools plus persistent propose/explicit-confirm "
+        "safeguards. FastAPI Bookings discovery is optional; final writes have not migrated there.\n\n"
+        f"Live operational snapshot:\n{snapshot}"
+    )
+
+
+def create_operations_realtime_session(sdp: str, snapshot: str) -> str:
+    """Exchange a browser WebRTC offer for an OpenAI Realtime SDP answer."""
+    from urllib import error as url_error
+    from urllib import request as url_request
+
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Realtime voice is unavailable because OpenAI is not configured.")
+    if not sdp.strip() or len(sdp) > 100_000:
+        raise HTTPException(status_code=422, detail="The realtime session offer is invalid.")
+
+    boundary = f"----assistant-ui-{uuid.uuid4().hex}"
+    session_config = json.dumps({
+        "type": "realtime",
+        "model": "gpt-realtime-2.1",
+        "instructions": operations_ai_instructions(snapshot),
+        "audio": {"output": {"voice": "marin"}},
+    }, ensure_ascii=False)
+    parts = [
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"sdp\"\r\n\r\n{sdp}\r\n",
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"session\"\r\n"
+        f"Content-Type: application/json\r\n\r\n{session_config}\r\n",
+        f"--{boundary}--\r\n",
+    ]
+    request_body = "".join(parts).encode("utf-8")
+    safety_identifier = hashlib.sha256(f"operations-ai:{AUTH_USERNAME}".encode("utf-8")).hexdigest()
+    upstream_request = url_request.Request(
+        "https://api.openai.com/v1/realtime/calls",
+        data=request_body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "OpenAI-Safety-Identifier": safety_identifier,
+        },
+    )
+    try:
+        with url_request.urlopen(upstream_request, timeout=20) as upstream_response:
+            answer = upstream_response.read().decode("utf-8")
+    except url_error.HTTPError as exc:
+        print(f"Operations realtime session rejected with HTTP {exc.code}")
+        raise HTTPException(status_code=502, detail="Realtime voice could not start.") from exc
+    except (url_error.URLError, TimeoutError) as exc:
+        print(f"Operations realtime connection failed: {type(exc).__name__}")
+        raise HTTPException(status_code=502, detail="Realtime voice could not connect.") from exc
+    if not answer.strip():
+        raise HTTPException(status_code=502, detail="Realtime voice returned an empty session response.")
+    return answer
+
+
+@app.get("/api/settings/operations-chat/messages")
+def get_operations_chat_messages(db: Session = Depends(get_db)):
+    messages = (
+        db.query(OperationsChatMessage)
+        .order_by(OperationsChatMessage.created_at.asc(), OperationsChatMessage.id.asc())
+        .limit(200)
+        .all()
+    )
+    return {"messages": [serialize_operations_chat_message(item) for item in messages]}
+
+
+@app.post("/api/settings/operations-chat/messages")
+def send_operations_chat_message(payload: OperationsChatInput, db: Session = Depends(get_db)):
+    if not openai_client:
+        raise HTTPException(status_code=503, detail="The operations AI is unavailable because OpenAI is not configured.")
+
+    content = payload.message.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="Message cannot be empty.")
+
+    user_message = OperationsChatMessage(role="user", content=content)
+    db.add(user_message)
+    db.commit()
+    db.refresh(user_message)
+
+    history = (
+        db.query(OperationsChatMessage)
+        .order_by(OperationsChatMessage.created_at.desc(), OperationsChatMessage.id.desc())
+        .limit(60)
+        .all()
+    )
+    history.reverse()
+    model_input = [
+        {"role": item.role, "content": item.content}
+        for item in history
+    ]
+    instructions = operations_ai_instructions(build_operations_ai_snapshot(db))
+    try:
+        response = openai_client.responses.create(
+            model="gpt-5.6-terra",
+            instructions=instructions,
+            input=model_input,
+            store=False,
+        )
+        reply = (response.output_text or "").strip()
+    except Exception as exc:
+        print(f"Operations AI request failed: {type(exc).__name__}")
+        raise HTTPException(status_code=502, detail="The operations AI could not answer right now.") from exc
+    if not reply:
+        raise HTTPException(status_code=502, detail="The operations AI returned an empty answer.")
+
+    assistant_message = OperationsChatMessage(role="assistant", content=reply)
+    db.add(assistant_message)
+    db.commit()
+    db.refresh(assistant_message)
+    return {
+        "userMessage": serialize_operations_chat_message(user_message),
+        "assistantMessage": serialize_operations_chat_message(assistant_message),
+        "capabilities": {
+            "readOnly": True,
+            "liveSnapshot": True,
+            "codeAccess": False,
+            "logAccess": False,
+        },
+    }
+
+
+@app.post("/api/settings/operations-chat/realtime")
+async def start_operations_realtime_session(request: Request, db: Session = Depends(get_db)):
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().casefold()
+    if content_type != "application/sdp":
+        raise HTTPException(status_code=415, detail="Realtime voice requires an application/sdp offer.")
+    raw_offer = await request.body()
+    try:
+        sdp = raw_offer.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=422, detail="The realtime session offer is invalid.") from exc
+    answer = create_operations_realtime_session(sdp, build_operations_ai_snapshot(db))
+    return Response(content=answer, media_type="application/sdp")
 
 
 @app.get("/api/admin/rag/status")

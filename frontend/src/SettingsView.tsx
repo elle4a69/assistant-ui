@@ -69,6 +69,7 @@ import {
   stopIncomingAlarm,
   unlockIncomingAlarmAudio
 } from './incomingMessageAlarm';
+import OperationsAIChat from './OperationsAIChat';
 
 const BUILT_IN_TEMPLATE_VARIABLES = [
   { key: 'current_time', token: '{current_time}', label: 'Current business time', scope: 'AI prompts', description: 'Current business time', required: false, required_status: 'optional' },
@@ -937,6 +938,7 @@ export default function SettingsView() {
             </button>
           </div>
         )}
+        <OperationsAIChat />
         <div className="grid grid-cols-1 gap-6">
             <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
               <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-3">

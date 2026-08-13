@@ -883,3 +883,58 @@ export async function clearPendingDrafts(): Promise<ClearPendingDraftsResult> {
   }
   return response.json();
 }
+
+export interface OperationsChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  createdAt: string;
+}
+
+export interface OperationsChatCapabilities {
+  readOnly: boolean;
+  liveSnapshot: boolean;
+  codeAccess: boolean;
+  logAccess: boolean;
+}
+
+export async function getOperationsChatMessages(): Promise<{ messages: OperationsChatMessage[] }> {
+  const response = await fetch(`${API_BASE}/api/settings/operations-chat/messages`, {
+    cache: 'no-store',
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Failed to load operations chat: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function sendOperationsChatMessage(message: string): Promise<{
+  userMessage: OperationsChatMessage;
+  assistantMessage: OperationsChatMessage;
+  capabilities: OperationsChatCapabilities;
+}> {
+  const response = await fetch(`${API_BASE}/api/settings/operations-chat/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message }),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Operations AI could not answer: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function createOperationsRealtimeSession(sdp: string): Promise<string> {
+  const response = await fetch(`${API_BASE}/api/settings/operations-chat/realtime`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/sdp' },
+    body: sdp,
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Realtime voice could not start: ${response.statusText}`);
+  }
+  return response.text();
+}
