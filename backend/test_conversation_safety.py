@@ -195,7 +195,8 @@ def test_availability_starts_now_and_includes_customer_booking_context(monkeypat
     )
 
     enriched_prompt = client.responses.calls[0]["input"][-1]["content"]
-    assert "Option 1: 2026-08-11T16:15:00+10:00" in enriched_prompt
+    assert "No generic appointment times are supplied here" in enriched_prompt
+    assert "Option 1:" not in enriched_prompt
     assert "these bookings belong to this customer" in enriched_prompt
     assert "That exact time is already this customer's confirmed booking" in enriched_prompt
     assert db.query(Message).filter(Message.role == "system").one().text.startswith("Yes")

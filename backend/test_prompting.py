@@ -60,6 +60,17 @@ def test_missing_current_message_is_appended_as_enriched_prompt():
     }
 
 
+def test_unapproved_drafts_are_marked_non_authoritative_in_model_history():
+    result = build_model_input(
+        [StoredMessage("draft", "Only 30 minutes is available at 1:30pm.")],
+        current_history_text="Why?",
+        enriched_current_prompt="Why?",
+    )
+
+    assert result[0]["role"] == "assistant"
+    assert result[0]["content"].startswith("[UNAPPROVED DRAFT, NOT AUTHORITATIVE.")
+
+
 def test_legacy_style_examples_are_disabled_by_default():
     assert get_style_examples("hello") == []
     instructions = build_model_instructions("Be natural.", [])
@@ -109,7 +120,8 @@ def test_live_reply_calendar_uses_current_clock_not_old_message_timestamp():
     source = inspect.getsource(run_sms_reply_logic)
 
     assert "now_local = current_business_time()" in source
-    assert "dt = now_local" in source
+    assert "get_booking_tool_suite().execute" in source
+    assert "No generic appointment times are supplied here" in source
     assert "dt = now_local + timedelta(hours=1)" not in source
     assert "received_at_aware + timedelta(hours=1)" not in source
     assert current_business_time().tzinfo is not None

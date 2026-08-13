@@ -90,6 +90,53 @@ def test_legacy_adapter_uses_service_duration_hours_and_busy_slots():
     ]
 
 
+def test_one_hour_booking_requires_four_consecutive_fifteen_minute_increments():
+    provider = LegacyCalendarDiscoveryProvider(
+        services_loader=lambda: [{
+            "id": "pse-60",
+            "name": "One hour PSE",
+            "duration": 60,
+            "price": 600,
+        }],
+        working_hours_loader=lambda: [{
+            "day": "Thursday",
+            "enabled": True,
+            "open": "13:00",
+            "close": "16:00",
+        }],
+        # A single occupied 15-minute increment at 2pm invalidates every
+        # one-hour start whose complete interval would overlap it.
+        busy_slots_loader=lambda start, end: [{
+            "start": datetime(2026, 8, 13, 14, 0, tzinfo=TZ),
+            "end": datetime(2026, 8, 13, 14, 15, tzinfo=TZ),
+        }],
+        timezone_name=TIMEZONE,
+        slot_interval_minutes=15,
+    )
+
+    times = provider.search_availability(
+        "pse-60",
+        datetime(2026, 8, 13, 13, 0, tzinfo=TZ),
+        datetime(2026, 8, 13, 16, 0, tzinfo=TZ),
+        10,
+    )
+
+    assert [item["start_time"] for item in times] == [
+        "2026-08-13T13:00:00+10:00",
+        "2026-08-13T14:15:00+10:00",
+        "2026-08-13T14:30:00+10:00",
+        "2026-08-13T14:45:00+10:00",
+        "2026-08-13T15:00:00+10:00",
+    ]
+    assert all(
+        main_end - main_start == timedelta(minutes=60)
+        for main_start, main_end in (
+            (datetime.fromisoformat(item["start_time"]), datetime.fromisoformat(item["end_time"]))
+            for item in times
+        )
+    )
+
+
 def test_execute_returns_safe_error_for_unknown_service():
     provider = LegacyCalendarDiscoveryProvider(
         services_loader=lambda: [],

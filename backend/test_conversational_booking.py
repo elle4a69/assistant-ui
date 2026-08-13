@@ -18,6 +18,7 @@ from main import (
     is_explicit_booking_rejection,
     propose_conversational_booking,
     run_sms_reply_logic,
+    validate_availability_claim,
 )
 
 
@@ -377,6 +378,120 @@ def test_live_reply_flow_executes_booking_discovery_tool(monkeypatch):
 
     assert booked is False
     assert "2026-08-12T10:00:00+10:00" in json.dumps(client.calls[1]["input"])
+    db.close()
+
+
+def test_one_hour_slot_cannot_be_described_as_thirty_minutes():
+    now_local = main.parse_business_datetime("2026-08-13T12:00:00+10:00")
+    exact_hour_slot = [{
+        "service_id": "pse-60",
+        "start": "2026-08-13T13:30:00+10:00",
+        "end": "2026-08-13T14:30:00+10:00",
+    }]
+
+    assert validate_availability_claim(
+        "I can't do a full hour at 1:30pm, only 30 minutes.",
+        exact_hour_slot,
+        60,
+        now_local,
+    ) == "AI said a provider-validated exact-duration slot was unavailable"
+    assert validate_availability_claim(
+        "I don\u2019t have a full hour at 1:30pm, only 30 minutes.",
+        exact_hour_slot,
+        60,
+        now_local,
+    ) == "AI said a provider-validated exact-duration slot was unavailable"
+    assert validate_availability_claim(
+        "I can do the one-hour PSE at 1:30pm.",
+        exact_hour_slot,
+        60,
+        now_local,
+    ) is None
+
+
+def test_thirty_minute_tool_result_cannot_support_one_hour_claim():
+    now_local = main.parse_business_datetime("2026-08-13T12:00:00+10:00")
+    short_slot = [{
+        "service_id": "pse-30",
+        "start": "2026-08-13T13:30:00+10:00",
+        "end": "2026-08-13T14:00:00+10:00",
+    }]
+
+    assert validate_availability_claim(
+        "I can do the one-hour PSE at 1:30pm.",
+        short_slot,
+        60,
+        now_local,
+    ) == "AI claimed an exact time without matching exact-duration provider evidence"
+
+
+def test_ai_cannot_assemble_two_short_bookings_to_fake_long_service():
+    now_local = main.parse_business_datetime("2026-08-13T12:00:00+10:00")
+
+    assert validate_availability_claim(
+        "I can do two back-to-back 30 minute PSE slots at 1:30pm and 2pm.",
+        [],
+        60,
+        now_local,
+    ) == "AI attempted to combine separate short appointments into a longer service"
+
+
+def test_live_flow_rejects_contradiction_of_one_hour_provider_slot(monkeypatch):
+    class ExactHourSuite:
+        def execute(self, tool_name, arguments):
+            assert tool_name == "get_times_today"
+            assert arguments == {"service_id": "pse-60"}
+            return {
+                "status": "ok",
+                "service_id": "pse-60",
+                "slots": [{
+                    "service_id": "pse-60",
+                    "start_time": "2026-08-13T13:30:00+10:00",
+                    "end_time": "2026-08-13T14:30:00+10:00",
+                }],
+            }
+
+    db = make_db()
+    thread = add_thread(db)
+    customer = Message(
+        id="pse-hour-message",
+        thread_id=thread.id,
+        role="customer",
+        text="I want the one hour PSE. Can you do 1:30pm?",
+        provider_message_id="pse-hour-provider",
+        at=main.datetime.utcnow(),
+    )
+    db.add(customer)
+    db.commit()
+    monkeypatch.setattr(main, "get_booking_tool_suite", lambda: ExactHourSuite())
+    monkeypatch.setattr(main, "build_business_context", lambda _query: "")
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
+    monkeypatch.setattr(
+        main,
+        "current_business_time",
+        lambda: main.parse_business_datetime("2026-08-13T12:00:00+10:00"),
+    )
+    monkeypatch.setattr(main.calendar_service, "get_customer_bookings", lambda *_args, **_kwargs: [])
+    client = SequenceClient([
+        FakeResponse(output=[FakeFunctionCall("get_times_today", {"service_id": "pse-60"}, "availability-call")]),
+        FakeResponse(output_text="I can't do a full hour at 1:30pm, only 30 minutes."),
+    ])
+    monkeypatch.setattr(main, "openai_client", client)
+
+    main.run_sms_reply_logic(
+        db,
+        thread.id,
+        customer.text,
+        customer.provider_message_id,
+        customer.at,
+        dispatch_sms=False,
+    )
+
+    db.refresh(thread)
+    assert thread.state == "needs-review"
+    assert db.query(Message).filter(Message.role.in_(["system", "draft"])).count() == 0
+    failure = db.query(main.ThreadEvent).filter(main.ThreadEvent.type == "ai-reply-failed").one()
+    assert "provider-validated exact-duration slot" in json.loads(failure.meta)["reason"]
     db.close()
 
 

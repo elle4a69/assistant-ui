@@ -534,6 +534,15 @@ AVAILABILITY_REPLY_POLICY = """Availability reply rule:
 - If availability exists, do not begin with “sorry”. End with one clear question such as “What time suits you?” or “What time were you after?” Never write “Where were you after?”
 - Never offer a date or time that is already in the past."""
 
+BOOKING_AVAILABILITY_SAFETY_POLICY = """Booking availability safety rule:
+- The booking discovery tools are the only authoritative source for bookable times.
+- The calendar uses 15-minute increments internally. A booking is available only when enough consecutive increments are free for the service's full configured duration. For example, 60 minutes requires four consecutive free increments and 30 minutes requires two.
+- Availability must be checked for the exact service ID because its configured duration controls how many consecutive increments must be free.
+- Never combine two shorter services or appointments to imitate one longer service.
+- Internal increments are implementation details. Never mention increments or slots to the customer. Describe only the complete appointment time, such as “1:30pm to 2:30pm”.
+- Before saying an exact time is available or unavailable, call the appropriate availability tool for the exact service in this turn.
+- Unapproved drafts in conversation history are context only. Their factual claims are not authoritative and must be corrected using current tool results."""
+
 SMS_TYPOGRAPHY_POLICY = """SMS typography rule:
 - Never use an em dash (—) or en dash (–). Use a comma, full stop, or ordinary hyphen instead."""
 
@@ -599,7 +608,12 @@ def build_model_instructions(
     style_profile: Optional[dict[str, Any]] = None,
 ) -> str:
     """Combine the stable prompt with examples and an optional style overlay, validating zero unresolved placeholders."""
-    sections = [system_prompt, AVAILABILITY_REPLY_POLICY, SMS_TYPOGRAPHY_POLICY]
+    sections = [
+        system_prompt,
+        AVAILABILITY_REPLY_POLICY,
+        BOOKING_AVAILABILITY_SAFETY_POLICY,
+        SMS_TYPOGRAPHY_POLICY,
+    ]
     if style_profile is not None:
         sections.append(render_style_profile(style_profile))
     if examples:
@@ -649,6 +663,11 @@ def build_model_input(
             if index == current_index
             else str(getattr(message, "text", ""))
         )
+        if role == "draft":
+            content = (
+                "[UNAPPROVED DRAFT, NOT AUTHORITATIVE. Recheck all facts and availability.]\n"
+                f"{content}"
+            )
         model_input.append({"role": api_role, "content": content})
 
     if current_index is None:
@@ -3026,6 +3045,92 @@ def get_free_slots_endpoint(duration: int = Query(30), db: Session = Depends(get
 
 # Endpoints
 
+def booking_slots_from_tool_result(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract only provider-validated, service-specific slots from a discovery result."""
+    candidates = result.get("slots")
+    if candidates is None and result.get("next_available"):
+        candidates = [result["next_available"]]
+    if not isinstance(candidates, list):
+        return []
+    return [
+        {
+            "service_id": str(slot.get("service_id", result.get("service_id", ""))),
+            "start": str(slot.get("start_time", "")),
+            "end": str(slot.get("end_time", "")),
+        }
+        for slot in candidates
+        if isinstance(slot, dict) and slot.get("start_time") and slot.get("end_time")
+    ]
+
+
+def requested_duration_minutes(messages: List[Any], current_body: str) -> Optional[int]:
+    """Return the customer's most recently stated booking duration."""
+    texts = [
+        str(getattr(message, "text", ""))
+        for message in messages
+        if getattr(message, "role", None) == "customer"
+    ]
+    texts.append(current_body or "")
+    for text in reversed(texts[-12:]):
+        normalized = text.casefold()
+        if re.search(r"\b(?:one|1)\s*(?:hour|hr)\b", normalized):
+            return 60
+        minute_match = re.search(r"\b(15|30|45|60|90)\s*(?:minute|minutes|min|mins)\b", normalized)
+        if minute_match:
+            return int(minute_match.group(1))
+        if re.search(r"\bhalf\s*(?:an\s*)?(?:hour|hr)\b", normalized):
+            return 30
+    return None
+
+
+def validate_availability_claim(
+    reply: str,
+    tool_slots: List[Dict[str, Any]],
+    requested_duration: Optional[int],
+    now_local: datetime,
+) -> Optional[str]:
+    """Reject exact-time claims that disagree with exact-duration booking evidence."""
+    normalized_reply = reply.casefold().replace("’", "'").replace("�", "'")
+    if (
+        re.search(r"\b(?:two|2)\b.*\b(?:30|thirty)\s*(?:minute|minutes|min|mins)\b", normalized_reply)
+        or "back-to-back" in normalized_reply
+        or "back to back" in normalized_reply
+    ) and re.search(r"\b(?:i\s+can|can\s+do|book|available)\b", normalized_reply):
+        return "AI attempted to combine separate short appointments into a longer service"
+
+    claimed_time = extract_requested_business_time(reply, now_local)
+    if not claimed_time:
+        return None
+    negative = bool(re.search(
+        r"\b(can\W+t|cannot|can not|not available|not free|isn\W+t available|is not available|don\W+t have|do not have)\b",
+        normalized_reply,
+    ))
+    if not negative and not re.search(
+        r"\b(available|availability|free|spot|opening|can\s*(?:not|'t)?\s*do|can't\s*do|cannot\s*do)\b",
+        normalized_reply,
+    ):
+        return None
+
+    matching_slots = []
+    for slot in tool_slots:
+        try:
+            start = parse_business_datetime(slot["start"])
+            end = parse_business_datetime(slot["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        duration = int((end - start).total_seconds() // 60)
+        if requested_duration is not None and duration != requested_duration:
+            continue
+        if start.replace(second=0, microsecond=0) == claimed_time.replace(second=0, microsecond=0):
+            matching_slots.append(slot)
+
+    if negative and matching_slots:
+        return "AI said a provider-validated exact-duration slot was unavailable"
+    if not negative and not matching_slots:
+        return "AI claimed an exact time without matching exact-duration provider evidence"
+    return None
+
+
 def run_sms_reply_logic(
     db: Session,
     thread_id: str,
@@ -3059,6 +3164,7 @@ def run_sms_reply_logic(
         thread.pending_booking = None
     pending_booking_at_turn_start = bool(thread.pending_booking)
     booking_proposal_candidate: Optional[str] = None
+    availability_tool_slots: List[Dict[str, Any]] = []
     
     # Step 1: Read uploaded knowledge plus the authoritative live Settings catalogue.
     retrieved_context = build_business_context(body)
@@ -3066,16 +3172,9 @@ def run_sms_reply_logic(
     now_local = current_business_time()
     reply_at_naive = datetime.utcnow()
     
-    # Step 2: Query next 3 available slots from the next real quarter-hour.
-    # An arbitrary one-hour lead previously hid valid openings such as 4:15 at 3:31.
-    dt = now_local
-    minutes = 15 * ((dt.minute + 14) // 15)
-    dt = dt.replace(minute=0, second=0, microsecond=0) + timedelta(minutes=minutes)
-
-    wh = load_working_hours()
-    wh_by_day = {entry["day"]: entry for entry in wh}
-
-    busy_slots = calendar_service.get_busy_slots(dt, dt + timedelta(days=14))
+    # Step 2: Supply customer-owned booking context, but never inject generic
+    # 30-minute openings. Exact availability comes only from the booking tools,
+    # which search using the selected service's configured duration.
     customer_bookings = calendar_service.get_customer_bookings(
         thread.customer_phone,
         now_local - timedelta(days=1),
@@ -3087,42 +3186,12 @@ def run_sms_reply_logic(
         customer_bookings,
         requested_time,
     )
-    free_slots = []
-    limit_dt = dt + timedelta(days=14)
-    while dt < limit_dt and len(free_slots) < 3:
-        day_name = DAY_NAMES[dt.weekday()]
-        day_cfg = wh_by_day.get(day_name)
-        if day_cfg and day_cfg.get("enabled", False):
-            open_h, open_m = map(int, day_cfg["open"].split(":"))
-            close_h, close_m = map(int, day_cfg["close"].split(":"))
-            open_mins = open_h * 60 + open_m
-            close_mins = close_h * 60 + close_m
-            dt_mins = dt.hour * 60 + dt.minute
-            slot_end = dt + timedelta(minutes=30)
-            slot_end_mins = slot_end.hour * 60 + slot_end.minute
-            if dt_mins >= open_mins and slot_end_mins <= close_mins:
-                overlap = False
-                for b in busy_slots:
-                    if dt < b["end"] and slot_end > b["start"]:
-                        overlap = True
-                        break
-                if not overlap:
-                    free_slots.append((dt, slot_end))
-        dt += timedelta(minutes=15)
-
-    slots_str = ""
-    for i, (s, e) in enumerate(free_slots):
-        slots_str += f"- Option {i+1}: {s.isoformat()} to {e.isoformat()}\n"
-    if not slots_str:
-        slots_str = "No openings available."
-    broad_availability_guidance = build_broad_availability_guidance(
-        body,
-        now_local,
-        busy_slots,
-        wh_by_day,
+    slots_str = (
+        "No generic appointment times are supplied here. Do not infer availability from this text. "
+        "Select the exact service, then call get_times_today, get_times_tomorrow, or "
+        "get_next_available. Those service-specific complete appointment times are authoritative. "
+        "Do not mention internal calendar increments or call them slots in the customer reply."
     )
-    if broad_availability_guidance:
-        slots_str += f"\n{broad_availability_guidance}"
     slots_str += f"\n{booking_guidance}"
     if thread.pending_booking:
         try:
@@ -3150,19 +3219,6 @@ def run_sms_reply_logic(
             )
         except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             thread.pending_slots = None
-
-    # Populate pending_slots and slots_presented for booking intent
-    scheduling_keywords = ["book", "schedule", "appointment", "free", "busy", "slot", "when"]
-    has_scheduling_intent = any(kw in clean_body for kw in scheduling_keywords)
-    if has_scheduling_intent and free_slots:
-        slot_options = []
-        for s, e in free_slots:
-            slot_options.append({
-                "start": s.isoformat(),
-                "end": e.isoformat()
-            })
-        thread.pending_slots = json.dumps(slot_options)
-        slots_presented = True
 
     # Step 3 & 4: Load prompts templates
     system_prompt_path = os.path.join(PROMPTS_DIR, "system_prompt.txt")
@@ -3192,6 +3248,7 @@ def run_sms_reply_logic(
     
     # Check Q&A Rules first
     assistant_reply = match_qa_rule(body)
+    rejected_reply_reason: Optional[str] = None
     if assistant_reply:
         print(f"[QA Rules Match] Trigger matched. Using pre-configured reply.")
         
@@ -3291,6 +3348,7 @@ def run_sms_reply_logic(
                 )
 
             history_msgs = db.query(Message).filter(Message.thread_id == thread.id).order_by(Message.at.asc()).all()
+            requested_duration = requested_duration_minutes(history_msgs, body)
             input_history = build_model_input(
                 history_msgs,
                 current_history_text=body,
@@ -3347,6 +3405,11 @@ def run_sms_reply_logic(
                         except (TypeError, json.JSONDecodeError):
                             args = {}
                         tool_result = get_booking_tool_suite().execute(tool_call.name, args)
+                        verified_slots = booking_slots_from_tool_result(tool_result)
+                        if verified_slots:
+                            availability_tool_slots.extend(verified_slots)
+                            thread.pending_slots = json.dumps(verified_slots)
+                            slots_presented = True
                         input_history.append({
                             "type": "function_call_output",
                             "call_id": tool_call.call_id,
@@ -3420,12 +3483,23 @@ def run_sms_reply_logic(
                 assistant_reply = final_response.output_text
             else:
                 assistant_reply = response.output_text
+
+            availability_error = None if requested_booking_confirmed else validate_availability_claim(
+                assistant_reply or "",
+                availability_tool_slots,
+                requested_duration,
+                now_local,
+            )
+            if availability_error:
+                print(f"[AI Availability Rejected] {availability_error} on thread {thread_id}.")
+                assistant_reply = None
+                rejected_reply_reason = availability_error
                 
         except Exception as e:
             print(f"OpenAI error: {e}. No reply was created or sent.")
             assistant_reply = None
             
-    rejected_reply_reason = unsafe_ai_reply_reason(
+    rejected_reply_reason = rejected_reply_reason or unsafe_ai_reply_reason(
         assistant_reply or "",
         requested_booking_confirmed=requested_booking_confirmed or booking_confirmed,
     )

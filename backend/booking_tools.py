@@ -349,7 +349,7 @@ BOOKING_DISCOVERY_TOOL_SCHEMAS = [
     {
         "type": "function",
         "name": "get_times_today",
-        "description": "Return bookable times remaining today for one exact service ID.",
+        "description": "Return complete appointment start and end times remaining today for one exact service ID. Each result already reserves the service's full configured duration.",
         "parameters": {
             "type": "object",
             "properties": {"service_id": {"type": "string"}},
@@ -361,7 +361,7 @@ BOOKING_DISCOVERY_TOOL_SCHEMAS = [
     {
         "type": "function",
         "name": "get_times_tomorrow",
-        "description": "Return bookable times tomorrow for one exact service ID.",
+        "description": "Return complete appointment start and end times tomorrow for one exact service ID. Each result already reserves the service's full configured duration.",
         "parameters": {
             "type": "object",
             "properties": {"service_id": {"type": "string"}},
@@ -373,7 +373,7 @@ BOOKING_DISCOVERY_TOOL_SCHEMAS = [
     {
         "type": "function",
         "name": "get_next_available",
-        "description": "Return the next bookable time for one exact service ID, optionally after an ISO 8601 timestamp.",
+        "description": "Return the next complete appointment time for one exact service ID, optionally after an ISO 8601 timestamp. The result already reserves the service's full configured duration.",
         "parameters": {
             "type": "object",
             "properties": {
