@@ -147,6 +147,62 @@ def test_first_contact_greeting_is_selected_by_inbound_sms_account(monkeypatch):
     db.close()
 
 
+def test_secondary_line_is_anonymous_autoresponder_only(monkeypatch):
+    db = make_db()
+    monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "load_accounts_config",
+        lambda: {
+            "primary": {"sender": "61400000010", "enabled": True},
+            "secondary": {"sender": "61420136756", "enabled": True},
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "load_first_contact_autoresponder",
+        lambda _key="primary": {
+            "enabled": False,
+            "cooldownDays": 1,
+            "delaySeconds": 0,
+            "message": "",
+        },
+    )
+    ai_calls = []
+
+    def fake_ai(db, thread_id, body, provider_message_id, received_at, **kwargs):
+        thread = db.query(main.Thread).filter(main.Thread.id == thread_id).one()
+        ai_calls.append((thread.sms_account_key, body))
+        return False, False
+
+    monkeypatch.setattr(main, "run_sms_reply_logic", fake_ai)
+
+    secondary = receive(db, {
+        "sender": "0412 345 678",
+        "to": "61420136756",
+        "message": "Who is this?",
+        "message_id": "secondary-no-tori",
+        "received_at": "2026-08-13 10:00:00",
+    })
+    primary = receive(db, {
+        "sender": "0412 345 679",
+        "to": "61400000010",
+        "message": "Hello Tori",
+        "message_id": "primary-tori",
+        "received_at": "2026-08-13 10:00:01",
+    })
+
+    assert secondary["autoresponder_only"] is True
+    assert primary.get("autoresponder_only") is None
+    assert ai_calls == [("primary", "Hello Tori")]
+    skipped = db.query(main.ThreadEvent).filter(
+        main.ThreadEvent.thread_id == secondary["thread_id"],
+        main.ThreadEvent.type == "ai-reply-skipped",
+    ).one()
+    assert "account-autoresponder-only" in skipped.meta
+    db.close()
+
+
 def test_real_inbound_message_id_still_deduplicates_retries(monkeypatch):
     db = make_db()
     monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", False)

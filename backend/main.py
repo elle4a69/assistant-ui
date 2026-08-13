@@ -2034,6 +2034,12 @@ FIRST_CONTACT_AUTORESPONDER_DEFAULT = {
 }
 
 FIRST_CONTACT_ACCOUNT_KEYS = ("primary", "secondary")
+CONVERSATIONAL_AI_ACCOUNT_KEYS = frozenset({"primary"})
+
+
+def account_allows_conversational_ai(account_key: str) -> bool:
+    """Keep Anonymous on Line 2 isolated from Tori's shared AI and Q&A rules."""
+    return account_key in CONVERSATIONAL_AI_ACCOUNT_KEYS
 
 
 def normalize_first_contact_autoresponder(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -3203,6 +3209,9 @@ def run_sms_reply_logic(
     thread = db.query(Thread).filter(Thread.id == thread_id).first()
     if not thread:
         return False, False
+    if not account_allows_conversational_ai(thread.sms_account_key):
+        print(f"[Autoresponder Skipped] Conversational AI is disabled for {thread.sms_account_key}.")
+        return False, False
     if not draft_only and human_replied_after(db, thread_id, received_at_naive):
         db.add(ThreadEvent(
             id=str(uuid.uuid4()),
@@ -4030,6 +4039,13 @@ def _process_sms_reply(
             print(f"[Autoresponder Delay] Thread is taken-over. Reply canceled for {thread_id}.")
             return
 
+        if not account_allows_conversational_ai(thread.sms_account_key):
+            print(
+                f"[Autoresponder Delay] Conversational AI is disabled for "
+                f"{thread.sms_account_key}. Reply canceled for {thread_id}."
+            )
+            return
+
         run_sms_reply_logic(db, thread_id, body, provider_message_id, received_at_naive)
     except Exception as e:
         print(f"[Autoresponder Delay Error] {e}")
@@ -4280,6 +4296,26 @@ def webhook_sms(payload: WebhookSMSInput, background_tasks: BackgroundTasks, db:
             "thread_id": thread.id,
             "first_contact_auto_reply": True,
             "first_contact_delay_seconds": first_contact_config["delaySeconds"],
+        }
+
+    if not account_allows_conversational_ai(thread.sms_account_key):
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread.id,
+            type="ai-reply-skipped",
+            agent_id=None,
+            meta=json.dumps({
+                "message_id": customer_message.id,
+                "reason": "account-autoresponder-only",
+                "sms_account_key": thread.sms_account_key,
+            }),
+            at=received_at_naive,
+        ))
+        db.commit()
+        return {
+            "status": "success",
+            "thread_id": thread.id,
+            "autoresponder_only": True,
         }
 
     if should_process_sms_synchronously(is_testing, payload.isSimulation):
