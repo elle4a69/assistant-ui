@@ -27,7 +27,8 @@ from booking_tools import (
     LegacyCalendarDiscoveryProvider,
 )
 from sqlalchemy import (
-    create_engine, Column, String, Integer, DateTime, ForeignKey, Text, event, Boolean, func
+    create_engine, Column, String, Integer, DateTime, ForeignKey, Text, event, Boolean, func,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from sqlalchemy.exc import IntegrityError
@@ -783,9 +784,13 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
 # SQLAlchemy Models
 class Thread(Base):
     __tablename__ = "threads"
+    __table_args__ = (
+        UniqueConstraint("sms_account_key", "customer_phone", name="uq_threads_sms_account_phone"),
+    )
     
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    customer_phone = Column(String, unique=True, nullable=False, index=True)
+    customer_phone = Column(String, nullable=False, index=True)
+    sms_account_key = Column(String, default="primary", nullable=False, index=True)
     state = Column(String, default="auto-reply", nullable=False)  # auto-reply | needs-review | taken-over | escalated | resolved
     priority = Column(String, default="medium", nullable=False)  # low | medium | high
     assigned_agent_id = Column(String, nullable=True)
@@ -846,7 +851,7 @@ class ThreadEvent(Base):
     thread = relationship("Thread", back_populates="events")
 
 
-def find_thread_by_phone(db: Session, phone: str) -> Optional[Thread]:
+def find_thread_by_phone(db: Session, phone: str, sms_account_key: str = "primary") -> Optional[Thread]:
     """Find a Thread matching a customer's canonical phone number, deduplicating duplicate threads if present."""
     if not phone:
         return None
@@ -856,7 +861,7 @@ def find_thread_by_phone(db: Session, phone: str) -> Optional[Thread]:
 
     matching_threads = [
         thread
-        for thread in db.query(Thread).all()
+        for thread in db.query(Thread).filter(Thread.sms_account_key == sms_account_key).all()
         if thread.customer_phone
         and canonical_phone_number(thread.customer_phone) == target_canonical
     ]
@@ -939,11 +944,79 @@ def init_db():
             thread_columns = {
                 row[1] for row in conn.exec_driver_sql("PRAGMA table_info(threads)").fetchall()
             }
-            if "pending_booking" not in thread_columns:
+            unique_indexes = []
+            for index_row in conn.exec_driver_sql("PRAGMA index_list(threads)").fetchall():
+                if index_row[2]:
+                    columns = [
+                        row[2]
+                        for row in conn.exec_driver_sql(
+                            f'PRAGMA index_info("{index_row[1]}")'
+                        ).fetchall()
+                    ]
+                    unique_indexes.append(columns)
+            needs_sms_rebuild = (
+                "sms_account_key" not in thread_columns
+                or ["customer_phone"] in unique_indexes
+            )
+            if needs_sms_rebuild:
+                conn.commit()
+                raw = engine.raw_connection()
+                cursor = raw.cursor()
+                try:
+                    cursor.execute("PRAGMA foreign_keys=OFF")
+                    cursor.execute("BEGIN IMMEDIATE")
+                    cursor.execute("""
+                        CREATE TABLE threads_dual_sms (
+                            id VARCHAR NOT NULL PRIMARY KEY,
+                            customer_phone VARCHAR NOT NULL,
+                            sms_account_key VARCHAR NOT NULL DEFAULT 'primary',
+                            state VARCHAR NOT NULL DEFAULT 'auto-reply',
+                            priority VARCHAR NOT NULL DEFAULT 'medium',
+                            assigned_agent_id VARCHAR,
+                            sla_due_at DATETIME NOT NULL,
+                            unread_count INTEGER NOT NULL DEFAULT 0,
+                            auto_reply_enabled BOOLEAN NOT NULL DEFAULT 1,
+                            pending_slots TEXT,
+                            pending_booking TEXT,
+                            created_at DATETIME NOT NULL,
+                            updated_at DATETIME NOT NULL,
+                            CONSTRAINT uq_threads_sms_account_phone
+                                UNIQUE (sms_account_key, customer_phone)
+                        )
+                    """)
+                    pending_booking_expr = "pending_booking" if "pending_booking" in thread_columns else "NULL"
+                    sms_account_expr = "COALESCE(sms_account_key, 'primary')" if "sms_account_key" in thread_columns else "'primary'"
+                    cursor.execute(f"""
+                        INSERT INTO threads_dual_sms (
+                            id, customer_phone, sms_account_key, state, priority,
+                            assigned_agent_id, sla_due_at, unread_count,
+                            auto_reply_enabled, pending_slots, pending_booking,
+                            created_at, updated_at
+                        )
+                        SELECT id, customer_phone, {sms_account_expr}, state, priority,
+                               assigned_agent_id, sla_due_at, unread_count,
+                               auto_reply_enabled, pending_slots, {pending_booking_expr},
+                               created_at, updated_at
+                        FROM threads
+                    """)
+                    cursor.execute("DROP TABLE threads")
+                    cursor.execute("ALTER TABLE threads_dual_sms RENAME TO threads")
+                    cursor.execute("CREATE INDEX ix_threads_customer_phone ON threads (customer_phone)")
+                    cursor.execute("CREATE INDEX ix_threads_sms_account_key ON threads (sms_account_key)")
+                    raw.commit()
+                except Exception:
+                    raw.rollback()
+                    raise
+                finally:
+                    cursor.execute("PRAGMA foreign_keys=ON")
+                    cursor.close()
+                    raw.close()
+            elif "pending_booking" not in thread_columns:
                 conn.exec_driver_sql("ALTER TABLE threads ADD COLUMN pending_booking TEXT")
             conn.commit()
         except Exception as e:
             print(f"Thread auto-migration info: {e}")
+            raise
 
     # Seed sample initial bookings & threads if empty
     db = SessionLocal()
@@ -3425,6 +3498,7 @@ def run_sms_reply_logic(
                 thread.customer_phone,
                 assistant_reply,
                 idempotency_key=system_message.id,
+                account_key=thread.sms_account_key,
             )
             delivery_failure = mobilemessage_service.delivery_error(dispatch_result)
         if dispatch_result.get("status") == "skipped" or (delivery_failure and ("skipped" in str(delivery_failure).lower() or "not configured" in str(delivery_failure).lower())):
@@ -3593,6 +3667,7 @@ def send_first_contact_auto_reply(
                 thread.customer_phone,
                 reply_text,
                 idempotency_key=outbound.id,
+                account_key=thread.sms_account_key,
             )
             delivery_failure = mobilemessage_service.delivery_error(dispatch_result)
 
@@ -3755,11 +3830,12 @@ def inbound_webhook_identity(
     payload: WebhookSMSInput,
     from_phone: str,
     received_at_naive: datetime,
+    sms_account_key: str = "primary",
 ) -> tuple[str, bool]:
     """Return a retry-safe inbound key and whether it came from a real inbound ID."""
     explicit_id = (payload.providerMessageId or "").strip()
     if explicit_id:
-        return explicit_id, True
+        return explicit_id if sms_account_key == "primary" else f"{sms_account_key}:{explicit_id}", True
 
     # The provider's original_message_id is correlation to an outbound SMS, not
     # identity for this inbound reply. Hash immutable inbound fields so callback
@@ -3767,6 +3843,7 @@ def inbound_webhook_identity(
     canonical = json.dumps(
         {
             "body": payload.body or "",
+            "sms_account_key": sms_account_key,
             "from": from_phone or "",
             "original_message_id": (payload.originalMessageId or "").strip(),
             "received_at": received_at_naive.isoformat(timespec="microseconds"),
@@ -3785,6 +3862,7 @@ def find_legacy_inbound_duplicate(
     payload: WebhookSMSInput,
     from_phone: str,
     received_at_naive: datetime,
+    sms_account_key: str = "primary",
 ) -> Optional[Message]:
     """Recognize exact retries saved by the former original_message_id logic."""
     original_id = (payload.originalMessageId or "").strip()
@@ -3799,6 +3877,7 @@ def find_legacy_inbound_duplicate(
             Message.text == (payload.body or ""),
             Message.at == received_at_naive,
             Thread.customer_phone == from_phone,
+            Thread.sms_account_key == sms_account_key,
         )
         .first()
     )
@@ -3808,11 +3887,13 @@ def find_legacy_inbound_duplicate(
 def webhook_sms(payload: WebhookSMSInput, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     import sys
     from_phone = canonical_phone_number(payload.from_phone)
+    sms_account_key = mobilemessage_service.account_key_for_inbound_number(payload.to or "")
     received_at_naive = to_naive_utc(payload.receivedAt)
     provider_message_id, has_explicit_inbound_id = inbound_webhook_identity(
         payload,
         from_phone,
         received_at_naive,
+        sms_account_key,
     )
 
     if not has_explicit_inbound_id:
@@ -3821,6 +3902,7 @@ def webhook_sms(payload: WebhookSMSInput, background_tasks: BackgroundTasks, db:
             payload,
             from_phone,
             received_at_naive,
+            sms_account_key,
         )
         if legacy_duplicate:
             print("[Webhook Deduplicated] Exact legacy callback retry ignored.")
@@ -3868,7 +3950,7 @@ def webhook_sms(payload: WebhookSMSInput, background_tasks: BackgroundTasks, db:
     first_contact_eligible = False
 
     # Locate or create thread by customer phone
-    thread = find_thread_by_phone(db, from_phone)
+    thread = find_thread_by_phone(db, from_phone, sms_account_key)
     if thread and thread.state == "taken-over":
         if not has_active_explicit_takeover(db, thread.id):
             # Approval, discard, and bulk draft cleanup historically reused
@@ -3894,6 +3976,7 @@ def webhook_sms(payload: WebhookSMSInput, background_tasks: BackgroundTasks, db:
         thread = Thread(
             id=str(uuid.uuid4()),
             customer_phone=from_phone,
+            sms_account_key=sms_account_key,
             state="auto-reply",
             priority="medium",
             sla_due_at=received_at_naive + timedelta(hours=24),
@@ -4074,6 +4157,7 @@ def get_threads(
         result = {
             "id": t.id,
             "customerPhone": t.customer_phone,
+            "smsAccountKey": t.sms_account_key,
             "lastMessageAt": last_message_at,
             "lastMessageText": last_msg.text if last_msg else "",
             "lastMessageRole": last_msg.role if last_msg else None,
@@ -4222,6 +4306,7 @@ def get_thread_detail(thread_id: str, db: Session = Depends(get_db)):
     return {
         "id": thread.id,
         "customerPhone": thread.customer_phone,
+        "smsAccountKey": thread.sms_account_key,
         "state": thread.state,
         "assignedAgent": assigned_agent,
         "autoReplyEnabled": thread.auto_reply_enabled,
@@ -4342,6 +4427,7 @@ def reply_thread(thread_id: str, payload: ReplyInput, db: Session = Depends(get_
             thread.customer_phone,
             payload.text,
             idempotency_key=agent_message.id,
+            account_key=thread.sms_account_key,
         )
         delivery_failure = mobilemessage_service.delivery_error(dispatch_result)
         if delivery_failure:
@@ -4427,6 +4513,7 @@ def respond_to_information_request(
             thread.customer_phone,
             reply_text,
             idempotency_key=outbound.id,
+            account_key=thread.sms_account_key,
         )
         delivery_failure = mobilemessage_service.delivery_error(dispatch_result)
         if delivery_failure:
@@ -5041,6 +5128,7 @@ def approve_draft_message(message_id: str, db: Session = Depends(get_db)):
                 thread.customer_phone,
                 msg.text,
                 idempotency_key=msg.id,
+                account_key=thread.sms_account_key,
             )
             delivery_failure = mobilemessage_service.delivery_error(dispatch_result)
             if delivery_failure:
@@ -5491,11 +5579,12 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
                 pass
         screen_text = render_template_variables(screen_template, confirmation_variables)
 
-        thread = find_thread_by_phone(db, customer_phone)
+        thread = find_thread_by_phone(db, customer_phone, "primary")
         if not thread:
             thread = Thread(
                 id=str(uuid.uuid4()),
                 customer_phone=customer_phone,
+                sms_account_key="primary",
                 state="resolved",
                 priority="medium",
                 sla_due_at=start_dt + timedelta(hours=24),
@@ -5519,6 +5608,7 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
             customer_phone,
             sms_text,
             idempotency_key=confirmation_msg.id,
+            account_key="primary",
         )
         delivery_failure = mobilemessage_service.delivery_error(dispatch_result)
         if dispatch_result.get("status") == "skipped" or (delivery_failure and ("skipped" in str(delivery_failure).lower() or "not configured" in str(delivery_failure).lower())):
@@ -5592,13 +5682,25 @@ class MobileMessageConfigInput(BaseModel):
 
 @app.get("/api/settings/mobilemessage")
 def get_mobilemessage_settings():
+    accounts = mobilemessage_service.load_accounts_config()
     config = mobilemessage_service.load_config()
+    accounts["primary"] = config
+    public_accounts = {}
+    for key, account in accounts.items():
+        public_accounts[key] = {
+            "username": account.get("username", ""),
+            "password": "",
+            "hasPassword": bool(account.get("password")),
+            "sender": account.get("sender", ""),
+            "enabled": bool(account.get("enabled", False)),
+        }
     return {
         "username": config.get("username", ""),
         "password": "",
         "hasPassword": bool(config.get("password")),
         "sender": config.get("sender", ""),
         "enabled": bool(config.get("enabled", False)),
+        "accounts": public_accounts,
     }
 
 @app.post("/api/settings/mobilemessage")

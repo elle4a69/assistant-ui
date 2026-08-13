@@ -37,6 +37,7 @@ export interface ThreadSLA {
 export interface ThreadListItem {
   id: string;
   customerPhone: string;
+  smsAccountKey: 'primary' | 'secondary';
   lastMessageAt: string;
   lastMessageText: string;
   lastMessageRole: Message['role'] | null;
@@ -76,6 +77,7 @@ export interface ThreadEvent {
 export interface ThreadDetail {
   id: string;
   customerPhone: string;
+  smsAccountKey: 'primary' | 'secondary';
   state: string;
   assignedAgent: { id: string; name: string } | null;
   sla: {

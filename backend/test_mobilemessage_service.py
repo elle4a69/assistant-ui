@@ -108,6 +108,28 @@ def test_booking_rejects_invalid_mobile_before_calendar_or_sms():
     db.rollback.assert_not_called()
 
 
+def test_secondary_account_uses_its_own_credentials_and_sender(monkeypatch):
+    configs = {
+        "primary": {"username": "one", "password": "p1", "sender": "61400000010", "enabled": True},
+        "secondary": {"username": "two", "password": "p2", "sender": "61420136756", "enabled": True},
+    }
+    monkeypatch.setattr(mobilemessage_service, "load_config", lambda key="primary": configs[key])
+    send_response = Mock(ok=True, status_code=200)
+    send_response.json.return_value = {"results": [{"status": "success", "message_id": "two"}]}
+    post = Mock(return_value=send_response)
+    monkeypatch.setattr(mobilemessage_service.requests, "post", post)
+
+    result = mobilemessage_service.send_sms(
+        "0411111111",
+        "Hello from line two",
+        account_key="secondary",
+    )
+
+    assert result["status"] == "success"
+    assert post.call_args.kwargs["auth"].username == "two"
+    assert post.call_args.kwargs["json"]["messages"][0]["sender"] == "61420136756"
+
+
 def test_gateway_settings_do_not_expose_saved_password(monkeypatch):
     monkeypatch.setattr(
         main.mobilemessage_service,

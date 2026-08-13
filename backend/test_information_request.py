@@ -57,7 +57,7 @@ def test_information_request_saves_knowledge_sends_reply_and_resolves(monkeypatc
         "knowledge_summary": "Couples are accepted for the couples service.",
     })
     sent = []
-    monkeypatch.setattr(main.mobilemessage_service, "send_sms", lambda phone, text, idempotency_key: sent.append((phone, text)) or {})
+    monkeypatch.setattr(main.mobilemessage_service, "send_sms", lambda phone, text, idempotency_key, account_key="primary": sent.append((phone, text, account_key)) or {})
     monkeypatch.setattr(main.mobilemessage_service, "delivery_error", lambda _result: None)
 
     result = respond_to_information_request(
@@ -77,7 +77,7 @@ def test_information_request_saves_knowledge_sends_reply_and_resolves(monkeypatc
     knowledge_entry = json.loads(knowledge_lines[0])
 
     assert result["status"] == "success"
-    assert sent == [(thread.customer_phone, "Yes, couples are welcome. What day were you thinking?")]
+    assert sent == [(thread.customer_phone, "Yes, couples are welcome. What day were you thinking?", "primary")]
     assert thread.state == "auto-reply"
     assert thread.unread_count == 0
     assert request_meta["status"] == "resolved"

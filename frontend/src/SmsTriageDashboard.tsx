@@ -670,6 +670,9 @@ export default function SmsTriageDashboard() {
                 </div>
 
                 <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="inline-flex rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-indigo-700">
+                    {t.smsAccountKey === 'secondary' ? 'SMS line 2' : 'SMS line 1'}
+                  </span>
                   {(t.lastMessageRole === 'draft' || t.status === 'needs-review') && (
                     <span
                       title={t.lastMessageRole === 'draft' ? 'Unsent AI draft waiting for approval' : 'This conversation needs a human answer'}
@@ -831,6 +834,9 @@ export default function SmsTriageDashboard() {
                 <div className="flex flex-col gap-0.5 sm:gap-1">
                   <div className="flex items-center gap-1.5 sm:gap-2">
                     <h2 className="text-sm sm:text-lg font-bold text-slate-800 tracking-tight">{selectedThread.customerPhone}</h2>
+                    <span className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-indigo-700">
+                      {selectedThread.smsAccountKey === 'secondary' ? 'SMS line 2' : 'SMS line 1'}
+                    </span>
                     <span className={`text-[9px] sm:text-xs px-2 py-0.5 rounded-full font-bold shadow-2xs ${getStatusBadgeClass(selectedThread.state)}`}>
                       {selectedThread.state}
                     </span>

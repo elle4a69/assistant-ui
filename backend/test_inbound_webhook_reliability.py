@@ -64,6 +64,43 @@ def test_original_outbound_id_does_not_collapse_separate_inbound_messages(monkey
     db.close()
 
 
+def test_same_customer_on_two_inbound_numbers_creates_separate_threads(monkeypatch):
+    db = make_db()
+    monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", False)
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "load_accounts_config",
+        lambda: {
+            "primary": {"sender": "61400000010", "enabled": True},
+            "secondary": {"sender": "61420136756", "enabled": True},
+        },
+    )
+
+    primary = receive(db, {
+        "sender": "0412 345 678",
+        "to": "61400000010",
+        "message": "Primary line",
+        "message_id": "same-provider-id",
+        "received_at": "2026-08-11 10:00:00",
+    })
+    secondary = receive(db, {
+        "sender": "0412 345 678",
+        "to": "+61 420 136 756",
+        "message": "Secondary line",
+        "message_id": "same-provider-id",
+        "received_at": "2026-08-11 10:00:01",
+    })
+
+    threads = db.query(main.Thread).order_by(main.Thread.sms_account_key).all()
+    assert primary["thread_id"] != secondary["thread_id"]
+    assert [(thread.sms_account_key, thread.customer_phone) for thread in threads] == [
+        ("primary", "+61412345678"),
+        ("secondary", "+61412345678"),
+    ]
+    assert db.query(Message).filter(Message.role == "customer").count() == 2
+    db.close()
+
+
 def test_real_inbound_message_id_still_deduplicates_retries(monkeypatch):
     db = make_db()
     monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", False)

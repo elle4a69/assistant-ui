@@ -375,7 +375,9 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                 <h1 className="truncate text-sm font-black tracking-tight text-slate-800">
                   {contactLabel(thread.customerPhone)}
                 </h1>
-                <p className="text-[9px] font-bold text-emerald-600 tracking-wider uppercase">Active Chat</p>
+                <p className="text-[9px] font-bold text-indigo-600 tracking-wider uppercase">
+                  {thread.smsAccountKey === 'secondary' ? 'SMS line 2' : 'SMS line 1'} · Active Chat
+                </p>
               </>
             ) : (
               <div className="flex h-8 min-w-20 items-center gap-1.5 rounded-lg bg-slate-100 px-2">
@@ -472,6 +474,9 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <p className="truncate text-[15px] font-semibold">{contactLabel(item.customerPhone)}</p>
+                        <span className="shrink-0 rounded-full border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wide text-indigo-700">
+                          {item.smsAccountKey === 'secondary' ? 'Line 2' : 'Line 1'}
+                        </span>
                         {(item.lastMessageRole === 'draft' || item.status === 'needs-review') && (
                           <span
                             title={item.lastMessageRole === 'draft' ? 'Unsent AI draft waiting for approval' : 'This conversation needs a human answer'}

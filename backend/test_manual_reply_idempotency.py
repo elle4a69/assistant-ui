@@ -33,8 +33,8 @@ def add_thread(db, thread_id="manual-thread"):
 def stub_gateway(monkeypatch):
     calls = []
 
-    def send_sms(phone, text, idempotency_key=None):
-        calls.append((phone, text, idempotency_key))
+    def send_sms(phone, text, idempotency_key=None, account_key="primary"):
+        calls.append((phone, text, idempotency_key, account_key))
         return {}
 
     monkeypatch.setattr(main.mobilemessage_service, "send_sms", send_sms)
