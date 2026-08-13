@@ -154,11 +154,11 @@ export default function OperationsAIChat() {
             <div className="flex flex-wrap items-center gap-2">
               <h2 id="operations-ai-title" className="text-sm font-bold">Operations AI</h2>
               <span className="rounded-full border border-emerald-300/30 bg-emerald-300/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-emerald-200">
-                Controlled maintenance
+                Practical operator
               </span>
             </div>
             <p className="mt-1 text-[10px] leading-relaxed text-slate-300">
-              Diagnose messaging, research current information, remember operational lessons and improve the system.
+              Describe the outcome. It investigates, acts within its permissions, verifies, and reports back plainly.
             </p>
           </div>
         </div>

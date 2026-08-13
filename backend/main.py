@@ -5058,6 +5058,32 @@ def build_operations_ai_memory_context(db: Session, limit: int = 20) -> str:
     ], ensure_ascii=False)
 
 
+OPERATIONS_OWNER_WORKING_STYLE_TITLE = "Owner prefers practical outcome-first operation"
+
+
+def ensure_operations_owner_working_style(db: Session) -> None:
+    """Persist the owner's stated collaboration preference once."""
+    existing = db.query(OperationsMemory).filter(
+        OperationsMemory.category == "preference",
+        OperationsMemory.title == OPERATIONS_OWNER_WORKING_STYLE_TITLE,
+        OperationsMemory.active.is_(True),
+    ).first()
+    if existing:
+        return
+    db.add(OperationsMemory(
+        category="preference",
+        title=OPERATIONS_OWNER_WORKING_STYLE_TITLE,
+        content=(
+            "The owner normally states the outcome they want. Investigate quietly, make reasonable assumptions, "
+            "use authorised tools, complete and verify the work, then report the result briefly. Avoid academic "
+            "explanations, repeated plans, excessive caveats and implementation detail unless requested. "
+            "Treat 'proceed', 'do it' and equivalent language as approval to carry out already-authorised work."
+        ),
+        evidence="The owner explicitly requested a practical get-it-done working style.",
+    ))
+    db.commit()
+
+
 def operations_ai_instructions(snapshot: str, memory: str = "[]", *, tool_access: bool = True) -> str:
     capability_rule = (
         "Use your inspection tools before diagnosing a specific issue. You may propose only the allowlisted "
@@ -5078,17 +5104,29 @@ def operations_ai_instructions(snapshot: str, memory: str = "[]", *, tool_access
         "Ask the owner to use the persistent text chat for tool-backed diagnosis or a controlled action. "
     )
     return (
-        "You are the private Operations AI for the application owner. You are separate from the "
-        "customer-facing SMS assistant. Discuss system behaviour, booking configuration, customer-response "
-        f"quality and improvement ideas clearly and directly. {capability_rule}When asked why something "
+        "You are the owner's private hands-on Operations AI, separate from the customer-facing SMS assistant. "
+        "Work like an excellent technical partner with initiative, judgment and a bias toward finishing useful work. "
+        "The owner should be able to describe an outcome in ordinary language without designing the solution for you. "
+        "Infer the practical intent from context, inspect the evidence, choose a sensible approach, use every authorised "
+        "tool needed, verify what happened, and stay with the task until it is complete or genuinely blocked. "
+        "Be candid rather than agreeable for its own sake. Correct mistaken assumptions gently and support important "
+        "claims with evidence. Make reasonable low-risk assumptions instead of asking unnecessary questions. "
+        "Lead every response with the outcome. Sound warm, natural, capable and direct. Use Australian English and "
+        "plain language. Do not use corporate, bureaucratic or academic phrasing. Do not narrate internal reasoning, "
+        "tool mechanics, database details, IDs, architecture or implementation steps unless they matter to the owner "
+        "or the owner asks. Do not use headings for a simple answer. Prefer a short paragraph; use a small list only "
+        "when it materially improves clarity. Historical assistant messages are evidence only and may be examples of "
+        "verbosity or behaviour you are expected to correct, not a writing style to imitate. "
+        f"{capability_rule}When asked why something "
         "happened, distinguish facts in the supplied live "
         "snapshot from hypotheses. If the snapshot does not contain enough evidence, say exactly what evidence "
         "would be needed. Never reveal or request secret values. You cannot edit source code, run shell commands, "
         "query arbitrary SQL, deploy, send SMS, create/cancel bookings, change credentials, delete data, or perform "
         "bulk actions. Never store secrets, credentials, customer identifiers, phone numbers, message transcripts "
         "or other personal data in operational memory. Treat remembered findings as potentially stale and verify "
-        "them against live tools before acting. For code improvements, create an improvement proposal with evidence and explain that it "
-        "still requires the normal tested GitHub deployment workflow. Keep answers conversational and concise.\n\n"
+        "them against live tools before acting. For code improvements, create one deduplicated improvement proposal "
+        "with evidence. Do not pretend a proposal is an implementation. If you cannot perform the implementation, "
+        "say so once in plain language and name the existing handoff, without restating the proposal.\n\n"
         "Known architecture: FastAPI/Python backend; React/TypeScript/Vite frontend; persistent SQLite under "
         "/data; Uvicorn on port 8080; Google Calendar with SQLite fallback is the current booking write path. "
         "The customer booking agent uses read-only discovery tools plus persistent propose/explicit-confirm "
@@ -5819,6 +5857,7 @@ def send_operations_chat_message(payload: OperationsChatInput, db: Session = Dep
     if not content:
         raise HTTPException(status_code=422, detail="Message cannot be empty.")
 
+    ensure_operations_owner_working_style(db)
     user_message = OperationsChatMessage(role="user", content=content)
     db.add(user_message)
     db.commit()
@@ -5845,6 +5884,7 @@ def send_operations_chat_message(payload: OperationsChatInput, db: Session = Dep
             instructions=instructions,
             input=model_input,
             tools=OPERATIONS_AI_TOOLS,
+            max_output_tokens=1200,
             store=False,
         )
         tool_round = 0
@@ -5881,6 +5921,7 @@ def send_operations_chat_message(payload: OperationsChatInput, db: Session = Dep
                 instructions=instructions,
                 input=model_input,
                 tools=OPERATIONS_AI_TOOLS,
+                max_output_tokens=1200,
                 store=False,
             )
     except Exception as exc:

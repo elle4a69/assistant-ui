@@ -108,8 +108,15 @@ def test_operations_chat_persists_both_sides_and_uses_read_only_snapshot(monkeyp
     assert call["store"] is False
     assert '"needs_review_count": 1' in call["instructions"]
     assert "cannot edit source code" in call["instructions"]
+    assert "Lead every response with the outcome" in call["instructions"]
+    assert "Do not use corporate, bureaucratic or academic phrasing" in call["instructions"]
     assert call["tools"] == main.OPERATIONS_AI_TOOLS
+    assert call["max_output_tokens"] == 1200
     assert "include" not in call
+    owner_style = db.query(OperationsMemory).filter(
+        OperationsMemory.title == main.OPERATIONS_OWNER_WORKING_STYLE_TITLE
+    ).one()
+    assert "complete and verify the work" in owner_style.content
     db.close()
 
 
