@@ -352,6 +352,9 @@ def test_realtime_session_uses_server_key_and_current_voice_model(monkeypatch):
     assert request.headers["Authorization"] == "Bearer protected-test-key"
     assert b'gpt-realtime-2.1' in request.data
     assert b'"voice": "marin"' in request.data
+    assert b'find_message_threads' in request.data
+    assert b'inspect_message_thread' in request.data
+    assert b'read-only message diagnostic tools' in request.data
     assert b'protected-test-key' not in request.data
     assert captured["timeout"] == 20
 
@@ -363,3 +366,55 @@ def test_realtime_session_fails_closed_without_server_key(monkeypatch):
         main.create_operations_realtime_session("v=0\r\no=offer", "{}")
 
     assert exc_info.value.status_code == 503
+
+
+def test_voice_can_read_full_account_bound_thread_and_reply_events():
+    db = make_db()
+    now = datetime.utcnow()
+    thread = Thread(
+        id="voice-thread",
+        customer_phone="+61432172148",
+        sms_account_key="primary",
+        state="needs-review",
+        priority="medium",
+        sla_due_at=now + timedelta(hours=1),
+        unread_count=1,
+    )
+    db.add(thread)
+    db.add_all([
+        Message(id="voice-m1", thread_id=thread.id, role="customer", text="Can I come tomorrow?", at=now),
+        Message(id="voice-m2", thread_id=thread.id, role="customer", text="Around three", at=now + timedelta(seconds=1)),
+        ThreadEvent(
+            id="voice-e1",
+            thread_id=thread.id,
+            type="ai-reply-missed",
+            at=now + timedelta(seconds=2),
+            meta='{"reason":"global-ai-off","message_id":"voice-m2"}',
+        ),
+    ])
+    db.commit()
+
+    found = main.execute_operations_voice_tool(
+        db, "find_message_threads", {"phone": "0432172148", "account_key": "primary", "limit": 5}
+    )
+    inspected = main.execute_operations_voice_tool(
+        db, "inspect_message_thread", {"thread_id": "voice-thread"}
+    )
+
+    assert found["threads"][0]["thread_id"] == "voice-thread"
+    assert [item["text"] for item in inspected["messages"]] == ["Can I come tomorrow?", "Around three"]
+    assert inspected["events"][0]["meta"]["reason"] == "global-ai-off"
+    assert inspected["thread"]["line"] == "Tori"
+    db.close()
+
+
+def test_voice_tool_endpoint_rejects_every_mutating_tool():
+    db = make_db()
+    result = main.execute_operations_voice_tool(
+        db,
+        "execute_runtime_change",
+        {"action_id": "anything"},
+    )
+    assert result["status"] == "rejected"
+    assert "read-only" in result["reason"]
+    db.close()

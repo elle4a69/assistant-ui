@@ -4,6 +4,7 @@ import {
   createOperationsRealtimeSession,
   getOperationsChatMessages,
   OperationsChatMessage,
+  runOperationsRealtimeTool,
   sendOperationsChatMessage,
 } from './api';
 
@@ -29,6 +30,7 @@ export default function OperationsAIChat() {
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const microphoneStreamRef = useRef<MediaStream | null>(null);
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
+  const voiceDataChannelRef = useRef<RTCDataChannel | null>(null);
 
   const loadMessages = async () => {
     setLoading(true);
@@ -95,6 +97,8 @@ export default function OperationsAIChat() {
     microphoneStreamRef.current = null;
     peerConnectionRef.current?.close();
     peerConnectionRef.current = null;
+    voiceDataChannelRef.current?.close();
+    voiceDataChannelRef.current = null;
     if (audioElementRef.current) {
       audioElementRef.current.pause();
       audioElementRef.current.srcObject = null;
@@ -126,7 +130,47 @@ export default function OperationsAIChat() {
         if (['failed', 'disconnected', 'closed'].includes(peerConnection.connectionState)) stopVoice();
       };
       microphoneStream.getAudioTracks().forEach((track) => peerConnection.addTrack(track, microphoneStream));
-      peerConnection.createDataChannel('oai-events');
+      const dataChannel = peerConnection.createDataChannel('oai-events');
+      voiceDataChannelRef.current = dataChannel;
+      dataChannel.onmessage = (event) => {
+        void (async () => {
+          let payload: Record<string, unknown>;
+          try {
+            payload = JSON.parse(String(event.data)) as Record<string, unknown>;
+          } catch {
+            return;
+          }
+          if (payload.type !== 'response.function_call_arguments.done') return;
+          const callId = typeof payload.call_id === 'string' ? payload.call_id : '';
+          const name = typeof payload.name === 'string' ? payload.name : '';
+          if (!callId || !name) return;
+          let args: Record<string, unknown> = {};
+          try {
+            args = JSON.parse(typeof payload.arguments === 'string' ? payload.arguments : '{}') as Record<string, unknown>;
+          } catch {
+            args = {};
+          }
+          let output: Record<string, unknown>;
+          try {
+            output = await runOperationsRealtimeTool(name, args);
+          } catch (toolError) {
+            output = {
+              status: 'error',
+              reason: toolError instanceof Error ? toolError.message : 'Voice diagnostic failed.',
+            };
+          }
+          if (dataChannel.readyState !== 'open') return;
+          dataChannel.send(JSON.stringify({
+            type: 'conversation.item.create',
+            item: {
+              type: 'function_call_output',
+              call_id: callId,
+              output: JSON.stringify(output),
+            },
+          }));
+          dataChannel.send(JSON.stringify({ type: 'response.create' }));
+        })();
+      };
 
       const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
@@ -209,7 +253,7 @@ export default function OperationsAIChat() {
       <div className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-3 text-[10px] leading-relaxed text-amber-900">
         <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
         <p>
-          Text chat can self-diagnose message handling, search the internet with sources, and keep non-secret operational memory. Customer data is excluded from web queries and memory. Every operational setting change still requires a separate exact confirmation and is audit logged. It cannot access secrets, run arbitrary shell commands or SQL, edit code, deploy, send SMS, modify bookings, delete data, or perform bulk actions. Voice remains advisory and is not added to persistent text history.
+          Text chat can self-diagnose, research, remember and perform confirmed operational changes. Voice can privately read message threads and reply-decision events to investigate missed or incorrect responses, but cannot change settings, send messages, modify bookings or delete data. Voice is not added to persistent text history.
         </p>
       </div>
 

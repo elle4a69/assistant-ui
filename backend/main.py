@@ -5076,6 +5076,11 @@ class OperationsChatInput(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
 
 
+class OperationsVoiceToolInput(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+
+
 MESSAGE_UI_SETTINGS_PATH = os.path.join(DATA_DIR, "message_ui_settings.json")
 
 
@@ -5215,7 +5220,13 @@ def ensure_operations_owner_working_style(db: Session) -> None:
         db.commit()
 
 
-def operations_ai_instructions(snapshot: str, memory: str = "[]", *, tool_access: bool = True) -> str:
+def operations_ai_instructions(
+    snapshot: str,
+    memory: str = "[]",
+    *,
+    tool_access: bool = True,
+    voice_read_access: bool = False,
+) -> str:
     capability_rule = (
         "Use your inspection tools before diagnosing a specific issue. You may propose only the allowlisted "
         "runtime safety changes. A change is not executed until the owner sends the exact confirmation phrase "
@@ -5230,9 +5241,14 @@ def operations_ai_instructions(snapshot: str, memory: str = "[]", *, tool_access
         "can perform it. Never create a duplicate proposal. If implementation is outside your tools, say that once "
         "in one sentence and identify the existing proposal. Do not repeat architecture, counts, caveats or a plan "
         "the owner has already accepted. Default to a short result of no more than three bullets. "
-        if tool_access else
+        if tool_access else (
+        "This voice session has read-only message diagnostic tools. Use them before explaining a specific message "
+        "or missed reply. Find the thread, inspect its complete relevant chronology and events, then give the likely "
+        "reason based on evidence. You cannot change anything from voice. "
+        if voice_read_access else
         "This voice session is advisory only and has no server tools. Never claim you inspected or changed anything. "
         "Ask the owner to use the persistent text chat for tool-backed diagnosis or a controlled action. "
+        )
     )
     return (
         "You are the owner's private hands-on Operations AI, separate from the customer-facing SMS assistant. "
@@ -5423,6 +5439,46 @@ OPERATIONS_TOOL_SCHEMAS = [
 
 OPERATIONS_AI_TOOLS = list(OPERATIONS_TOOL_SCHEMAS)
 
+OPERATIONS_VOICE_TOOL_NAMES = frozenset({
+    "find_message_threads",
+    "inspect_message_thread",
+    "inspect_recent_failures",
+    "inspect_sms_accounts",
+})
+
+OPERATIONS_VOICE_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "name": "find_message_threads",
+        "description": "Find recent customer message threads, optionally by phone digits or SMS line.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "phone": {"type": ["string", "null"]},
+                "account_key": {"type": ["string", "null"], "enum": ["primary", "secondary", None]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+            },
+            "required": ["phone", "account_key", "limit"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "inspect_message_thread",
+        "description": "Read a selected thread's complete relevant chronological messages and reply-decision events.",
+        "parameters": {
+            "type": "object",
+            "properties": {"thread_id": {"type": "string"}},
+            "required": ["thread_id"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    next(item for item in OPERATIONS_TOOL_SCHEMAS if item.get("name") == "inspect_recent_failures"),
+    next(item for item in OPERATIONS_TOOL_SCHEMAS if item.get("name") == "inspect_sms_accounts"),
+]
+
 
 def create_operations_realtime_session(sdp: str, snapshot: str, memory: str = "[]") -> str:
     """Exchange a browser WebRTC offer for an OpenAI Realtime SDP answer."""
@@ -5439,7 +5495,11 @@ def create_operations_realtime_session(sdp: str, snapshot: str, memory: str = "[
     session_config = json.dumps({
         "type": "realtime",
         "model": "gpt-realtime-2.1",
-        "instructions": operations_ai_instructions(snapshot, memory, tool_access=False),
+        "instructions": operations_ai_instructions(
+            snapshot, memory, tool_access=False, voice_read_access=True
+        ),
+        "tools": OPERATIONS_VOICE_TOOL_SCHEMAS,
+        "tool_choice": "auto",
         "audio": {"output": {"voice": "marin"}},
     }, ensure_ascii=False)
     parts = [
@@ -5563,6 +5623,134 @@ def _operations_conversation(db: Session, phone: str, account_key: str) -> Dict[
             for item in messages
         ],
     }
+
+
+def _operations_find_message_threads(
+    db: Session,
+    phone: Optional[str],
+    account_key: Optional[str],
+    limit: int,
+) -> Dict[str, Any]:
+    query = db.query(Thread)
+    if account_key in FIRST_CONTACT_ACCOUNT_KEYS:
+        query = query.filter(Thread.sms_account_key == account_key)
+    candidates = query.order_by(Thread.updated_at.desc(), Thread.id.desc()).limit(200).all()
+    phone_digits = re.sub(r"\D", "", phone or "")
+    canonical_search = canonical_phone_number(phone or "") if phone_digits else ""
+    if phone_digits:
+        candidates = [
+            thread for thread in candidates
+            if canonical_phone_number(thread.customer_phone or "") == canonical_search
+            or phone_digits in re.sub(r"\D", "", thread.customer_phone or "")
+        ]
+    selected = candidates[:max(1, min(20, limit))]
+    return {
+        "status": "ok",
+        "threads": [
+            {
+                "thread_id": thread.id,
+                "phone": thread.customer_phone,
+                "account_key": thread.sms_account_key,
+                "line": "Tori" if thread.sms_account_key == "primary" else "Anonymous",
+                "state": thread.state,
+                "auto_reply_enabled": bool(thread.auto_reply_enabled),
+                "unread_count": thread.unread_count,
+                "updated_at": thread.updated_at.isoformat() + "Z",
+                "message_count": db.query(Message).filter(Message.thread_id == thread.id).count(),
+            }
+            for thread in selected
+        ],
+    }
+
+
+def _safe_thread_event_meta(raw_meta: Optional[str]) -> Dict[str, Any]:
+    try:
+        parsed = json.loads(raw_meta or "{}")
+        if not isinstance(parsed, dict):
+            return {}
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    # Event metadata is already operational data. Remove any accidentally stored
+    # free-form customer content or secret-shaped fields before returning it.
+    blocked_keys = {"body", "text", "message", "password", "token", "secret", "api_key"}
+    return {key: value for key, value in parsed.items() if key.casefold() not in blocked_keys}
+
+
+def _operations_inspect_message_thread(db: Session, thread_id: str) -> Dict[str, Any]:
+    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+    if not thread:
+        return {"status": "not_found", "thread_id": thread_id}
+    messages = (
+        db.query(Message)
+        .filter(Message.thread_id == thread.id)
+        .order_by(Message.at.desc(), Message.id.desc())
+        .limit(100)
+        .all()
+    )
+    messages.reverse()
+    events = (
+        db.query(ThreadEvent)
+        .filter(ThreadEvent.thread_id == thread.id)
+        .order_by(ThreadEvent.at.desc(), ThreadEvent.id.desc())
+        .limit(100)
+        .all()
+    )
+    events.reverse()
+    return {
+        "status": "ok",
+        "thread": {
+            "thread_id": thread.id,
+            "phone": thread.customer_phone,
+            "account_key": thread.sms_account_key,
+            "line": "Tori" if thread.sms_account_key == "primary" else "Anonymous",
+            "state": thread.state,
+            "auto_reply_enabled": bool(thread.auto_reply_enabled),
+            "global_ai_enabled": AUTO_REPLY_GLOBAL_ENABLED,
+            "account_conversational_ai_enabled": account_allows_conversational_ai(thread.sms_account_key),
+            "training_mode_enabled": TRAINING_MODE_ENABLED,
+            "pending_booking": bool(thread.pending_booking),
+        },
+        "messages": [
+            {
+                "id": message.id,
+                "role": message.role,
+                "text": message.text[:4000],
+                "provider_message_id": message.provider_message_id,
+                "at": message.at.isoformat() + "Z",
+            }
+            for message in messages
+        ],
+        "events": [
+            {
+                "type": event.type,
+                "at": event.at.isoformat() + "Z",
+                "agent_id": event.agent_id,
+                "meta": _safe_thread_event_meta(event.meta),
+            }
+            for event in events
+        ],
+        "scope_note": "Messages and events are returned only from this account-bound thread.",
+    }
+
+
+def execute_operations_voice_tool(db: Session, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute the voice session's read-only allowlist."""
+    if name not in OPERATIONS_VOICE_TOOL_NAMES:
+        return {"status": "rejected", "reason": "Voice can use read-only diagnostic tools only."}
+    if name == "find_message_threads":
+        return _operations_find_message_threads(
+            db,
+            arguments.get("phone"),
+            arguments.get("account_key"),
+            int(arguments.get("limit", 10)),
+        )
+    if name == "inspect_message_thread":
+        return _operations_inspect_message_thread(db, str(arguments.get("thread_id", "")))
+    if name == "inspect_recent_failures":
+        return _operations_recent_failures(db, int(arguments.get("limit", 20)))
+    if name == "inspect_sms_accounts":
+        return _operations_sms_accounts()
+    return {"status": "rejected", "reason": "Unknown voice diagnostic tool."}
 
 
 def _operations_message_handling_diagnostics(db: Session, hours: int, thread_limit: int) -> Dict[str, Any]:
@@ -6099,6 +6287,14 @@ async def start_operations_realtime_session(request: Request, db: Session = Depe
         build_operations_ai_memory_context(db),
     )
     return Response(content=answer, media_type="application/sdp")
+
+
+@app.post("/api/settings/operations-chat/realtime/tool")
+def run_operations_realtime_tool(
+    payload: OperationsVoiceToolInput,
+    db: Session = Depends(get_db),
+):
+    return execute_operations_voice_tool(db, payload.name, payload.arguments)
 
 
 @app.get("/api/admin/rag/status")

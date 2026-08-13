@@ -957,3 +957,19 @@ export async function createOperationsRealtimeSession(sdp: string): Promise<stri
   }
   return response.text();
 }
+
+export async function runOperationsRealtimeTool(
+  name: string,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const response = await fetch(`${API_BASE}/api/settings/operations-chat/realtime/tool`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, arguments: args }),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Voice diagnostic failed: ${response.statusText}`);
+  }
+  return response.json();
+}
