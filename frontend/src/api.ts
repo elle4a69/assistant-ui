@@ -909,6 +909,9 @@ export interface OperationsChatCapabilities {
   liveSnapshot: boolean;
   codeAccess: boolean;
   logAccess: boolean;
+  diagnosticTools: boolean;
+  controlledActions: boolean;
+  requiresConfirmation: boolean;
 }
 
 export async function getOperationsChatMessages(): Promise<{ messages: OperationsChatMessage[] }> {

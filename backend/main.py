@@ -943,6 +943,19 @@ class OperationsChatMessage(Base):
     content = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
+
+class OperationsAction(Base):
+    """Audited, narrowly scoped maintenance action proposed by Operations AI."""
+    __tablename__ = "operations_actions"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    action_type = Column(String, nullable=False)
+    payload = Column(Text, nullable=False, default="{}")
+    reason = Column(Text, nullable=False)
+    status = Column(String, nullable=False, default="pending")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    executed_at = Column(DateTime, nullable=True)
+
 def init_db():
     Base.metadata.create_all(bind=engine)
     
@@ -5002,21 +5015,126 @@ def build_operations_ai_snapshot(db: Session) -> str:
     }, ensure_ascii=False)
 
 
-def operations_ai_instructions(snapshot: str) -> str:
+def operations_ai_instructions(snapshot: str, *, tool_access: bool = True) -> str:
+    capability_rule = (
+        "Use your inspection tools before diagnosing a specific issue. You may propose only the allowlisted "
+        "runtime safety changes. A change is not executed until the owner sends the exact confirmation phrase "
+        "returned by the proposal tool. Never claim you performed an action unless the execution tool returned "
+        "status executed. "
+        if tool_access else
+        "This voice session is advisory only and has no server tools. Never claim you inspected or changed anything. "
+        "Ask the owner to use the persistent text chat for tool-backed diagnosis or a controlled action. "
+    )
     return (
         "You are the private Operations AI for the application owner. You are separate from the "
         "customer-facing SMS assistant. Discuss system behaviour, booking configuration, customer-response "
-        "quality and improvement ideas clearly and directly. This version is advisory and read-only: you "
-        "cannot change settings, edit code, deploy, send messages, or run investigations. Never claim you "
-        "performed an action. When asked why something happened, distinguish facts in the supplied live "
+        f"quality and improvement ideas clearly and directly. {capability_rule}When asked why something "
+        "happened, distinguish facts in the supplied live "
         "snapshot from hypotheses. If the snapshot does not contain enough evidence, say exactly what evidence "
-        "would be needed. Never reveal or request secret values. Keep spoken answers conversational and concise.\n\n"
+        "would be needed. Never reveal or request secret values. You cannot edit source code, run shell commands, "
+        "query arbitrary SQL, deploy, send SMS, create/cancel bookings, change credentials, delete data, or perform "
+        "bulk actions. For code improvements, create an improvement proposal with evidence and explain that it "
+        "still requires the normal tested GitHub deployment workflow. Keep answers conversational and concise.\n\n"
         "Known architecture: FastAPI/Python backend; React/TypeScript/Vite frontend; persistent SQLite under "
         "/data; Uvicorn on port 8080; Google Calendar with SQLite fallback is the current booking write path. "
         "The customer booking agent uses read-only discovery tools plus persistent propose/explicit-confirm "
         "safeguards. FastAPI Bookings discovery is optional; final writes have not migrated there.\n\n"
         f"Live operational snapshot:\n{snapshot}"
     )
+
+
+OPERATIONS_RUNTIME_ACTIONS = {
+    "pause_customer_ai": {"auto_reply": False},
+    "resume_customer_ai": {"auto_reply": True},
+    "enable_draft_approval": {"training_mode": True},
+    "disable_draft_approval": {"training_mode": False},
+}
+
+OPERATIONS_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "name": "inspect_system_status",
+        "description": "Read the current bounded, non-secret operational status.",
+        "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "inspect_recent_failures",
+        "description": "Read recent failure, cancellation, missed, and skipped operational events.",
+        "parameters": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 50}},
+            "required": ["limit"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "inspect_sms_accounts",
+        "description": "Inspect non-secret SMS account routing and responder configuration.",
+        "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "inspect_conversation",
+        "description": "Inspect a bounded conversation by customer phone and SMS account without changing it.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "phone": {"type": "string"},
+                "account_key": {"type": "string", "enum": ["primary", "secondary"]},
+            },
+            "required": ["phone", "account_key"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "propose_runtime_change",
+        "description": "Propose an allowlisted safety setting change. This never executes the change.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": list(OPERATIONS_RUNTIME_ACTIONS)},
+                "reason": {"type": "string", "minLength": 3, "maxLength": 1000},
+            },
+            "required": ["action", "reason"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "execute_runtime_change",
+        "description": "Execute a pending action only after the owner sends the exact required confirmation phrase.",
+        "parameters": {
+            "type": "object",
+            "properties": {"action_id": {"type": "string"}},
+            "required": ["action_id"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "create_improvement_proposal",
+        "description": "Audit an evidence-backed code or architecture improvement proposal without editing or deploying.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "minLength": 3, "maxLength": 200},
+                "description": {"type": "string", "minLength": 10, "maxLength": 4000},
+            },
+            "required": ["title", "description"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+]
 
 
 def create_operations_realtime_session(sdp: str, snapshot: str) -> str:
@@ -5034,7 +5152,7 @@ def create_operations_realtime_session(sdp: str, snapshot: str) -> str:
     session_config = json.dumps({
         "type": "realtime",
         "model": "gpt-realtime-2.1",
-        "instructions": operations_ai_instructions(snapshot),
+        "instructions": operations_ai_instructions(snapshot, tool_access=False),
         "audio": {"output": {"voice": "marin"}},
     }, ensure_ascii=False)
     parts = [
@@ -5067,6 +5185,201 @@ def create_operations_realtime_session(sdp: str, snapshot: str) -> str:
     if not answer.strip():
         raise HTTPException(status_code=502, detail="Realtime voice returned an empty session response.")
     return answer
+
+
+def _operations_recent_failures(db: Session, limit: int) -> Dict[str, Any]:
+    failure_types = {
+        "ai-reply-failed",
+        "ai-reply-cancelled",
+        "ai-reply-missed",
+        "ai-reply-skipped",
+        "draft-created",
+    }
+    events = (
+        db.query(ThreadEvent)
+        .filter(ThreadEvent.type.in_(failure_types))
+        .order_by(ThreadEvent.at.desc(), ThreadEvent.id.desc())
+        .limit(max(1, min(50, limit)))
+        .all()
+    )
+    def safe_meta(value: Optional[str]) -> Dict[str, Any]:
+        try:
+            parsed = json.loads(value or "{}")
+            return parsed if isinstance(parsed, dict) else {}
+        except (TypeError, json.JSONDecodeError):
+            return {}
+
+    return {
+        "status": "ok",
+        "events": [
+            {
+                "thread_id": item.thread_id,
+                "type": item.type,
+                "at": item.at.isoformat() + "Z",
+                "meta": safe_meta(item.meta),
+            }
+            for item in events
+        ],
+    }
+
+
+def _operations_sms_accounts() -> Dict[str, Any]:
+    accounts = mobilemessage_service.load_accounts_config()
+    responders = load_first_contact_autoresponders()
+    return {
+        "status": "ok",
+        "accounts": {
+            key: {
+                "label": "Tori" if key == "primary" else "Anonymous",
+                "sender": config.get("sender"),
+                "enabled": bool(config.get("enabled")),
+                "credentials_configured": bool(config.get("username") and config.get("password")),
+                "conversational_ai_enabled": account_allows_conversational_ai(key),
+                "first_contact": {
+                    "enabled": responders.get(key, {}).get("enabled", False),
+                    "cooldown_days": responders.get(key, {}).get("cooldownDays"),
+                    "delay_seconds": responders.get(key, {}).get("delaySeconds"),
+                    "message_configured": bool(responders.get(key, {}).get("message")),
+                },
+            }
+            for key, config in accounts.items()
+        },
+    }
+
+
+def _operations_conversation(db: Session, phone: str, account_key: str) -> Dict[str, Any]:
+    canonical = canonical_phone_number(phone)
+    thread = find_thread_by_phone(db, canonical, account_key)
+    if not thread:
+        return {"status": "not_found", "phone": canonical, "account_key": account_key}
+    messages = (
+        db.query(Message)
+        .filter(Message.thread_id == thread.id)
+        .order_by(Message.at.desc(), Message.id.desc())
+        .limit(30)
+        .all()
+    )
+    messages.reverse()
+    return {
+        "status": "ok",
+        "thread": {
+            "id": thread.id,
+            "phone": thread.customer_phone,
+            "account_key": thread.sms_account_key,
+            "state": thread.state,
+            "auto_reply_enabled": bool(thread.auto_reply_enabled),
+            "pending_booking": bool(thread.pending_booking),
+            "updated_at": thread.updated_at.isoformat() + "Z",
+        },
+        "messages": [
+            {"role": item.role, "text": item.text[:2000], "at": item.at.isoformat() + "Z"}
+            for item in messages
+        ],
+    }
+
+
+def _write_boolean_setting(path: str, enabled: bool) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temp_path = f"{path}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump({"enabled": enabled}, handle, indent=2)
+    os.replace(temp_path, path)
+
+
+def execute_operations_tool(
+    db: Session,
+    tool_name: str,
+    arguments: Dict[str, Any],
+    current_user_message: str,
+) -> Dict[str, Any]:
+    """Execute only explicitly allowlisted Operations AI tools."""
+    if tool_name == "inspect_system_status":
+        return {"status": "ok", "snapshot": json.loads(build_operations_ai_snapshot(db))}
+    if tool_name == "inspect_recent_failures":
+        return _operations_recent_failures(db, int(arguments.get("limit", 20)))
+    if tool_name == "inspect_sms_accounts":
+        return _operations_sms_accounts()
+    if tool_name == "inspect_conversation":
+        return _operations_conversation(
+            db,
+            str(arguments.get("phone", "")),
+            str(arguments.get("account_key", "primary")),
+        )
+    if tool_name == "propose_runtime_change":
+        action_type = str(arguments.get("action", ""))
+        reason = str(arguments.get("reason", "")).strip()[:1000]
+        if action_type not in OPERATIONS_RUNTIME_ACTIONS or len(reason) < 3:
+            return {"status": "rejected", "reason": "That runtime change is not allowlisted."}
+        action = OperationsAction(
+            action_type=action_type,
+            payload=json.dumps(OPERATIONS_RUNTIME_ACTIONS[action_type]),
+            reason=reason,
+            status="pending",
+        )
+        db.add(action)
+        db.commit()
+        db.refresh(action)
+        return {
+            "status": "pending_confirmation",
+            "action_id": action.id,
+            "action": action.action_type,
+            "reason": action.reason,
+            "confirmation_phrase": f"confirm {action.id}",
+            "expires": "when executed; pending actions are never automatic",
+        }
+    if tool_name == "execute_runtime_change":
+        action_id = str(arguments.get("action_id", "")).strip()
+        required_phrase = f"confirm {action_id}"
+        if current_user_message.strip().casefold() != required_phrase.casefold():
+            return {
+                "status": "rejected",
+                "reason": "The owner's latest message did not exactly match the confirmation phrase.",
+                "required_confirmation_phrase": required_phrase,
+            }
+        action = db.query(OperationsAction).filter(OperationsAction.id == action_id).first()
+        if not action or action.status != "pending" or action.action_type not in OPERATIONS_RUNTIME_ACTIONS:
+            return {"status": "rejected", "reason": "That pending action is unavailable or already handled."}
+        setting = OPERATIONS_RUNTIME_ACTIONS[action.action_type]
+        global AUTO_REPLY_GLOBAL_ENABLED, TRAINING_MODE_ENABLED
+        if "auto_reply" in setting:
+            AUTO_REPLY_GLOBAL_ENABLED = bool(setting["auto_reply"])
+            _write_boolean_setting(os.path.join(DATA_DIR, "auto_reply_global.json"), AUTO_REPLY_GLOBAL_ENABLED)
+        if "training_mode" in setting:
+            TRAINING_MODE_ENABLED = bool(setting["training_mode"])
+            _write_boolean_setting(os.path.join(DATA_DIR, "training_mode.json"), TRAINING_MODE_ENABLED)
+        action.status = "executed"
+        action.executed_at = datetime.utcnow()
+        db.commit()
+        return {
+            "status": "executed",
+            "action_id": action.id,
+            "action": action.action_type,
+            "current_settings": {
+                "auto_reply_globally_enabled": AUTO_REPLY_GLOBAL_ENABLED,
+                "training_mode_enabled": TRAINING_MODE_ENABLED,
+            },
+        }
+    if tool_name == "create_improvement_proposal":
+        title = str(arguments.get("title", "")).strip()[:200]
+        description = str(arguments.get("description", "")).strip()[:4000]
+        if len(title) < 3 or len(description) < 10:
+            return {"status": "rejected", "reason": "The proposal needs a title and evidence-backed description."}
+        action = OperationsAction(
+            action_type="improvement_proposal",
+            payload=json.dumps({"title": title, "description": description}),
+            reason=description,
+            status="proposed",
+        )
+        db.add(action)
+        db.commit()
+        db.refresh(action)
+        return {
+            "status": "proposed",
+            "proposal_id": action.id,
+            "title": title,
+            "next_step": "Review, implement with tests, and deploy through GitHub Actions.",
+        }
+    return {"status": "rejected", "reason": "Unknown or unauthorized operations tool."}
 
 
 @app.get("/api/settings/operations-chat/messages")
@@ -5111,9 +5424,45 @@ def send_operations_chat_message(payload: OperationsChatInput, db: Session = Dep
             model="gpt-5.6-terra",
             instructions=instructions,
             input=model_input,
+            tools=OPERATIONS_TOOL_SCHEMAS,
             store=False,
         )
-        reply = (response.output_text or "").strip()
+        tool_round = 0
+        while True:
+            tool_calls = [
+                item for item in (getattr(response, "output", None) or [])
+                if getattr(item, "type", None) == "function_call"
+            ]
+            if not tool_calls:
+                reply = (response.output_text or "").strip()
+                break
+            if tool_round >= 6:
+                raise RuntimeError("Operations AI exceeded its tool-step limit")
+            tool_round += 1
+            model_input.extend({
+                "type": "function_call",
+                "call_id": item.call_id,
+                "name": item.name,
+                "arguments": item.arguments,
+            } for item in tool_calls)
+            for item in tool_calls:
+                try:
+                    arguments = json.loads(item.arguments or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    arguments = {}
+                result = execute_operations_tool(db, item.name, arguments, content)
+                model_input.append({
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": json.dumps(result, ensure_ascii=False),
+                })
+            response = openai_client.responses.create(
+                model="gpt-5.6-terra",
+                instructions=instructions,
+                input=model_input,
+                tools=OPERATIONS_TOOL_SCHEMAS,
+                store=False,
+            )
     except Exception as exc:
         print(f"Operations AI request failed: {type(exc).__name__}")
         raise HTTPException(status_code=502, detail="The operations AI could not answer right now.") from exc
@@ -5128,10 +5477,13 @@ def send_operations_chat_message(payload: OperationsChatInput, db: Session = Dep
         "userMessage": serialize_operations_chat_message(user_message),
         "assistantMessage": serialize_operations_chat_message(assistant_message),
         "capabilities": {
-            "readOnly": True,
+            "readOnly": False,
             "liveSnapshot": True,
             "codeAccess": False,
-            "logAccess": False,
+            "logAccess": True,
+            "diagnosticTools": True,
+            "controlledActions": True,
+            "requiresConfirmation": True,
         },
     }
 

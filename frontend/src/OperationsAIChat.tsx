@@ -144,7 +144,7 @@ export default function OperationsAIChat() {
             <div className="flex flex-wrap items-center gap-2">
               <h2 id="operations-ai-title" className="text-sm font-bold">Operations AI</h2>
               <span className="rounded-full border border-emerald-300/30 bg-emerald-300/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-emerald-200">
-                Read-only adviser
+                Controlled maintenance
               </span>
             </div>
             <p className="mt-1 text-[10px] leading-relaxed text-slate-300">
@@ -199,7 +199,7 @@ export default function OperationsAIChat() {
       <div className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-3 text-[10px] leading-relaxed text-amber-900">
         <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
         <p>
-          It can see a bounded live status snapshot, but it cannot yet inspect source code or logs, change settings, send messages, or deploy. It will label unsupported explanations as hypotheses. Voice conversations are realtime and are not yet added to persistent text history.
+          Text chat can inspect bounded system evidence and propose allowlisted safety changes. Every change requires a separate exact confirmation and is audit logged. It cannot access secrets, run shell commands or arbitrary SQL, edit code, deploy, send SMS, modify bookings, delete data, or perform bulk actions. Voice remains advisory and is not added to persistent text history.
         </p>
       </div>
 
