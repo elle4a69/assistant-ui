@@ -53,33 +53,6 @@ export function setArrivalSoundEnabled(enabled: boolean) {
   localStorage.setItem(ARRIVAL_SOUND_ENABLED_KEY, String(enabled));
 }
 
-export async function playArrivalChime() {
-  const context = getAudioContext();
-  if (context.state === 'suspended') await context.resume();
-  const now = context.currentTime;
-  const master = context.createGain();
-  master.gain.setValueAtTime(0.0001, now);
-  master.gain.exponentialRampToValueAtTime(0.24, now + 0.04);
-  master.gain.exponentialRampToValueAtTime(0.0001, now + 1.75);
-  master.connect(context.destination);
-
-  const notes = [659.25, 783.99, 987.77];
-  notes.forEach((frequency, index) => {
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    const start = now + index * 0.32;
-    oscillator.type = 'sine';
-    oscillator.frequency.setValueAtTime(frequency, start);
-    gain.gain.setValueAtTime(0.0001, start);
-    gain.gain.exponentialRampToValueAtTime(0.7, start + 0.025);
-    gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.65);
-    oscillator.connect(gain);
-    gain.connect(master);
-    oscillator.start(start);
-    oscillator.stop(start + 0.7);
-  });
-}
-
 export function stopIncomingAlarm() {
   activeSirens.forEach((siren) => siren.stop());
   activeSirens = [];
@@ -187,7 +160,7 @@ export function processArrivalSessionSnapshot(sessions: ArrivalSession[]) {
   ));
   if (!newlyActivated) return;
 
-  void playArrivalChime().catch((error) => {
+  void playAirRaidSiren().catch((error) => {
     console.warn('Arrival notification sound was blocked by the browser:', error);
   });
 }

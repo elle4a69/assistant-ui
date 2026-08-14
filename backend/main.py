@@ -10,12 +10,14 @@ os.environ["SQLITE_TMPDIR"] = TMP_DIR
 os.makedirs(TMP_DIR, exist_ok=True)
 import uuid
 import secrets
+import string
 import json
 import shutil
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any
 
 from fastapi import FastAPI, Depends, HTTPException, Query, status, UploadFile, File, BackgroundTasks, Request, Response
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings
@@ -2313,7 +2315,7 @@ class ArrivalInviteInput(BaseModel):
 
 
 class ArrivalActivateInput(BaseModel):
-    inviteToken: str = Field(min_length=20, max_length=200)
+    inviteToken: str = Field(min_length=16, max_length=200)
 
 
 class ArrivalMessageInput(BaseModel):
@@ -2383,6 +2385,8 @@ def is_public_request(request: Request) -> bool:
     if path == "/anon":
         return True
     if path.startswith("/images/") or path.startswith("/assets/"):
+        return True
+    if path.startswith("/a/"):
         return True
     if path == "/api/arrival/activate" or path.startswith("/api/arrival/client/"):
         return True
@@ -4266,7 +4270,28 @@ def _arrival_public_link(invite_token: str, base_url: Optional[str] = None) -> s
         configured = os.getenv("PUBLIC_APP_URL", "").strip().rstrip("/")
         fly_app_name = os.getenv("FLY_APP_NAME", "").strip()
         origin = configured or (f"https://{fly_app_name}.fly.dev" if fly_app_name else "http://localhost:5190")
-    return f"{origin}/arrival#invite={invite_token}"
+    return f"{origin}/a/{invite_token}"
+
+
+def _base62_encode(value: int) -> str:
+    """Base-62 encoding adapted from the existing fastapi_bookings shortener."""
+    if value <= 0:
+        raise ValueError("Short-link value must be positive.")
+    alphabet = string.digits + string.ascii_letters
+    encoded: List[str] = []
+    while value:
+        value, remainder = divmod(value, len(alphabet))
+        encoded.append(alphabet[remainder])
+    return "".join(reversed(encoded))
+
+
+def _new_arrival_short_code() -> str:
+    # 96 random bits keeps the public single-use credential unguessable while
+    # producing a substantially shorter, SMS-friendly base-62 code.
+    while True:
+        code = _base62_encode(secrets.randbits(96) or 1)
+        if len(code) >= 16:
+            return code
 
 
 def _issue_arrival_invite(
@@ -4306,7 +4331,7 @@ def _issue_arrival_invite(
         old_session.closed_at = now
         old_session.last_activity_at = now
 
-    invite_token = secrets.token_urlsafe(32)
+    invite_token = _new_arrival_short_code()
     expires_at = min(
         max(local_end + timedelta(hours=6), now + timedelta(hours=1)),
         now + timedelta(days=30),
@@ -4319,6 +4344,21 @@ def _issue_arrival_invite(
     db.add(session)
     db.flush()
     return session, invite_token
+
+
+@app.get("/a/{invite_token}", include_in_schema=False)
+def follow_arrival_short_link(invite_token: str, db: Session = Depends(get_db)):
+    if not re.fullmatch(r"[0-9A-Za-z]{16,17}", invite_token):
+        raise HTTPException(status_code=404, detail="Arrival link not found.")
+    session = db.query(ArrivalSession).filter(
+        ArrivalSession.invite_token_hash == _hash_arrival_token(invite_token),
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Arrival link not found.")
+    response = RedirectResponse(url=f"/arrival#invite={invite_token}", status_code=302)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 @app.post("/api/arrival/admin/bookings/{booking_id}/invite")

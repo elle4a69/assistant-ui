@@ -378,7 +378,7 @@ def test_live_reply_flow_proposes_then_confirms_on_the_next_customer_turn(tmp_pa
     ).order_by(Message.at.desc()).first()
     assert confirmation_reply is not None
     assert "When you arrive, tap:" in confirmation_reply.text
-    assert "/arrival#invite=" in confirmation_reply.text
+    assert "/a/" in confirmation_reply.text
     assert "Pending conversational booking proposal" in json.dumps(
         confirmation_client.calls[0]["input"]
     )

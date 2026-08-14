@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
 from fastapi.testclient import TestClient
 
@@ -41,7 +42,11 @@ def test_arrival_invite_is_single_use_and_opens_private_chat():
             f"/api/arrival/admin/bookings/{booking_id}/invite", json=_booking_payload()
         )
         assert invite_response.status_code == 200
-        invite = invite_response.json()["link"].split("#invite=", 1)[1]
+        short_link = invite_response.json()["link"]
+        invite = urlparse(short_link).path.rsplit("/", 1)[1]
+        redirect = client.get(urlparse(short_link).path, follow_redirects=False)
+        assert redirect.status_code == 302
+        assert redirect.headers["location"] == f"/arrival#invite={invite}"
 
         activation = client.post("/api/arrival/activate", json={"inviteToken": invite})
         assert activation.status_code == 200
@@ -82,8 +87,8 @@ def test_reissuing_invite_revokes_previous_link():
     try:
         first = client.post(f"/api/arrival/admin/bookings/{booking_id}/invite", json=_booking_payload()).json()
         second = client.post(f"/api/arrival/admin/bookings/{booking_id}/invite", json=_booking_payload()).json()
-        first_token = first["link"].split("#invite=", 1)[1]
-        second_token = second["link"].split("#invite=", 1)[1]
+        first_token = urlparse(first["link"]).path.rsplit("/", 1)[1]
+        second_token = urlparse(second["link"]).path.rsplit("/", 1)[1]
 
         assert client.post("/api/arrival/activate", json={"inviteToken": first_token}).status_code == 410
         assert client.post("/api/arrival/activate", json={"inviteToken": second_token}).status_code == 200

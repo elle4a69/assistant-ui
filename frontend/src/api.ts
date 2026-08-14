@@ -505,8 +505,10 @@ export async function createArrivalInvite(booking: CalendarBooking): Promise<{ s
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Could not create arrival link.');
   const result = await response.json();
   if (typeof window !== 'undefined') {
-    const hash = new URL(result.link, window.location.origin).hash;
-    result.link = `${window.location.origin}/arrival${hash}`;
+    const generated = new URL(result.link, window.location.origin);
+    result.link = generated.pathname.startsWith('/a/')
+      ? `${window.location.origin}${generated.pathname}`
+      : `${window.location.origin}/arrival${generated.hash}`;
   }
   return result;
 }

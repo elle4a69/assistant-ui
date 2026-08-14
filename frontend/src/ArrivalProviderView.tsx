@@ -7,7 +7,7 @@ import {
   listArrivalSessions,
   sendAdminArrivalMessage,
 } from './api';
-import { getArrivalSoundEnabled, playArrivalChime, setArrivalSoundEnabled } from './incomingMessageAlarm';
+import { getArrivalSoundEnabled, playAirRaidSiren, setArrivalSoundEnabled } from './incomingMessageAlarm';
 
 function timeLabel(value: string | null) {
   if (!value) return '';
@@ -78,7 +78,7 @@ export default function ArrivalProviderView() {
     setSoundEnabled(next);
     setArrivalSoundEnabled(next);
     if (next) {
-      try { await playArrivalChime(); } catch { setError('Your browser blocked sound. Tap Enable sound again.'); }
+      try { await playAirRaidSiren(undefined, 3500); } catch { setError('Your browser blocked sound. Tap Enable siren again.'); }
     }
   };
 
@@ -92,7 +92,7 @@ export default function ArrivalProviderView() {
         <div className="flex items-center gap-2">
           <button onClick={() => void toggleSound()} className={`flex flex-1 items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold sm:flex-none ${soundEnabled ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-500'}`}>
             {soundEnabled ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4" />}
-            {soundEnabled ? 'Sound on' : 'Enable sound'}
+            {soundEnabled ? 'Siren on' : 'Enable siren'}
           </button>
           <button onClick={() => void refresh()} className="flex-1 rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold sm:flex-none">Refresh</button>
         </div>

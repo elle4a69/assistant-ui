@@ -100,7 +100,7 @@ def test_services_and_manual_bookings(monkeypatch):
         assert "Luxury Deep Tissue Massage" in res_data["smsSent"]
         assert "Sunday, Aug 09 at 03:00 PM" in res_data["smsSent"]
         assert res_data["arrivalLink"].startswith("http")
-        assert "/arrival#invite=" in res_data["arrivalLink"]
+        assert "/a/" in res_data["arrivalLink"]
         assert res_data["arrivalLink"] in sent_messages[0][1]
         assert "When you arrive, tap:" in sent_messages[0][1]
 
