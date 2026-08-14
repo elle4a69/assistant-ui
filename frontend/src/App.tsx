@@ -6,9 +6,11 @@ import CustomerBookingView from './CustomerBookingView'
 import BookingsView from './BookingsView'
 import MobileInboxView from './MobileInboxView'
 import BootcampView from './BootcampView'
+import ArrivalClientView from './ArrivalClientView'
+import ArrivalProviderView from './ArrivalProviderView'
 import { listThreads } from './api'
 import { processArrivalThreadSnapshot, unlockIncomingAlarmAudio } from './incomingMessageAlarm'
-import { UserCheck, Smartphone, Settings, Calendar, MessagesSquare, CalendarCheck, Bot } from 'lucide-react'
+import { UserCheck, Smartphone, Settings, Calendar, MessagesSquare, CalendarCheck, Bot, DoorOpen } from 'lucide-react'
 
 class BootcampErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
@@ -32,6 +34,7 @@ class BootcampErrorBoundary extends Component<{ children: ReactNode }, { failed:
 function App() {
   const isEmbeddedBooking = typeof window !== 'undefined' && window.location.pathname.startsWith('/v2');
   const isStandaloneBooking = typeof window !== 'undefined' && (window.location.pathname === '/booking' || isEmbeddedBooking);
+  const isStandaloneArrival = typeof window !== 'undefined' && window.location.pathname === '/arrival';
   const initialPath = typeof window !== 'undefined' ? window.location.pathname : '/';
 
   const getThreadIdFromUrl = () => {
@@ -42,9 +45,11 @@ function App() {
 
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(getThreadIdFromUrl());
 
-  const [view, setView] = useState<'agent' | 'customer' | 'settings' | 'booking' | 'bookings' | 'chat' | 'bootcamp'>(
-    initialPath === '/booking' || initialPath.startsWith('/v2') ? 'booking'
+  const [view, setView] = useState<'agent' | 'customer' | 'settings' | 'booking' | 'bookings' | 'chat' | 'bootcamp' | 'arrival' | 'arrivals'>(
+    initialPath === '/arrival' ? 'arrival'
+      : initialPath === '/booking' || initialPath.startsWith('/v2') ? 'booking'
       : initialPath === '/bookings' ? 'bookings'
+      : initialPath === '/arrivals' ? 'arrivals'
       : initialPath === '/chat' ? 'chat'
       : initialPath === '/bootcamp' ? 'bootcamp'
       : initialPath === '/sim' ? 'customer'
@@ -59,8 +64,10 @@ function App() {
       const params = new URLSearchParams(window.location.search);
       setSelectedThreadId(params.get('thread'));
       
-      if (path === '/booking' || path.startsWith('/v2')) setView('booking');
+      if (path === '/arrival') setView('arrival');
+      else if (path === '/booking' || path.startsWith('/v2')) setView('booking');
       else if (path === '/bookings') setView('bookings');
+      else if (path === '/arrivals') setView('arrivals');
       else if (path === '/chat') setView('chat');
       else if (path === '/bootcamp') setView('bootcamp');
       else if (path === '/sim') setView('customer');
@@ -72,7 +79,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (isStandaloneBooking) return;
+    if (isStandaloneBooking || isStandaloneArrival) return;
 
     let active = true;
     const unlockAudio = () => {
@@ -106,14 +113,14 @@ function App() {
       window.removeEventListener('pointerdown', unlockAudio);
       window.removeEventListener('keydown', unlockAudio);
     };
-  }, [isStandaloneBooking]);
+  }, [isStandaloneBooking, isStandaloneArrival]);
 
   useEffect(() => {
     document.documentElement.classList.toggle('booking-embed', isEmbeddedBooking);
     return () => document.documentElement.classList.remove('booking-embed');
   }, [isEmbeddedBooking]);
 
-  const navigateTo = (nextView: 'agent' | 'customer' | 'settings' | 'booking' | 'bookings' | 'chat' | 'bootcamp', urlPath: string) => {
+  const navigateTo = (nextView: 'agent' | 'customer' | 'settings' | 'booking' | 'bookings' | 'chat' | 'bootcamp' | 'arrivals', urlPath: string) => {
     setSelectedThreadId(null);
     setView(nextView);
     window.history.pushState(null, '', urlPath);
@@ -130,7 +137,7 @@ function App() {
   };
 
   // Only the public booking widget page is strictly standalone (no portal headers/navigation)
-  const isStandalone = isStandaloneBooking;
+  const isStandalone = isStandaloneBooking || isStandaloneArrival;
 
   return (
     <div className={`flex w-full flex-col bg-slate-900 ${isEmbeddedBooking ? 'min-h-0 overflow-visible' : 'h-[100dvh] overflow-hidden'}`}>
@@ -192,6 +199,15 @@ function App() {
               Boot Camp
             </button>
             <button
+              onClick={() => navigateTo('arrivals', '/arrivals')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] sm:text-xs font-semibold transition-all cursor-pointer border border-transparent whitespace-nowrap ${
+                view === 'arrivals' ? 'bg-emerald-600 text-white shadow' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <DoorOpen className="w-3.5 h-3.5" />
+              Arrivals
+            </button>
+            <button
               onClick={() => navigateTo('bookings', '/bookings')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] sm:text-xs font-semibold transition-all cursor-pointer border border-transparent whitespace-nowrap ${
                 view === 'bookings'
@@ -237,6 +253,8 @@ function App() {
         {view === 'bookings' && <BookingsView onOpenThread={selectThread} />}
         {view === 'chat' && <MobileInboxView selectedId={selectedThreadId} setSelectedId={selectThread} />}
         {view === 'bootcamp' && <BootcampErrorBoundary><BootcampView /></BootcampErrorBoundary>}
+        {view === 'arrival' && <ArrivalClientView />}
+        {view === 'arrivals' && <ArrivalProviderView />}
       </main>
 
       {/* Mobile Bottom Navigation Bar (Fixed at very bottom of viewport) */}
@@ -249,6 +267,7 @@ function App() {
               { id: 'customer', label: 'SMS Sim', icon: <Smartphone className="w-4.5 h-4.5" />, action: () => navigateTo('customer', '/sim') },
               { id: 'bootcamp', label: 'Camp', icon: <Bot className="w-4.5 h-4.5" />, action: () => navigateTo('bootcamp', '/bootcamp') },
               { id: 'bookings', label: 'Bookings', icon: <CalendarCheck className="w-4.5 h-4.5" />, action: () => navigateTo('bookings', '/bookings') },
+              { id: 'arrivals', label: 'Arrivals', icon: <DoorOpen className="w-4.5 h-4.5" />, action: () => navigateTo('arrivals', '/arrivals') },
               { id: 'booking', label: 'Form', icon: <Calendar className="w-4.5 h-4.5" />, action: () => navigateTo('booking', '/booking') },
               { id: 'settings', label: 'Settings', icon: <Settings className="w-4.5 h-4.5" />, action: () => navigateTo('settings', '/settings') },
             ].map((tab) => {

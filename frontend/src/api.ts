@@ -248,6 +248,30 @@ export interface CatchUpResult {
   remaining: number;
 }
 
+export interface ArrivalMessage {
+  id: string;
+  sender: 'client' | 'provider' | 'system';
+  text: string;
+  createdAt: string;
+}
+
+export interface ArrivalSession {
+  id: string;
+  bookingId: string;
+  status: 'invited' | 'active' | 'closed' | 'expired';
+  expiresAt: string;
+  activatedAt: string | null;
+  closedAt: string | null;
+  lastActivityAt: string;
+  booking: {
+    summary: string;
+    customerPhone: string | null;
+    startTime: string | null;
+    endTime: string | null;
+  };
+  messages?: ArrivalMessage[];
+}
+
 export async function catchUpMissedMessage(): Promise<CatchUpResult> {
   const response = await fetch(`${API_BASE}/api/threads/catch-up`, { method: 'POST' });
   if (!response.ok) {
@@ -465,6 +489,74 @@ export interface SystemSettings {
 export interface KnowledgeFile {
   name: string;
   sizeBytes: number;
+}
+
+export async function createArrivalInvite(booking: CalendarBooking): Promise<{ session: ArrivalSession; link: string }> {
+  const response = await fetch(`${API_BASE}/api/arrival/admin/bookings/${encodeURIComponent(booking.id)}/invite`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      summary: booking.summary,
+      customerPhone: booking.customerPhone || null,
+      startTime: booking.startTime,
+      endTime: booking.endTime,
+    }),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Could not create arrival link.');
+  const result = await response.json();
+  if (typeof window !== 'undefined') {
+    const hash = new URL(result.link, window.location.origin).hash;
+    result.link = `${window.location.origin}/arrival${hash}`;
+  }
+  return result;
+}
+
+export async function activateArrival(inviteToken: string): Promise<{ clientToken: string; session: ArrivalSession }> {
+  const response = await fetch(`${API_BASE}/api/arrival/activate`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inviteToken }),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'This arrival link is not valid.');
+  return response.json();
+}
+
+export async function getClientArrivalSession(sessionId: string, token: string): Promise<ArrivalSession> {
+  const response = await fetch(`${API_BASE}/api/arrival/client/${encodeURIComponent(sessionId)}`, {
+    headers: { Authorization: `Arrival ${token}` },
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Arrival chat unavailable.');
+  return response.json();
+}
+
+export async function sendClientArrivalMessage(sessionId: string, token: string, text: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/arrival/client/${encodeURIComponent(sessionId)}/messages`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Arrival ${token}` }, body: JSON.stringify({ text }),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Message failed to send.');
+}
+
+export async function listArrivalSessions(): Promise<ArrivalSession[]> {
+  const response = await fetch(`${API_BASE}/api/arrival/admin/sessions`);
+  if (!response.ok) throw new Error('Could not load arrival chats.');
+  return response.json();
+}
+
+export async function getAdminArrivalSession(sessionId: string): Promise<ArrivalSession> {
+  const response = await fetch(`${API_BASE}/api/arrival/admin/sessions/${encodeURIComponent(sessionId)}`);
+  if (!response.ok) throw new Error('Could not load arrival chat.');
+  return response.json();
+}
+
+export async function sendAdminArrivalMessage(sessionId: string, text: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/arrival/admin/sessions/${encodeURIComponent(sessionId)}/messages`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Message failed to send.');
+}
+
+export async function closeArrivalSession(sessionId: string): Promise<ArrivalSession> {
+  const response = await fetch(`${API_BASE}/api/arrival/admin/sessions/${encodeURIComponent(sessionId)}/close`, { method: 'POST' });
+  if (!response.ok) throw new Error('Could not close arrival chat.');
+  return response.json();
 }
 
 export interface ManualLearningEntry {

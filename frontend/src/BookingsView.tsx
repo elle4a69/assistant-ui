@@ -5,6 +5,7 @@ import {
   deleteBooking,
   listThreads,
   getWorkingHours,
+  createArrivalInvite,
   CalendarBooking,
   WorkingHourEntry
 } from './api';
@@ -28,7 +29,9 @@ import {
   GripHorizontal,
   ChevronDown,
   ChevronUp,
-  Lock
+  Lock,
+  Link2,
+  Copy
 } from 'lucide-react';
 
 interface BookingsViewProps {
@@ -129,13 +132,14 @@ interface BookingCardProps {
   onDelete: (id: string) => void;
   onStatusChange: (booking: CalendarBooking, status: StatusType) => void;
   onOpenThread: (booking: CalendarBooking) => void;
+  onCreateArrivalLink: (booking: CalendarBooking) => void;
   openingBookingId: string | null;
 }
 
 function BookingCard({
   booking, topPx, heightPx, isExpanded, isDragging,
   onToggleExpand, onDragStart, onResizeStart,
-  onEdit, onDelete, onStatusChange, onOpenThread
+  onEdit, onDelete, onStatusChange, onOpenThread, onCreateArrivalLink
 }: BookingCardProps) {
   const sDate = new Date(booking.startTime);
   const eDate = new Date(booking.endTime);
@@ -184,13 +188,20 @@ function BookingCard({
         {isExpanded && !isShort && (
           <div className="flex flex-col gap-0.5 mt-0.5 pointer-events-auto">
             {booking.customerPhone && (
-              <button
-                onMouseDown={e => e.stopPropagation()}
-                onClick={e => { e.stopPropagation(); onOpenThread(booking); }}
-                className="flex items-center gap-1 text-[9px] text-indigo-600 font-bold hover:underline cursor-pointer w-fit"
-              >
-                <Phone className="w-2.5 h-2.5" /> {booking.customerPhone}
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  onMouseDown={e => e.stopPropagation()}
+                  onClick={e => { e.stopPropagation(); onCreateArrivalLink(booking); }}
+                  className="px-1.5 py-0.5 text-[8px] font-bold rounded bg-indigo-50 text-indigo-700 border border-indigo-200 cursor-pointer"
+                >Arrival link</button>
+                <button
+                  onMouseDown={e => e.stopPropagation()}
+                  onClick={e => { e.stopPropagation(); onOpenThread(booking); }}
+                  className="flex items-center gap-1 text-[9px] text-indigo-600 font-bold hover:underline cursor-pointer w-fit"
+                >
+                  <Phone className="w-2.5 h-2.5" /> {booking.customerPhone}
+                </button>
+              </div>
             )}
             {booking.notes && (
               <p className="text-[9px] text-slate-400 italic leading-tight line-clamp-2">{booking.notes}</p>
@@ -259,6 +270,8 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
   const [deleteConfirmBookingId, setDeleteConfirmBookingId] = useState<string | null>(null);
   const [openingBookingId, setOpeningBookingId] = useState<string | null>(null);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const [arrivalLink, setArrivalLink] = useState<{ booking: CalendarBooking; link: string } | null>(null);
+  const [generatingArrivalId, setGeneratingArrivalId] = useState<string | null>(null);
 
   const [editForm, setEditForm] = useState({
     summary: '',
@@ -426,6 +439,26 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
     } finally {
       setOpeningBookingId(null);
     }
+  };
+
+  const generateArrivalLink = async (booking: CalendarBooking) => {
+    if (generatingArrivalId) return;
+    setGeneratingArrivalId(booking.id);
+    setError(null);
+    try {
+      const result = await createArrivalInvite(booking);
+      setArrivalLink({ booking, link: result.link });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not create the arrival link.');
+    } finally {
+      setGeneratingArrivalId(null);
+    }
+  };
+
+  const copyArrivalLink = async () => {
+    if (!arrivalLink) return;
+    await navigator.clipboard.writeText(arrivalLink.link);
+    setSuccessMsg('Arrival link copied. The previous link for this booking is now disabled.');
   };
 
   const dayFilteredBookings = useMemo(() => {
@@ -767,6 +800,7 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
                     onDelete={id => setDeleteConfirmBookingId(id)}
                     onStatusChange={handleUpdateStatus}
                     onOpenThread={openCustomerThread}
+                    onCreateArrivalLink={generateArrivalLink}
                     openingBookingId={openingBookingId}
                   />
                 );
@@ -831,6 +865,11 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
                     <div className="flex items-center gap-2 shrink-0 justify-between sm:justify-end border-t sm:border-t-0 pt-2 sm:pt-0 border-slate-100">
                       <div className="flex items-center gap-1.5">
                         <button
+                          onClick={() => void generateArrivalLink(booking)}
+                          disabled={generatingArrivalId !== null || booking.status === 'cancelled'}
+                          className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold rounded-xl cursor-pointer bg-indigo-50 text-indigo-700 border border-indigo-200 disabled:opacity-50"
+                        ><Link2 className="w-3.5 h-3.5" />{generatingArrivalId === booking.id ? 'Creating…' : 'Arrival link'}</button>
+                        <button
                           onClick={() => handleUpdateStatus(booking, 'completed')}
                           className={`px-2.5 py-1 text-xs font-bold rounded-xl cursor-pointer ${booking.status === 'completed' ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}
                         >Done</button>
@@ -859,6 +898,21 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
       </div>
 
       {/* ── Edit Modal ── */}
+      {arrivalLink && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-xs">
+          <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div><h3 className="text-base font-black text-slate-900">Single-use arrival link</h3><p className="mt-1 text-xs text-slate-500">{arrivalLink.booking.summary}</p></div>
+              <button onClick={() => setArrivalLink(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100"><X className="h-5 w-5" /></button>
+            </div>
+            <p className="mt-4 text-sm leading-6 text-slate-600">Send this link to the customer. Pressing “I’ve arrived” consumes it permanently and opens their private chat.</p>
+            <div className="mt-4 break-all rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">{arrivalLink.link}</div>
+            <button onClick={() => void copyArrivalLink()} className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-3 text-sm font-black text-white"><Copy className="h-4 w-4" /> Copy link</button>
+            <p className="mt-3 text-center text-[11px] text-slate-400">Creating another link for this booking immediately disables this one.</p>
+          </div>
+        </div>
+      )}
+
       {editingBooking && (
         <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-2xl border border-slate-150 p-6 shadow-2xl max-w-md w-full flex flex-col gap-4">

@@ -9,6 +9,7 @@ TMP_DIR = os.path.join(BASE_DIR, "tmp")
 os.environ["SQLITE_TMPDIR"] = TMP_DIR
 os.makedirs(TMP_DIR, exist_ok=True)
 import uuid
+import secrets
 import json
 import shutil
 from datetime import datetime, timedelta, timezone
@@ -953,6 +954,32 @@ class CalendarEvent(Base):
     status = Column(String, default="scheduled", nullable=False)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class ArrivalSession(Base):
+    """Single-use customer arrival invitation and its private chat session."""
+    __tablename__ = "arrival_sessions"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    booking_id = Column(String, nullable=False, index=True)
+    invite_token_hash = Column(String, nullable=False, unique=True, index=True)
+    client_token_hash = Column(String, nullable=True, unique=True, index=True)
+    status = Column(String, nullable=False, default="invited", index=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    activated_at = Column(DateTime, nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_activity_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class ArrivalChatMessage(Base):
+    __tablename__ = "arrival_chat_messages"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id = Column(String, ForeignKey("arrival_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    sender = Column(String, nullable=False)
+    text = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
 class OperationsChatMessage(Base):
@@ -2276,6 +2303,28 @@ class ManualLearningInput(BaseModel):
         return self
 
 
+class ArrivalInviteInput(BaseModel):
+    summary: str = Field(min_length=1, max_length=300)
+    customerPhone: Optional[str] = Field(default=None, max_length=50)
+    startTime: datetime
+    endTime: datetime
+
+
+class ArrivalActivateInput(BaseModel):
+    inviteToken: str = Field(min_length=20, max_length=200)
+
+
+class ArrivalMessageInput(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def clean_text(self):
+        self.text = self.text.strip()
+        if not self.text:
+            raise ValueError("Message is required.")
+        return self
+
+
 # FastAPI app setup
 app = FastAPI(title="Assistant UI Backend")
 app.include_router(anon_content_router)
@@ -2316,6 +2365,7 @@ PUBLIC_EXACT_PATHS = {
     "/sw.js",
     "/favicon.ico",
     "/webhooks/sms",
+    "/arrival",
 }
 
 
@@ -2331,6 +2381,8 @@ def is_public_request(request: Request) -> bool:
     if path == "/anon":
         return True
     if path.startswith("/images/") or path.startswith("/assets/"):
+        return True
+    if path == "/api/arrival/activate" or path.startswith("/api/arrival/client/"):
         return True
 
     if method == "GET" and path in {"/api/anon/content", "/api/anon/image"}:
@@ -4113,6 +4165,227 @@ def _process_first_contact_auto_reply(
         db.rollback()
     finally:
         db.close()
+
+
+def _hash_arrival_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _arrival_booking(db: Session, booking_id: str) -> Optional[CalendarEvent]:
+    return db.query(CalendarEvent).filter(CalendarEvent.id == booking_id).first()
+
+
+def _arrival_messages(db: Session, session_id: str) -> List[Dict[str, Any]]:
+    messages = (
+        db.query(ArrivalChatMessage)
+        .filter(ArrivalChatMessage.session_id == session_id)
+        .order_by(ArrivalChatMessage.created_at.asc(), ArrivalChatMessage.id.asc())
+        .all()
+    )
+    return [
+        {
+            "id": message.id,
+            "sender": message.sender,
+            "text": message.text,
+            "createdAt": message.created_at.isoformat() + "Z",
+        }
+        for message in messages
+    ]
+
+
+def _arrival_payload(db: Session, session: ArrivalSession, include_messages: bool = True) -> Dict[str, Any]:
+    booking = _arrival_booking(db, session.booking_id)
+    payload: Dict[str, Any] = {
+        "id": session.id,
+        "bookingId": session.booking_id,
+        "status": session.status,
+        "expiresAt": session.expires_at.isoformat() + "Z",
+        "activatedAt": session.activated_at.isoformat() + "Z" if session.activated_at else None,
+        "closedAt": session.closed_at.isoformat() + "Z" if session.closed_at else None,
+        "lastActivityAt": session.last_activity_at.isoformat() + "Z",
+        "booking": {
+            "summary": booking.summary if booking else "Appointment",
+            "customerPhone": booking.customer_phone if booking else None,
+            "startTime": booking.start_time.isoformat() + "Z" if booking else None,
+            "endTime": booking.end_time.isoformat() + "Z" if booking else None,
+        },
+    }
+    if include_messages:
+        payload["messages"] = _arrival_messages(db, session.id)
+    return payload
+
+
+def _require_arrival_client(request: Request, db: Session, session_id: str) -> ArrivalSession:
+    authorization = request.headers.get("Authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "arrival" or not token:
+        raise HTTPException(status_code=401, detail="Arrival session token required.")
+    session = db.query(ArrivalSession).filter(
+        ArrivalSession.id == session_id,
+        ArrivalSession.client_token_hash == _hash_arrival_token(token),
+    ).first()
+    if not session:
+        raise HTTPException(status_code=401, detail="This arrival session is not valid.")
+    if session.expires_at <= datetime.utcnow():
+        if session.status not in {"closed", "expired"}:
+            session.status = "expired"
+            db.commit()
+        raise HTTPException(status_code=410, detail="This arrival session has expired.")
+    if session.status != "active":
+        raise HTTPException(status_code=410, detail="This arrival session is closed.")
+    return session
+
+
+@app.post("/api/arrival/admin/bookings/{booking_id}/invite")
+def create_arrival_invite(
+    booking_id: str,
+    payload: ArrivalInviteInput,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Issue one invitation and revoke any previous invitation/session for the booking."""
+    now = datetime.utcnow()
+    start_time = payload.startTime.replace(tzinfo=None)
+    end_time = payload.endTime.replace(tzinfo=None)
+    if end_time <= start_time:
+        raise HTTPException(status_code=422, detail="Booking end time must be after its start time.")
+
+    booking = _arrival_booking(db, booking_id)
+    if not booking:
+        booking = CalendarEvent(id=booking_id, summary=payload.summary, customer_phone=payload.customerPhone,
+                                start_time=start_time, end_time=end_time, status="scheduled", notes="")
+        db.add(booking)
+    else:
+        booking.summary = payload.summary
+        booking.customer_phone = payload.customerPhone
+        booking.start_time = start_time
+        booking.end_time = end_time
+
+    old_sessions = db.query(ArrivalSession).filter(
+        ArrivalSession.booking_id == booking_id,
+        ArrivalSession.status.in_(["invited", "active"]),
+    ).all()
+    for old_session in old_sessions:
+        old_session.status = "closed"
+        old_session.closed_at = now
+        old_session.last_activity_at = now
+
+    invite_token = secrets.token_urlsafe(32)
+    latest_safe_expiry = now + timedelta(days=30)
+    booking_expiry = end_time + timedelta(hours=6)
+    expires_at = min(max(booking_expiry, now + timedelta(hours=1)), latest_safe_expiry)
+    session = ArrivalSession(
+        id=str(uuid.uuid4()), booking_id=booking_id,
+        invite_token_hash=_hash_arrival_token(invite_token), status="invited",
+        expires_at=expires_at, created_at=now, last_activity_at=now,
+    )
+    db.add(session)
+    db.commit()
+
+    link = f"{str(request.base_url).rstrip('/')}/arrival#invite={invite_token}"
+    return {"session": _arrival_payload(db, session), "link": link}
+
+
+@app.post("/api/arrival/activate")
+def activate_arrival(payload: ArrivalActivateInput, db: Session = Depends(get_db)):
+    """Atomically consume an invitation. A token can never trigger arrival twice."""
+    now = datetime.utcnow()
+    invite_hash = _hash_arrival_token(payload.inviteToken)
+    candidate = db.query(ArrivalSession).filter(ArrivalSession.invite_token_hash == invite_hash).first()
+    if not candidate or candidate.expires_at <= now:
+        raise HTTPException(status_code=410, detail="This arrival link has expired or is no longer valid.")
+
+    client_token = secrets.token_urlsafe(32)
+    updated = db.query(ArrivalSession).filter(
+        ArrivalSession.id == candidate.id,
+        ArrivalSession.status == "invited",
+        ArrivalSession.activated_at.is_(None),
+    ).update({
+        ArrivalSession.status: "active",
+        ArrivalSession.activated_at: now,
+        ArrivalSession.last_activity_at: now,
+        ArrivalSession.client_token_hash: _hash_arrival_token(client_token),
+    }, synchronize_session=False)
+    if updated != 1:
+        db.rollback()
+        raise HTTPException(status_code=410, detail="This arrival link has already been used.")
+
+    db.add(ArrivalChatMessage(
+        id=str(uuid.uuid4()), session_id=candidate.id, sender="system",
+        text="Customer has arrived.", created_at=now,
+    ))
+    db.commit()
+    session = db.query(ArrivalSession).filter(ArrivalSession.id == candidate.id).one()
+    return {"clientToken": client_token, "session": _arrival_payload(db, session)}
+
+
+@app.get("/api/arrival/client/{session_id}")
+def get_client_arrival_session(session_id: str, request: Request, db: Session = Depends(get_db)):
+    session = _require_arrival_client(request, db, session_id)
+    return _arrival_payload(db, session)
+
+
+@app.post("/api/arrival/client/{session_id}/messages")
+def send_client_arrival_message(
+    session_id: str, payload: ArrivalMessageInput, request: Request, db: Session = Depends(get_db)
+):
+    session = _require_arrival_client(request, db, session_id)
+    now = datetime.utcnow()
+    message = ArrivalChatMessage(id=str(uuid.uuid4()), session_id=session.id, sender="client",
+                                 text=payload.text, created_at=now)
+    db.add(message)
+    session.last_activity_at = now
+    db.commit()
+    return {"message": _arrival_messages(db, session.id)[-1]}
+
+
+@app.get("/api/arrival/admin/sessions")
+def list_arrival_sessions(db: Session = Depends(get_db)):
+    now = datetime.utcnow()
+    db.query(ArrivalSession).filter(
+        ArrivalSession.expires_at <= now,
+        ArrivalSession.status.in_(["invited", "active"]),
+    ).update({ArrivalSession.status: "expired"}, synchronize_session=False)
+    db.commit()
+    sessions = db.query(ArrivalSession).order_by(ArrivalSession.last_activity_at.desc()).limit(100).all()
+    return [_arrival_payload(db, session, include_messages=False) for session in sessions]
+
+
+@app.get("/api/arrival/admin/sessions/{session_id}")
+def get_admin_arrival_session(session_id: str, db: Session = Depends(get_db)):
+    session = db.query(ArrivalSession).filter(ArrivalSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Arrival session not found.")
+    return _arrival_payload(db, session)
+
+
+@app.post("/api/arrival/admin/sessions/{session_id}/messages")
+def send_admin_arrival_message(session_id: str, payload: ArrivalMessageInput, db: Session = Depends(get_db)):
+    session = db.query(ArrivalSession).filter(ArrivalSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Arrival session not found.")
+    if session.status != "active" or session.expires_at <= datetime.utcnow():
+        raise HTTPException(status_code=410, detail="Arrival chat is no longer active.")
+    now = datetime.utcnow()
+    message = ArrivalChatMessage(id=str(uuid.uuid4()), session_id=session.id, sender="provider",
+                                 text=payload.text, created_at=now)
+    db.add(message)
+    session.last_activity_at = now
+    db.commit()
+    return {"message": _arrival_messages(db, session.id)[-1]}
+
+
+@app.post("/api/arrival/admin/sessions/{session_id}/close")
+def close_arrival_session(session_id: str, db: Session = Depends(get_db)):
+    session = db.query(ArrivalSession).filter(ArrivalSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Arrival session not found.")
+    if session.status not in {"closed", "expired"}:
+        session.status = "closed"
+        session.closed_at = datetime.utcnow()
+        session.last_activity_at = session.closed_at
+        db.commit()
+    return _arrival_payload(db, session)
 
 
 async def process_first_contact_auto_reply_delayed(
