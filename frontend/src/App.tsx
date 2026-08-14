@@ -8,8 +8,8 @@ import MobileInboxView from './MobileInboxView'
 import BootcampView from './BootcampView'
 import ArrivalClientView from './ArrivalClientView'
 import ArrivalProviderView from './ArrivalProviderView'
-import { listThreads } from './api'
-import { processArrivalThreadSnapshot, unlockIncomingAlarmAudio } from './incomingMessageAlarm'
+import { listArrivalSessions, listThreads } from './api'
+import { processArrivalSessionSnapshot, processArrivalThreadSnapshot, unlockIncomingAlarmAudio } from './incomingMessageAlarm'
 import { UserCheck, Smartphone, Settings, Calendar, MessagesSquare, CalendarCheck, Bot, DoorOpen } from 'lucide-react'
 
 class BootcampErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
@@ -93,7 +93,12 @@ function App() {
     const pollForIncomingMessages = async () => {
       while (active) {
         try {
-          processArrivalThreadSnapshot(await listThreads());
+          const [threads, arrivalSessions] = await Promise.all([
+            listThreads(),
+            listArrivalSessions(),
+          ]);
+          processArrivalThreadSnapshot(threads);
+          processArrivalSessionSnapshot(arrivalSessions);
         } catch (error) {
           console.warn('Customer arrival alarm check failed:', error);
         }

@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, Clock3, DoorOpen, Loader2, MapPin, MessageCircle, Send, XCircle } from 'lucide-react';
+import { Bell, BellOff, CheckCircle2, Clock3, DoorOpen, Loader2, MapPin, MessageCircle, Send, XCircle } from 'lucide-react';
 import {
   ArrivalSession,
   closeArrivalSession,
@@ -7,6 +7,7 @@ import {
   listArrivalSessions,
   sendAdminArrivalMessage,
 } from './api';
+import { getArrivalSoundEnabled, playArrivalChime, setArrivalSoundEnabled } from './incomingMessageAlarm';
 
 function timeLabel(value: string | null) {
   if (!value) return '';
@@ -20,6 +21,7 @@ export default function ArrivalProviderView() {
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  const [soundEnabled, setSoundEnabled] = useState(getArrivalSoundEnabled);
 
   const refresh = useCallback(async () => {
     try {
@@ -71,14 +73,29 @@ export default function ArrivalProviderView() {
     await Promise.all([refresh(), refreshSelected()]);
   };
 
+  const toggleSound = async () => {
+    const next = !soundEnabled;
+    setSoundEnabled(next);
+    setArrivalSoundEnabled(next);
+    if (next) {
+      try { await playArrivalChime(); } catch { setError('Your browser blocked sound. Tap Enable sound again.'); }
+    }
+  };
+
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[#faf9f6] p-3 text-slate-800 sm:p-5">
-      <header className="mb-4 flex shrink-0 items-center justify-between rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <header className="mb-4 flex shrink-0 flex-col items-stretch justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center">
         <div className="flex items-center gap-3">
           <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600"><DoorOpen className="h-6 w-6" /></div>
           <div><h1 className="text-lg font-black">Customer arrivals</h1><p className="text-xs font-semibold text-slate-500">{activeCount} waiting now</p></div>
         </div>
-        <button onClick={() => void refresh()} className="rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold">Refresh</button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => void toggleSound()} className={`flex flex-1 items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold sm:flex-none ${soundEnabled ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-500'}`}>
+            {soundEnabled ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4" />}
+            {soundEnabled ? 'Sound on' : 'Enable sound'}
+          </button>
+          <button onClick={() => void refresh()} className="flex-1 rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold sm:flex-none">Refresh</button>
+        </div>
       </header>
       {error && <div className="mb-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs font-bold text-rose-700">{error}</div>}
       <div className="grid min-h-0 flex-1 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm md:grid-cols-[320px_1fr]">
@@ -105,7 +122,7 @@ export default function ArrivalProviderView() {
                 <div key={message.id} className={`flex ${message.sender === 'provider' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[82%] rounded-2xl px-4 py-3 text-sm shadow-sm ${message.sender === 'provider' ? 'rounded-br-md bg-indigo-600 text-white' : 'rounded-bl-md bg-white text-slate-800'}`}>{message.text}</div></div>
               ))}
             </div>
-            {selected.status === 'active' ? <form onSubmit={send} className="flex gap-2 border-t border-slate-200 p-3"><input autoFocus value={text} onChange={event => setText(event.target.value)} maxLength={2000} placeholder="Wait time or entry instructions…" className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:border-indigo-400" /><button disabled={!text.trim() || sending} className="flex h-11 w-11 items-center justify-center rounded-xl bg-indigo-600 text-white disabled:bg-slate-300">{sending ? <Loader2 className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5" />}</button></form> : <div className="border-t p-4 text-center text-xs font-bold text-slate-400">This chat is not active.</div>}
+            {selected.status === 'active' ? <form onSubmit={send} className="flex gap-2 border-t border-slate-200 p-3"><input autoFocus value={text} onChange={event => setText(event.target.value)} maxLength={2000} placeholder="Wait time or entry instructions…" className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:border-indigo-400" /><button type="submit" disabled={!text.trim() || sending} className="flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 font-bold text-white disabled:bg-slate-300">{sending ? <Loader2 className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5" />}<span>Send</span></button></form> : <div className="border-t p-4 text-center text-xs font-bold text-slate-400">This chat is not active.</div>}
           </>}
         </section>
       </div>

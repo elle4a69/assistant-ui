@@ -1,8 +1,10 @@
-import type { ThreadListItem } from './api';
+import type { ArrivalSession, ThreadListItem } from './api';
 
 const ENABLED_KEY = 'assistant-ui-incoming-alarm-enabled';
 const VOLUME_KEY = 'assistant-ui-incoming-alarm-volume';
 const THREAD_SNAPSHOT_KEY = 'assistant-ui-customer-arrival-alarm-snapshot';
+const ARRIVAL_SESSION_SNAPSHOT_KEY = 'assistant-ui-arrival-session-alarm-snapshot';
+const ARRIVAL_SOUND_ENABLED_KEY = 'assistant-ui-arrival-session-sound-enabled';
 
 export interface IncomingAlarmSettings {
   enabled: boolean;
@@ -41,6 +43,41 @@ function getAudioContext(): AudioContext {
 export async function unlockIncomingAlarmAudio() {
   const context = getAudioContext();
   if (context.state === 'suspended') await context.resume();
+}
+
+export function getArrivalSoundEnabled(): boolean {
+  return localStorage.getItem(ARRIVAL_SOUND_ENABLED_KEY) !== 'false';
+}
+
+export function setArrivalSoundEnabled(enabled: boolean) {
+  localStorage.setItem(ARRIVAL_SOUND_ENABLED_KEY, String(enabled));
+}
+
+export async function playArrivalChime() {
+  const context = getAudioContext();
+  if (context.state === 'suspended') await context.resume();
+  const now = context.currentTime;
+  const master = context.createGain();
+  master.gain.setValueAtTime(0.0001, now);
+  master.gain.exponentialRampToValueAtTime(0.24, now + 0.04);
+  master.gain.exponentialRampToValueAtTime(0.0001, now + 1.75);
+  master.connect(context.destination);
+
+  const notes = [659.25, 783.99, 987.77];
+  notes.forEach((frequency, index) => {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    const start = now + index * 0.32;
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(frequency, start);
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.exponentialRampToValueAtTime(0.7, start + 0.025);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.65);
+    oscillator.connect(gain);
+    gain.connect(master);
+    oscillator.start(start);
+    oscillator.stop(start + 0.7);
+  });
 }
 
 export function stopIncomingAlarm() {
@@ -125,5 +162,32 @@ export function processArrivalThreadSnapshot(threads: ThreadListItem[]) {
 
   void playAirRaidSiren().catch((error) => {
     console.warn('Customer arrival alarm was blocked by the browser:', error);
+  });
+}
+
+export function processArrivalSessionSnapshot(sessions: ArrivalSession[]) {
+  const snapshot: Record<string, string> = {};
+  sessions.forEach((session) => {
+    snapshot[session.id] = session.activatedAt || '';
+  });
+
+  let previous: Record<string, string> | null = null;
+  try {
+    const raw = localStorage.getItem(ARRIVAL_SESSION_SNAPSHOT_KEY);
+    previous = raw ? JSON.parse(raw) as Record<string, string> : null;
+  } catch {
+    previous = null;
+  }
+  localStorage.setItem(ARRIVAL_SESSION_SNAPSHOT_KEY, JSON.stringify(snapshot));
+  if (!previous || !getArrivalSoundEnabled()) return;
+
+  const newlyActivated = sessions.some((session) => (
+    Boolean(session.activatedAt)
+    && previous?.[session.id] !== session.activatedAt
+  ));
+  if (!newlyActivated) return;
+
+  void playArrivalChime().catch((error) => {
+    console.warn('Arrival notification sound was blocked by the browser:', error);
   });
 }

@@ -156,7 +156,7 @@ export default function ArrivalClientView() {
         {active ? (
           <form onSubmit={send} className="flex gap-2 border-t border-slate-200 bg-white p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
             <input value={text} onChange={event => setText(event.target.value)} maxLength={2000} placeholder="Type a message…" className="min-w-0 flex-1 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-base outline-none focus:border-indigo-400" />
-            <button disabled={!text.trim() || sending} className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-indigo-600 text-white disabled:bg-slate-300"><Send className="h-5 w-5" /></button>
+            <button type="submit" disabled={!text.trim() || sending} className="flex h-12 shrink-0 items-center justify-center gap-2 rounded-2xl bg-indigo-600 px-4 font-bold text-white disabled:bg-slate-300"><Send className="h-5 w-5" /><span>Send</span></button>
           </form>
         ) : <div className="border-t bg-white p-4 text-center text-sm font-bold text-slate-500">This chat has ended.</div>}
       </section>
