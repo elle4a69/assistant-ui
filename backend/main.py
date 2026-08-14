@@ -129,7 +129,7 @@ STRICT_PLACEHOLDER_ALLOWLIST = {
     "state", "postcode", "business_phone", "email", "booking_arrival_notes",
     "booking_url", "phone", "deposit", "booking_id", "location", "date",
     "time", "address", "hotel_name", "room_number", "level_number", "building_number",
-    "message", "knowledge", "slots", "current_time", "name", "service"
+    "message", "knowledge", "slots", "current_time", "name", "service", "arrival_link"
 }
 
 CRITICAL_UNRENDERED_TOKENS = ["{website}", "{provider_name}", "{suburb}"]
@@ -1953,7 +1953,7 @@ class GoogleCalendarService:
                 local_db.close()
         return sorted(results, key=lambda item: item["start"])
             
-    def create_booking(self, summary: str, start: datetime, end: datetime, customer_phone: str) -> bool:
+    def create_booking(self, summary: str, start: datetime, end: datetime, customer_phone: str) -> Optional[str]:
         # Clear cache on modification
         if hasattr(self, "_cache"):
             self._cache.clear()
@@ -1985,9 +1985,10 @@ class GoogleCalendarService:
                 # Mirror Google bookings locally so ownership remains available even when
                 # free/busy only returns anonymous occupied intervals.
                 db = self.db_session_factory()
+                booking_id = created.get("id") or str(uuid.uuid4())
                 try:
                     booking = CalendarEvent(
-                        id=created.get("id") or str(uuid.uuid4()),
+                        id=booking_id,
                         customer_phone=customer_phone,
                         summary=summary,
                         start_time=start_aware.replace(tzinfo=None),
@@ -2000,14 +2001,15 @@ class GoogleCalendarService:
                     print(f"Google booking created but local ownership mirror failed: {mirror_exc}")
                 finally:
                     db.close()
-                return True
+                return booking_id
             except Exception as e:
                 print(f"Error creating Google Calendar booking: {e}. Falling back to SQLite.")
                 
         db = self.db_session_factory()
         try:
+            booking_id = str(uuid.uuid4())
             booking = CalendarEvent(
-                id=str(uuid.uuid4()),
+                id=booking_id,
                 customer_phone=customer_phone,
                 summary=summary,
                 start_time=start_aware.replace(tzinfo=None),
@@ -2015,7 +2017,7 @@ class GoogleCalendarService:
             )
             db.add(booking)
             db.commit()
-            return True
+            return booking_id
         except Exception as e:
             print(f"Failed to create booking in SQLite: {e}")
             return False
@@ -2661,14 +2663,25 @@ def confirm_conversational_booking(
         return {"status": "rejected", "reason": availability_error}, False
 
     end = start + timedelta(minutes=duration)
-    success = calendar_service.create_booking(
+    booking_id = calendar_service.create_booking(
         summary=f"{proposal['customer_name']} - {proposal['service_name']}",
         start=start,
         end=end,
         customer_phone=thread.customer_phone,
     )
-    if not success:
+    if not booking_id:
         return {"status": "failed", "reason": "The calendar did not accept the booking."}, False
+
+    arrival_session, arrival_token = _issue_arrival_invite(
+        db,
+        booking_id=str(booking_id),
+        summary=f"{proposal['customer_name']} - {proposal['service_name']}",
+        customer_phone=thread.customer_phone,
+        start_time=start,
+        end_time=end,
+    )
+    proposal["arrival_link"] = _arrival_public_link(arrival_token)
+    proposal["arrival_session_id"] = arrival_session.id
 
     thread.pending_booking = None
     thread.pending_slots = None
@@ -3366,6 +3379,7 @@ def run_sms_reply_logic(
         return False, False
         
     booking_confirmed = False
+    booking_arrival_link: Optional[str] = None
     slots_presented = False
     history_msgs = (
         db.query(Message)
@@ -3720,6 +3734,12 @@ def run_sms_reply_logic(
                                 effective_body,
                             )
                             booking_confirmed = booking_confirmed or confirmed_now
+                            if confirmed_now:
+                                booking_arrival_link = (
+                                    tool_result.get("booking", {}).get("arrival_link")
+                                    if isinstance(tool_result.get("booking"), dict)
+                                    else None
+                                )
                     elif tool_call.name == "signal_customer_arrival":
                         arrival_recorded = record_customer_arrival_event(
                             db,
@@ -3785,6 +3805,9 @@ def run_sms_reply_logic(
         ))
         db.commit()
         return False, False
+
+    if booking_confirmed and booking_arrival_link and assistant_reply and booking_arrival_link not in assistant_reply:
+        assistant_reply = f"{assistant_reply.rstrip()}\n\nWhen you arrive, tap: {booking_arrival_link}"
 
     rejected_reply_reason = rejected_reply_reason or unsafe_ai_reply_reason(
         assistant_reply or "",
@@ -4236,6 +4259,68 @@ def _require_arrival_client(request: Request, db: Session, session_id: str) -> A
     return session
 
 
+def _arrival_public_link(invite_token: str, base_url: Optional[str] = None) -> str:
+    if base_url:
+        origin = base_url.rstrip("/")
+    else:
+        configured = os.getenv("PUBLIC_APP_URL", "").strip().rstrip("/")
+        fly_app_name = os.getenv("FLY_APP_NAME", "").strip()
+        origin = configured or (f"https://{fly_app_name}.fly.dev" if fly_app_name else "http://localhost:5190")
+    return f"{origin}/arrival#invite={invite_token}"
+
+
+def _issue_arrival_invite(
+    db: Session,
+    *,
+    booking_id: str,
+    summary: str,
+    customer_phone: Optional[str],
+    start_time: datetime,
+    end_time: datetime,
+) -> tuple[ArrivalSession, str]:
+    """Create one invitation while revoking every older link for the booking."""
+    now = datetime.utcnow()
+    local_start = start_time.replace(tzinfo=None)
+    local_end = end_time.replace(tzinfo=None)
+    if local_end <= local_start:
+        raise ValueError("Booking end time must be after its start time.")
+
+    booking = _arrival_booking(db, booking_id)
+    if not booking:
+        booking = CalendarEvent(
+            id=booking_id, summary=summary, customer_phone=customer_phone,
+            start_time=local_start, end_time=local_end, status="scheduled", notes="",
+        )
+        db.add(booking)
+    else:
+        booking.summary = summary
+        booking.customer_phone = customer_phone
+        booking.start_time = local_start
+        booking.end_time = local_end
+
+    for old_session in db.query(ArrivalSession).filter(
+        ArrivalSession.booking_id == booking_id,
+        ArrivalSession.status.in_(["invited", "active"]),
+    ).all():
+        old_session.status = "closed"
+        old_session.closed_at = now
+        old_session.last_activity_at = now
+
+    invite_token = secrets.token_urlsafe(32)
+    expires_at = min(
+        max(local_end + timedelta(hours=6), now + timedelta(hours=1)),
+        now + timedelta(days=30),
+    )
+    session = ArrivalSession(
+        id=str(uuid.uuid4()), booking_id=booking_id,
+        invite_token_hash=_hash_arrival_token(invite_token), status="invited",
+        expires_at=expires_at, created_at=now, last_activity_at=now,
+    )
+    db.add(session)
+    db.flush()
+    return session, invite_token
+
+
 @app.post("/api/arrival/admin/bookings/{booking_id}/invite")
 def create_arrival_invite(
     booking_id: str,
@@ -4244,45 +4329,19 @@ def create_arrival_invite(
     db: Session = Depends(get_db),
 ):
     """Issue one invitation and revoke any previous invitation/session for the booking."""
-    now = datetime.utcnow()
-    start_time = payload.startTime.replace(tzinfo=None)
-    end_time = payload.endTime.replace(tzinfo=None)
-    if end_time <= start_time:
+    try:
+        session, invite_token = _issue_arrival_invite(
+            db,
+            booking_id=booking_id,
+            summary=payload.summary,
+            customer_phone=payload.customerPhone,
+            start_time=payload.startTime,
+            end_time=payload.endTime,
+        )
+    except ValueError as exc:
         raise HTTPException(status_code=422, detail="Booking end time must be after its start time.")
-
-    booking = _arrival_booking(db, booking_id)
-    if not booking:
-        booking = CalendarEvent(id=booking_id, summary=payload.summary, customer_phone=payload.customerPhone,
-                                start_time=start_time, end_time=end_time, status="scheduled", notes="")
-        db.add(booking)
-    else:
-        booking.summary = payload.summary
-        booking.customer_phone = payload.customerPhone
-        booking.start_time = start_time
-        booking.end_time = end_time
-
-    old_sessions = db.query(ArrivalSession).filter(
-        ArrivalSession.booking_id == booking_id,
-        ArrivalSession.status.in_(["invited", "active"]),
-    ).all()
-    for old_session in old_sessions:
-        old_session.status = "closed"
-        old_session.closed_at = now
-        old_session.last_activity_at = now
-
-    invite_token = secrets.token_urlsafe(32)
-    latest_safe_expiry = now + timedelta(days=30)
-    booking_expiry = end_time + timedelta(hours=6)
-    expires_at = min(max(booking_expiry, now + timedelta(hours=1)), latest_safe_expiry)
-    session = ArrivalSession(
-        id=str(uuid.uuid4()), booking_id=booking_id,
-        invite_token_hash=_hash_arrival_token(invite_token), status="invited",
-        expires_at=expires_at, created_at=now, last_activity_at=now,
-    )
-    db.add(session)
     db.commit()
-
-    link = f"{str(request.base_url).rstrip('/')}/arrival#invite={invite_token}"
+    link = _arrival_public_link(invite_token, str(request.base_url))
     return {"session": _arrival_payload(db, session), "link": link}
 
 
@@ -7247,17 +7306,30 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
         end_dt = start_dt + timedelta(minutes=duration)
         
         summary = f"{payload.name} - {service['name']}"
-        success = calendar_service.create_booking(
+        booking_id = calendar_service.create_booking(
             summary=summary,
             start=start_dt,
             end=end_dt,
             customer_phone=customer_phone
         )
-        if not success:
+        if not booking_id:
             raise HTTPException(status_code=500, detail="Failed to create booking in calendar service.")
+
+        arrival_session, arrival_token = _issue_arrival_invite(
+            db,
+            booking_id=str(booking_id),
+            summary=summary,
+            customer_phone=customer_phone,
+            start_time=start_dt,
+            end_time=end_dt,
+        )
+        arrival_link = _arrival_public_link(arrival_token)
             
         template_path = os.path.join(PROMPTS_DIR, "sms_confirmation_template.txt")
-        template = "Hi {name}, your booking for {service} on {time} is confirmed! See you then. - Tori"
+        template = (
+            "Hi {name}, your booking for {service} on {time} is confirmed!\n\n"
+            "When you arrive, tap: {arrival_link}"
+        )
         if os.path.exists(template_path):
             with open(template_path, "r", encoding="utf-8") as f:
                 template = f.read()
@@ -7268,8 +7340,11 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
             "name": payload.name,
             "service": service["name"],
             "time": formatted_time,
+            "arrival_link": arrival_link,
         }
         sms_text = render_template_variables(template, confirmation_variables)
+        if "{arrival_link}" not in template:
+            sms_text = f"{sms_text.rstrip()}\n\nWhen you arrive, tap: {arrival_link}"
         
         # Load website-only display confirmation screen template
         screen_template_path = os.path.join(PROMPTS_DIR, "website_confirmation_template.txt")
@@ -7343,6 +7418,8 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
             "status": "partial" if delivery_failure else "success",
             "smsSent": "" if delivery_failure else screen_text,
             "smsError": "Booking saved, but the confirmation SMS was not sent." if delivery_failure else None,
+            "arrivalLink": arrival_link,
+            "arrivalSessionId": arrival_session.id,
         }
     except Exception as e:
         db.rollback()

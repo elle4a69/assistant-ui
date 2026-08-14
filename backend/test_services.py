@@ -32,8 +32,13 @@ client = TestClient(app)
 
 def test_services_and_manual_bookings(monkeypatch):
     try:
-        monkeypatch.setattr(main.calendar_service, "create_booking", lambda **kwargs: True)
-        monkeypatch.setattr(main.mobilemessage_service, "send_sms", lambda *args, **kwargs: {"status": "success"})
+        sent_messages = []
+        monkeypatch.setattr(main.calendar_service, "create_booking", lambda **kwargs: "test-booking-id")
+        monkeypatch.setattr(
+            main.mobilemessage_service,
+            "send_sms",
+            lambda phone, text, **kwargs: sent_messages.append((phone, text)) or {"status": "success"},
+        )
         monkeypatch.setattr(main.mobilemessage_service, "delivery_error", lambda result: None)
 
         # 1. Test GET services
@@ -94,6 +99,10 @@ def test_services_and_manual_bookings(monkeypatch):
         assert "Alex Jones" in res_data["smsSent"]
         assert "Luxury Deep Tissue Massage" in res_data["smsSent"]
         assert "Sunday, Aug 09 at 03:00 PM" in res_data["smsSent"]
+        assert res_data["arrivalLink"].startswith("http")
+        assert "/arrival#invite=" in res_data["arrivalLink"]
+        assert res_data["arrivalLink"] in sent_messages[0][1]
+        assert "When you arrive, tap:" in sent_messages[0][1]
 
     finally:
         # Restore operational files after test run

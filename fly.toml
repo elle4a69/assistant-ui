@@ -6,6 +6,7 @@ primary_region = "syd"
 
 [env]
   PORT = "8080"
+  PUBLIC_APP_URL = "https://assistant-ui-hub.fly.dev"
 
 [mounts]
   source = "assistant_data_volume"
