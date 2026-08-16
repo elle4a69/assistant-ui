@@ -12,6 +12,7 @@ import { Sparkles, ChevronLeft, ChevronRight, Info, X } from 'lucide-react';
 
 // Steps: 1=Service, 2=DateTime, 3=ClientDetails, 4=Success
 type Step = 1 | 2 | 3 | 4;
+type SmsAccountKey = 'primary' | 'secondary';
 
 // ─── Timezone Helpers ─────────────────────────────────────────────────────────
 
@@ -189,6 +190,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('+61');
   const [notes, setNotes] = useState('');
+  const [smsAccountKey, setSmsAccountKey] = useState<SmsAccountKey>('primary');
   const [nameError, setNameError] = useState('');
   const [phoneError, setPhoneError] = useState('');
   const [touched, setTouched] = useState({ name: false, phone: false });
@@ -369,6 +371,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
     setName('');
     setPhone('+61');
     setNotes('');
+    setSmsAccountKey('primary');
     setNameError('');
     setPhoneError('');
     setTouched({ name: false, phone: false });
@@ -408,6 +411,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
         phone,
         startTime: selectedSlot.startTime,
         notes: notes || undefined,
+        smsAccountKey: embedded ? 'primary' : smsAccountKey,
       });
       setConfirmationSms(res.smsSent);
       setConfirmationWarning(res.smsError || '');
@@ -460,12 +464,32 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
 
         {/* ── Header ──────────────────────────────────────────────────────── */}
         {!embedded && <div className="bg-white border-b border-slate-100 px-4 py-3 flex items-center justify-between shrink-0 z-10">
-          <button
-            onClick={handleReset}
-            className="text-[#7a0b2e] font-serif italic font-extrabold text-xl tracking-tight cursor-pointer bg-transparent border-none p-0"
-          >
-            Tori
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleReset}
+              className="text-[#7a0b2e] font-serif italic font-extrabold text-xl tracking-tight cursor-pointer bg-transparent border-none p-0"
+            >
+              Tori
+            </button>
+            <fieldset className="flex items-center gap-2 border-0 p-0 m-0" aria-label="Booking confirmation SMS line">
+              {([
+                ['primary', 'Line 1'],
+                ['secondary', 'Line 2'],
+              ] as const).map(([key, label]) => (
+                <label key={key} className="flex items-center gap-1 text-[10px] font-bold text-slate-600 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="booking-sms-line"
+                    value={key}
+                    checked={smsAccountKey === key}
+                    onChange={() => setSmsAccountKey(key)}
+                    className="size-3 accent-[#7a0b2e] cursor-pointer"
+                  />
+                  {label}
+                </label>
+              ))}
+            </fieldset>
+          </div>
 
           <div className="flex items-center gap-2">
             {/* Online badge */}

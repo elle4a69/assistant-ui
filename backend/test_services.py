@@ -37,7 +37,7 @@ def test_services_and_manual_bookings(monkeypatch):
         monkeypatch.setattr(
             main.mobilemessage_service,
             "send_sms",
-            lambda phone, text, **kwargs: sent_messages.append((phone, text)) or {"status": "success"},
+            lambda phone, text, **kwargs: sent_messages.append((phone, text, kwargs.get("account_key"))) or {"status": "success"},
         )
         monkeypatch.setattr(main.mobilemessage_service, "delivery_error", lambda result: None)
 
@@ -103,6 +103,29 @@ def test_services_and_manual_bookings(monkeypatch):
         assert "/a/" in res_data["arrivalLink"]
         assert res_data["arrivalLink"] in sent_messages[0][1]
         assert "When you arrive, tap:" in sent_messages[0][1]
+        assert sent_messages[0][2] == "primary"
+
+        # The selected sender must own both the SMS dispatch and conversation.
+        secondary_payload = {
+            **booking_payload,
+            "startTime": "2026-08-09T06:00:00Z",
+            "smsAccountKey": "secondary",
+        }
+        response = client.post("/api/calendar/bookings", json=secondary_payload)
+        assert response.status_code == 200
+        assert sent_messages[1][2] == "secondary"
+
+        test_db = main.SessionLocal()
+        try:
+            account_threads = (
+                test_db.query(main.Thread)
+                .filter(main.Thread.customer_phone == "+61411222333")
+                .order_by(main.Thread.sms_account_key)
+                .all()
+            )
+            assert [thread.sms_account_key for thread in account_threads] == ["primary", "secondary"]
+        finally:
+            test_db.close()
 
     finally:
         # Restore operational files after test run

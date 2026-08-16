@@ -822,6 +822,7 @@ export interface BookingPayload {
   phone: string;
   startTime: string;
   notes?: string;
+  smsAccountKey?: 'primary' | 'secondary';
 }
 
 export async function getServices(): Promise<Service[]> {

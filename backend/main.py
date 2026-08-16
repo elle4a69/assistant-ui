@@ -15,7 +15,7 @@ import json
 import shutil
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 
 from fastapi import FastAPI, Depends, HTTPException, Query, status, UploadFile, File, BackgroundTasks, Request, Response
 from fastapi.responses import RedirectResponse
@@ -7478,6 +7478,7 @@ class ManualBookingInput(BaseModel):
     phone: str
     startTime: str
     notes: Optional[str] = None
+    smsAccountKey: Literal["primary", "secondary"] = "primary"
 
 
 @app.get("/api/services")
@@ -7623,12 +7624,12 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
                 pass
         screen_text = render_template_variables(screen_template, confirmation_variables)
 
-        thread = find_thread_by_phone(db, customer_phone, "primary")
+        thread = find_thread_by_phone(db, customer_phone, payload.smsAccountKey)
         if not thread:
             thread = Thread(
                 id=str(uuid.uuid4()),
                 customer_phone=customer_phone,
-                sms_account_key="primary",
+                sms_account_key=payload.smsAccountKey,
                 state="resolved",
                 priority="medium",
                 sla_due_at=start_dt + timedelta(hours=24),
@@ -7652,7 +7653,7 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
             customer_phone,
             sms_text,
             idempotency_key=confirmation_msg.id,
-            account_key="primary",
+            account_key=payload.smsAccountKey,
         )
         delivery_failure = mobilemessage_service.delivery_error(dispatch_result)
         if dispatch_result.get("status") == "skipped" or (delivery_failure and ("skipped" in str(delivery_failure).lower() or "not configured" in str(delivery_failure).lower())):
