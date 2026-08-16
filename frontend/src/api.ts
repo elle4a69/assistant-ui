@@ -28,6 +28,40 @@ const getApiBase = () => {
 
 const API_BASE = getApiBase();
 
+const nativeFetch = globalThis.fetch.bind(globalThis);
+
+async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const response = await nativeFetch(input, init);
+  const url = typeof input === 'string' ? input : input.toString();
+  if (response.status === 401 && !url.includes('/api/auth/login')) {
+    window.dispatchEvent(new Event('admin-auth-required'));
+  }
+  return response;
+}
+
+export async function getAdminAuthStatus(): Promise<{ authenticated: boolean }> {
+  const response = await apiFetch(`${API_BASE}/api/auth/status`, { credentials: 'same-origin' });
+  if (!response.ok) return { authenticated: false };
+  return response.json();
+}
+
+export async function loginAdmin(username: string, password: string): Promise<void> {
+  const response = await apiFetch(`${API_BASE}/api/auth/login`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || 'Login failed.');
+  }
+}
+
+export async function logoutAdmin(): Promise<void> {
+  await apiFetch(`${API_BASE}/api/auth/logout`, { method: 'POST', credentials: 'same-origin' });
+}
+
 
 export interface ThreadSLA {
   dueAt: string;
@@ -151,7 +185,7 @@ export interface BootcampRun {
 }
 
 export async function getBootcampPersonas(): Promise<BootcampPersona[]> {
-  const response = await fetch(`${API_BASE}/api/bootcamp/personas`);
+  const response = await apiFetch(`${API_BASE}/api/bootcamp/personas`);
   if (!response.ok) throw new Error('Failed to load Boot Camp personas');
   return response.json();
 }
@@ -162,13 +196,13 @@ export async function getBootcampProfile(): Promise<{
   isApplied: boolean;
   canUndo: boolean;
 }> {
-  const response = await fetch(`${API_BASE}/api/bootcamp/profile`);
+  const response = await apiFetch(`${API_BASE}/api/bootcamp/profile`);
   if (!response.ok) throw new Error('Failed to load Tori style profile');
   return response.json();
 }
 
 export async function applyBootcampProfile(styleProfile: BootcampStyleProfile) {
-  const response = await fetch(`${API_BASE}/api/bootcamp/profile/apply`, {
+  const response = await apiFetch(`${API_BASE}/api/bootcamp/profile/apply`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ styleProfile }),
@@ -178,7 +212,7 @@ export async function applyBootcampProfile(styleProfile: BootcampStyleProfile) {
 }
 
 export async function undoBootcampProfile() {
-  const response = await fetch(`${API_BASE}/api/bootcamp/profile/undo`, { method: 'POST' });
+  const response = await apiFetch(`${API_BASE}/api/bootcamp/profile/undo`, { method: 'POST' });
   if (!response.ok) throw new Error('Failed to restore previous profile');
   return response.json();
 }
@@ -188,7 +222,7 @@ export async function startBootcampRun(
   maxTurns: number,
   styleProfile: BootcampStyleProfile,
 ): Promise<BootcampRun> {
-  const response = await fetch(`${API_BASE}/api/bootcamp/runs`, {
+  const response = await apiFetch(`${API_BASE}/api/bootcamp/runs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ personaIds, maxTurns, styleProfile }),
@@ -198,14 +232,14 @@ export async function startBootcampRun(
 }
 
 export async function getLatestBootcampRun(): Promise<BootcampRun | null> {
-  const response = await fetch(`${API_BASE}/api/bootcamp/runs/latest`);
+  const response = await apiFetch(`${API_BASE}/api/bootcamp/runs/latest`);
   if (!response.ok) throw new Error('Failed to load Boot Camp run');
   const payload = await response.json();
   return payload.run;
 }
 
 export async function controlBootcampRun(runId: string, operation: 'pause' | 'resume' | 'stop') {
-  const response = await fetch(`${API_BASE}/api/bootcamp/runs/${runId}/control`, {
+  const response = await apiFetch(`${API_BASE}/api/bootcamp/runs/${runId}/control`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ operation }),
@@ -215,7 +249,7 @@ export async function controlBootcampRun(runId: string, operation: 'pause' | 're
 }
 
 export async function resetBootcampRuns() {
-  const response = await fetch(`${API_BASE}/api/bootcamp/runs`, { method: 'DELETE' });
+  const response = await apiFetch(`${API_BASE}/api/bootcamp/runs`, { method: 'DELETE' });
   if (!response.ok) throw new Error(await response.text());
   return response.json();
 }
@@ -234,7 +268,7 @@ export async function listThreads(params: ListThreadsParams = {}): Promise<Threa
   if (params.filterPriority) url.searchParams.append('filterPriority', params.filterPriority);
   if (params.onlyUnread !== undefined) url.searchParams.append('onlyUnread', String(params.onlyUnread));
 
-  const response = await fetch(url.toString(), { cache: 'no-store' });
+  const response = await apiFetch(url.toString(), { cache: 'no-store' });
   if (!response.ok) {
     throw new Error(`Failed to list threads: ${response.statusText}`);
   }
@@ -273,7 +307,7 @@ export interface ArrivalSession {
 }
 
 export async function catchUpMissedMessage(): Promise<CatchUpResult> {
-  const response = await fetch(`${API_BASE}/api/threads/catch-up`, { method: 'POST' });
+  const response = await apiFetch(`${API_BASE}/api/threads/catch-up`, { method: 'POST' });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
     throw new Error(payload?.detail || 'Failed to catch up missed messages');
@@ -282,7 +316,7 @@ export async function catchUpMissedMessage(): Promise<CatchUpResult> {
 }
 
 export async function getThread(id: string): Promise<ThreadDetail> {
-  const response = await fetch(`${API_BASE}/api/threads/${id}`, { cache: 'no-store' });
+  const response = await apiFetch(`${API_BASE}/api/threads/${id}`, { cache: 'no-store' });
   if (!response.ok) {
     throw new Error(`Failed to get thread detail: ${response.statusText}`);
   }
@@ -290,7 +324,7 @@ export async function getThread(id: string): Promise<ThreadDetail> {
 }
 
 export async function takeOverThread(id: string, agentId: string): Promise<{ status: string; state: string; assignedAgentId: string }> {
-  const response = await fetch(`${API_BASE}/api/threads/${id}/takeover`, {
+  const response = await apiFetch(`${API_BASE}/api/threads/${id}/takeover`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agentId }),
@@ -307,7 +341,7 @@ export async function sendThreadReply(
   text: string,
   clientRequestId: string,
 ): Promise<Message> {
-  const response = await fetch(`${API_BASE}/api/threads/${id}/reply`, {
+  const response = await apiFetch(`${API_BASE}/api/threads/${id}/reply`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agentId, text, clientRequestId }),
@@ -328,7 +362,7 @@ export async function respondToBootcampInformationRequest(
   knowledgeSource: string;
   knowledgeSummary: string;
 }> {
-  const response = await fetch(`${API_BASE}/api/bootcamp/conversations/${conversationId}/information-request/respond`, {
+  const response = await apiFetch(`${API_BASE}/api/bootcamp/conversations/${conversationId}/information-request/respond`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ information }),
@@ -353,7 +387,7 @@ export async function respondToInformationRequest(
   agentId: string,
   information: string,
 ): Promise<InformationRequestResult> {
-  const response = await fetch(`${API_BASE}/api/threads/${threadId}/information-request/respond`, {
+  const response = await apiFetch(`${API_BASE}/api/threads/${threadId}/information-request/respond`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ requestEventId, agentId, information }),
@@ -366,7 +400,7 @@ export async function respondToInformationRequest(
 }
 
 export async function addThreadNote(id: string, agentId: string, text: string): Promise<Note> {
-  const response = await fetch(`${API_BASE}/api/threads/${id}/notes`, {
+  const response = await apiFetch(`${API_BASE}/api/threads/${id}/notes`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agentId, text }),
@@ -378,7 +412,7 @@ export async function addThreadNote(id: string, agentId: string, text: string): 
 }
 
 export async function escalateThread(id: string, agentId: string, reason: string): Promise<{ status: string; state: string }> {
-  const response = await fetch(`${API_BASE}/api/threads/${id}/escalate`, {
+  const response = await apiFetch(`${API_BASE}/api/threads/${id}/escalate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agentId, reason }),
@@ -390,7 +424,7 @@ export async function escalateThread(id: string, agentId: string, reason: string
 }
 
 export async function resolveThread(id: string, agentId: string, resolution: string): Promise<{ status: string; state: string }> {
-  const response = await fetch(`${API_BASE}/api/threads/${id}/resolve`, {
+  const response = await apiFetch(`${API_BASE}/api/threads/${id}/resolve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agentId, resolution }),
@@ -402,7 +436,7 @@ export async function resolveThread(id: string, agentId: string, resolution: str
 }
 
 export async function toggleAutoresponder(threadId: string, enabled: boolean): Promise<{ status: string; autoReplyEnabled: boolean }> {
-  const response = await fetch(`${API_BASE}/api/threads/${threadId}/autoresponder`, {
+  const response = await apiFetch(`${API_BASE}/api/threads/${threadId}/autoresponder`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled }),
@@ -414,7 +448,7 @@ export async function toggleAutoresponder(threadId: string, enabled: boolean): P
 }
 
 export async function sendCustomerSms(fromPhone: string, body: string): Promise<{ status: string; thread_id: string }> {
-  const response = await fetch(`${API_BASE}/webhooks/sms`, {
+  const response = await apiFetch(`${API_BASE}/webhooks/sms`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -432,7 +466,7 @@ export async function sendCustomerSms(fromPhone: string, body: string): Promise<
 }
 
 export async function listBookings(): Promise<CalendarBooking[]> {
-  const response = await fetch(`${API_BASE}/api/calendar/bookings`);
+  const response = await apiFetch(`${API_BASE}/api/calendar/bookings`);
   if (!response.ok) {
     throw new Error(`Failed to list calendar bookings: ${response.statusText}`);
   }
@@ -442,7 +476,7 @@ export async function listBookings(): Promise<CalendarBooking[]> {
 
 
 export async function updateBooking(id: string, payload: Partial<CalendarBooking>): Promise<CalendarBooking> {
-  const response = await fetch(`${API_BASE}/api/calendar/bookings/${id}`, {
+  const response = await apiFetch(`${API_BASE}/api/calendar/bookings/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -454,7 +488,7 @@ export async function updateBooking(id: string, payload: Partial<CalendarBooking
 }
 
 export async function deleteBooking(id: string): Promise<{ status: string }> {
-  const response = await fetch(`${API_BASE}/api/calendar/bookings/${id}`, {
+  const response = await apiFetch(`${API_BASE}/api/calendar/bookings/${id}`, {
     method: 'DELETE',
   });
   if (!response.ok) {
@@ -469,7 +503,7 @@ export async function getFreeBusy(duration?: number): Promise<FreeBusySlot[]> {
   if (duration !== undefined) {
     url.searchParams.append('duration', String(duration));
   }
-  const response = await fetch(url.toString());
+  const response = await apiFetch(url.toString());
   if (!response.ok) {
     throw new Error(`Failed to get free/busy calendar slots: ${response.statusText}`);
   }
@@ -492,7 +526,7 @@ export interface KnowledgeFile {
 }
 
 export async function createArrivalInvite(booking: CalendarBooking): Promise<{ session: ArrivalSession; link: string }> {
-  const response = await fetch(`${API_BASE}/api/arrival/admin/bookings/${encodeURIComponent(booking.id)}/invite`, {
+  const response = await apiFetch(`${API_BASE}/api/arrival/admin/bookings/${encodeURIComponent(booking.id)}/invite`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -514,7 +548,7 @@ export async function createArrivalInvite(booking: CalendarBooking): Promise<{ s
 }
 
 export async function activateArrival(inviteToken: string): Promise<{ clientToken: string; session: ArrivalSession }> {
-  const response = await fetch(`${API_BASE}/api/arrival/activate`, {
+  const response = await apiFetch(`${API_BASE}/api/arrival/activate`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inviteToken }),
   });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'This arrival link is not valid.');
@@ -522,7 +556,7 @@ export async function activateArrival(inviteToken: string): Promise<{ clientToke
 }
 
 export async function getClientArrivalSession(sessionId: string, token: string): Promise<ArrivalSession> {
-  const response = await fetch(`${API_BASE}/api/arrival/client/${encodeURIComponent(sessionId)}`, {
+  const response = await apiFetch(`${API_BASE}/api/arrival/client/${encodeURIComponent(sessionId)}`, {
     headers: { Authorization: `Arrival ${token}` },
   });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Arrival chat unavailable.');
@@ -530,33 +564,33 @@ export async function getClientArrivalSession(sessionId: string, token: string):
 }
 
 export async function sendClientArrivalMessage(sessionId: string, token: string, text: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/api/arrival/client/${encodeURIComponent(sessionId)}/messages`, {
+  const response = await apiFetch(`${API_BASE}/api/arrival/client/${encodeURIComponent(sessionId)}/messages`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Arrival ${token}` }, body: JSON.stringify({ text }),
   });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Message failed to send.');
 }
 
 export async function listArrivalSessions(): Promise<ArrivalSession[]> {
-  const response = await fetch(`${API_BASE}/api/arrival/admin/sessions`);
+  const response = await apiFetch(`${API_BASE}/api/arrival/admin/sessions`);
   if (!response.ok) throw new Error('Could not load arrival chats.');
   return response.json();
 }
 
 export async function getAdminArrivalSession(sessionId: string): Promise<ArrivalSession> {
-  const response = await fetch(`${API_BASE}/api/arrival/admin/sessions/${encodeURIComponent(sessionId)}`);
+  const response = await apiFetch(`${API_BASE}/api/arrival/admin/sessions/${encodeURIComponent(sessionId)}`);
   if (!response.ok) throw new Error('Could not load arrival chat.');
   return response.json();
 }
 
 export async function sendAdminArrivalMessage(sessionId: string, text: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/api/arrival/admin/sessions/${encodeURIComponent(sessionId)}/messages`, {
+  const response = await apiFetch(`${API_BASE}/api/arrival/admin/sessions/${encodeURIComponent(sessionId)}/messages`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }),
   });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Message failed to send.');
 }
 
 export async function closeArrivalSession(sessionId: string): Promise<ArrivalSession> {
-  const response = await fetch(`${API_BASE}/api/arrival/admin/sessions/${encodeURIComponent(sessionId)}/close`, { method: 'POST' });
+  const response = await apiFetch(`${API_BASE}/api/arrival/admin/sessions/${encodeURIComponent(sessionId)}/close`, { method: 'POST' });
   if (!response.ok) throw new Error('Could not close arrival chat.');
   return response.json();
 }
@@ -569,13 +603,13 @@ export interface PushConfig {
 }
 
 export async function getPushConfig(): Promise<PushConfig> {
-  const response = await fetch(`${API_BASE}/api/push/config`, { cache: 'no-store' });
+  const response = await apiFetch(`${API_BASE}/api/push/config`, { cache: 'no-store' });
   if (!response.ok) throw new Error('Could not load push notification settings.');
   return response.json();
 }
 
 export async function savePushSubscription(subscription: PushSubscriptionJSON): Promise<void> {
-  const response = await fetch(`${API_BASE}/api/push/subscriptions`, {
+  const response = await apiFetch(`${API_BASE}/api/push/subscriptions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(subscription),
@@ -584,7 +618,7 @@ export async function savePushSubscription(subscription: PushSubscriptionJSON): 
 }
 
 export async function deletePushSubscription(subscription: PushSubscriptionJSON): Promise<void> {
-  const response = await fetch(`${API_BASE}/api/push/subscriptions`, {
+  const response = await apiFetch(`${API_BASE}/api/push/subscriptions`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(subscription),
@@ -607,7 +641,7 @@ export interface ManualLearningEntry {
 }
 
 export async function getSettings(): Promise<SystemSettings> {
-  const response = await fetch(`${API_BASE}/api/settings`, { cache: 'no-store' });
+  const response = await apiFetch(`${API_BASE}/api/settings`, { cache: 'no-store' });
   if (!response.ok) {
     throw new Error(`Failed to get settings: ${response.statusText}`);
   }
@@ -615,7 +649,7 @@ export async function getSettings(): Promise<SystemSettings> {
 }
 
 export async function updateSettings(settings: { openaiApiKey?: string; systemPrompt?: string; userPrompt?: string; autoReplyGlobalEnabled?: boolean; trainingModeEnabled?: boolean; showMessageAvatars?: boolean }): Promise<{ status: string }> {
-  const response = await fetch(`${API_BASE}/api/settings`, {
+  const response = await apiFetch(`${API_BASE}/api/settings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(settings),
@@ -656,7 +690,7 @@ export interface RagStatus {
 }
 
 export async function getRagStatus(): Promise<RagStatus> {
-  const response = await fetch(`${API_BASE}/api/admin/rag/status`);
+  const response = await apiFetch(`${API_BASE}/api/admin/rag/status`);
   if (!response.ok) {
     throw new Error(`Failed to get RAG status: ${response.statusText}`);
   }
@@ -664,7 +698,7 @@ export async function getRagStatus(): Promise<RagStatus> {
 }
 
 export async function getBusinessVariables(): Promise<BusinessVariable[]> {
-  const response = await fetch(`${API_BASE}/api/settings/business-variables`);
+  const response = await apiFetch(`${API_BASE}/api/settings/business-variables`);
   if (!response.ok) {
     throw new Error(`Failed to get business variables: ${response.statusText}`);
   }
@@ -673,7 +707,7 @@ export async function getBusinessVariables(): Promise<BusinessVariable[]> {
 }
 
 export async function saveBusinessVariables(variables: BusinessVariable[]): Promise<{ status: string; variables: BusinessVariable[] }> {
-  const response = await fetch(`${API_BASE}/api/settings/business-variables`, {
+  const response = await apiFetch(`${API_BASE}/api/settings/business-variables`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ variables }),
@@ -686,7 +720,7 @@ export async function saveBusinessVariables(variables: BusinessVariable[]): Prom
 }
 
 export async function listKnowledgeFiles(): Promise<KnowledgeFile[]> {
-  const response = await fetch(`${API_BASE}/api/settings/knowledge-files`);
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-files`);
   if (!response.ok) {
     throw new Error(`Failed to list knowledge files: ${response.statusText}`);
   }
@@ -697,7 +731,7 @@ export async function createManualLearning(
   topic: string,
   guidance: string,
 ): Promise<{ status: string; filename: string; entry: ManualLearningEntry }> {
-  const response = await fetch(`${API_BASE}/api/settings/learnings`, {
+  const response = await apiFetch(`${API_BASE}/api/settings/learnings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ topic, guidance }),
@@ -713,7 +747,7 @@ export async function uploadKnowledgeFile(file: File): Promise<{ status: string;
   const formData = new FormData();
   formData.append('file', file);
 
-  const response = await fetch(`${API_BASE}/api/settings/upload-knowledge`, {
+  const response = await apiFetch(`${API_BASE}/api/settings/upload-knowledge`, {
     method: 'POST',
     body: formData,
   });
@@ -727,7 +761,7 @@ export async function uploadCredentialsFile(file: File): Promise<{ status: strin
   const formData = new FormData();
   formData.append('file', file);
 
-  const response = await fetch(`${API_BASE}/api/settings/upload-credentials`, {
+  const response = await apiFetch(`${API_BASE}/api/settings/upload-credentials`, {
     method: 'POST',
     body: formData,
   });
@@ -753,7 +787,7 @@ export interface SearchFileResponse {
 }
 
 export async function getKnowledgeFile(filename: string): Promise<FileContentResponse> {
-  const response = await fetch(`${API_BASE}/api/settings/knowledge-files/${filename}`);
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-files/${filename}`);
   if (!response.ok) {
     throw new Error(`Failed to read file content: ${response.statusText}`);
   }
@@ -761,7 +795,7 @@ export async function getKnowledgeFile(filename: string): Promise<FileContentRes
 }
 
 export async function saveKnowledgeFile(filename: string, content: string): Promise<{ status: string }> {
-  const response = await fetch(`${API_BASE}/api/settings/knowledge-files/${filename}`, {
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-files/${filename}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content }),
@@ -773,7 +807,7 @@ export async function saveKnowledgeFile(filename: string, content: string): Prom
 }
 
 export async function deleteKnowledgeFile(filename: string): Promise<{ status: string }> {
-  const response = await fetch(`${API_BASE}/api/settings/knowledge-files/${filename}`, {
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-files/${filename}`, {
     method: 'DELETE',
   });
   if (!response.ok) {
@@ -783,7 +817,7 @@ export async function deleteKnowledgeFile(filename: string): Promise<{ status: s
 }
 
 export async function searchKnowledgeFile(filename: string, query: string): Promise<SearchFileResponse> {
-  const response = await fetch(`${API_BASE}/api/settings/knowledge-files/${filename}/search`, {
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-files/${filename}/search`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query }),
@@ -795,7 +829,7 @@ export async function searchKnowledgeFile(filename: string, query: string): Prom
 }
 
 export async function purgeKnowledgeFile(filename: string, query?: string, indices?: number[]): Promise<{ status: string; purgedCount: number }> {
-  const response = await fetch(`${API_BASE}/api/settings/knowledge-files/${filename}/purge`, {
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-files/${filename}/purge`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query, indices }),
@@ -826,7 +860,7 @@ export interface BookingPayload {
 }
 
 export async function getServices(): Promise<Service[]> {
-  const response = await fetch(`${API_BASE}/api/services`);
+  const response = await apiFetch(`${API_BASE}/api/services`);
   if (!response.ok) {
     throw new Error(`Failed to fetch services: ${response.statusText}`);
   }
@@ -834,7 +868,7 @@ export async function getServices(): Promise<Service[]> {
 }
 
 export async function saveServices(services: Service[]): Promise<{ status: string }> {
-  const response = await fetch(`${API_BASE}/api/services`, {
+  const response = await apiFetch(`${API_BASE}/api/services`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ services }),
@@ -846,7 +880,7 @@ export async function saveServices(services: Service[]): Promise<{ status: strin
 }
 
 export async function getSmsTemplate(): Promise<{ template: string }> {
-  const response = await fetch(`${API_BASE}/api/settings/sms-confirmation`);
+  const response = await apiFetch(`${API_BASE}/api/settings/sms-confirmation`);
   if (!response.ok) {
     throw new Error(`Failed to fetch SMS template: ${response.statusText}`);
   }
@@ -854,7 +888,7 @@ export async function getSmsTemplate(): Promise<{ template: string }> {
 }
 
 export async function saveSmsTemplate(template: string): Promise<{ status: string }> {
-  const response = await fetch(`${API_BASE}/api/settings/sms-confirmation`, {
+  const response = await apiFetch(`${API_BASE}/api/settings/sms-confirmation`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ template }),
@@ -866,7 +900,7 @@ export async function saveSmsTemplate(template: string): Promise<{ status: strin
 }
 
 export async function createBooking(booking: BookingPayload): Promise<{ status: string; smsSent: string; smsError?: string | null }> {
-  const response = await fetch(`${API_BASE}/api/calendar/bookings`, {
+  const response = await apiFetch(`${API_BASE}/api/calendar/bookings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(booking),
@@ -887,13 +921,13 @@ export interface WorkingHourEntry {
 }
 
 export async function getWorkingHours(): Promise<WorkingHourEntry[]> {
-  const response = await fetch(`${API_BASE}/api/settings/working-hours`);
+  const response = await apiFetch(`${API_BASE}/api/settings/working-hours`);
   if (!response.ok) throw new Error(`Failed to fetch working hours: ${response.statusText}`);
   return response.json();
 }
 
 export async function saveWorkingHours(hours: WorkingHourEntry[]): Promise<{ status: string }> {
-  const response = await fetch(`${API_BASE}/api/settings/working-hours`, {
+  const response = await apiFetch(`${API_BASE}/api/settings/working-hours`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ hours }),
@@ -911,13 +945,13 @@ export interface MobileMessageConfig {
 }
 
 export async function getMobileMessageConfig(): Promise<MobileMessageConfig> {
-  const response = await fetch(`${API_BASE}/api/settings/mobilemessage`);
+  const response = await apiFetch(`${API_BASE}/api/settings/mobilemessage`);
   if (!response.ok) throw new Error(`Failed to fetch MobileMessage settings: ${response.statusText}`);
   return response.json();
 }
 
 export async function saveMobileMessageConfig(config: MobileMessageConfig): Promise<{ status: string }> {
-  const response = await fetch(`${API_BASE}/api/settings/mobilemessage`, {
+  const response = await apiFetch(`${API_BASE}/api/settings/mobilemessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(config),
@@ -933,13 +967,13 @@ export interface QARule {
 }
 
 export async function getQARules(): Promise<QARule[]> {
-  const response = await fetch(`${API_BASE}/api/qa-rules`);
+  const response = await apiFetch(`${API_BASE}/api/qa-rules`);
   if (!response.ok) throw new Error(`Failed to fetch QA rules: ${response.statusText}`);
   return response.json();
 }
 
 export async function saveQARules(rules: QARule[]): Promise<{ status: string }> {
-  const response = await fetch(`${API_BASE}/api/qa-rules`, {
+  const response = await apiFetch(`${API_BASE}/api/qa-rules`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(rules),
@@ -967,7 +1001,7 @@ export interface FirstContactAutoresponderSettings {
 }
 
 export async function getFirstContactAutoresponder(): Promise<FirstContactAutoresponderSettings> {
-  const response = await fetch(`${API_BASE}/api/settings/first-contact-autoresponder`);
+  const response = await apiFetch(`${API_BASE}/api/settings/first-contact-autoresponder`);
   if (!response.ok) throw new Error(`Failed to fetch first-contact auto-responder: ${response.statusText}`);
   return response.json();
 }
@@ -975,7 +1009,7 @@ export async function getFirstContactAutoresponder(): Promise<FirstContactAutore
 export async function saveFirstContactAutoresponder(
   config: FirstContactAutoresponderSettings
 ): Promise<{ status: string }> {
-  const response = await fetch(`${API_BASE}/api/settings/first-contact-autoresponder`, {
+  const response = await apiFetch(`${API_BASE}/api/settings/first-contact-autoresponder`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ accounts: config.accounts }),
@@ -988,7 +1022,7 @@ export async function saveFirstContactAutoresponder(
 }
 
 export async function approveDraft(messageId: string): Promise<{ status: string }> {
-  const response = await fetch(`${API_BASE}/api/messages/${messageId}/approve`, {
+  const response = await apiFetch(`${API_BASE}/api/messages/${messageId}/approve`, {
     method: 'POST',
   });
   if (!response.ok) {
@@ -999,7 +1033,7 @@ export async function approveDraft(messageId: string): Promise<{ status: string 
 }
 
 export async function discardDraft(messageId: string): Promise<{ status: string }> {
-  const response = await fetch(`${API_BASE}/api/messages/${messageId}/discard`, {
+  const response = await apiFetch(`${API_BASE}/api/messages/${messageId}/discard`, {
     method: 'POST',
   });
   if (!response.ok) throw new Error(`Failed to discard draft message: ${response.statusText}`);
@@ -1013,7 +1047,7 @@ export interface ClearPendingDraftsResult {
 }
 
 export async function clearPendingDrafts(): Promise<ClearPendingDraftsResult> {
-  const response = await fetch(`${API_BASE}/api/messages/drafts/pending`, {
+  const response = await apiFetch(`${API_BASE}/api/messages/drafts/pending`, {
     method: 'DELETE',
   });
   if (!response.ok) {
@@ -1044,7 +1078,7 @@ export interface OperationsChatCapabilities {
 }
 
 export async function getOperationsChatMessages(): Promise<{ messages: OperationsChatMessage[] }> {
-  const response = await fetch(`${API_BASE}/api/settings/operations-chat/messages`, {
+  const response = await apiFetch(`${API_BASE}/api/settings/operations-chat/messages`, {
     cache: 'no-store',
   });
   if (!response.ok) {
@@ -1059,7 +1093,7 @@ export async function sendOperationsChatMessage(message: string): Promise<{
   assistantMessage: OperationsChatMessage;
   capabilities: OperationsChatCapabilities;
 }> {
-  const response = await fetch(`${API_BASE}/api/settings/operations-chat/messages`, {
+  const response = await apiFetch(`${API_BASE}/api/settings/operations-chat/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message }),
@@ -1072,7 +1106,7 @@ export async function sendOperationsChatMessage(message: string): Promise<{
 }
 
 export async function createOperationsRealtimeSession(sdp: string): Promise<string> {
-  const response = await fetch(`${API_BASE}/api/settings/operations-chat/realtime`, {
+  const response = await apiFetch(`${API_BASE}/api/settings/operations-chat/realtime`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/sdp' },
     body: sdp,
@@ -1088,7 +1122,7 @@ export async function runOperationsRealtimeTool(
   name: string,
   args: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const response = await fetch(`${API_BASE}/api/settings/operations-chat/realtime/tool`, {
+  const response = await apiFetch(`${API_BASE}/api/settings/operations-chat/realtime/tool`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, arguments: args }),

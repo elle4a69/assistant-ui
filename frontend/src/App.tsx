@@ -1,4 +1,4 @@
-import { Component, useState, useEffect, type ErrorInfo, type ReactNode } from 'react'
+import { Component, useState, useEffect, type ErrorInfo, type FormEvent, type ReactNode } from 'react'
 import SmsTriageDashboard from './SmsTriageDashboard'
 import SmsClientView from './SmsClientView'
 import SettingsView from './SettingsView'
@@ -8,9 +8,9 @@ import MobileInboxView from './MobileInboxView'
 import BootcampView from './BootcampView'
 import ArrivalClientView from './ArrivalClientView'
 import ArrivalProviderView from './ArrivalProviderView'
-import { listArrivalSessions, listThreads } from './api'
+import { getAdminAuthStatus, listArrivalSessions, listThreads, loginAdmin, logoutAdmin } from './api'
 import { processArrivalSessionSnapshot, processArrivalThreadSnapshot, unlockIncomingAlarmAudio } from './incomingMessageAlarm'
-import { UserCheck, Smartphone, Settings, Calendar, MessagesSquare, CalendarCheck, Bot, DoorOpen } from 'lucide-react'
+import { UserCheck, Smartphone, Settings, Calendar, MessagesSquare, CalendarCheck, Bot, DoorOpen, LogOut, LockKeyhole } from 'lucide-react'
 
 class BootcampErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
@@ -31,7 +31,7 @@ class BootcampErrorBoundary extends Component<{ children: ReactNode }, { failed:
   }
 }
 
-function App() {
+function PortalApp({ onLogout }: { onLogout: () => void }) {
   const isEmbeddedBooking = typeof window !== 'undefined' && window.location.pathname.startsWith('/v2');
   const isStandaloneBooking = typeof window !== 'undefined' && (window.location.pathname === '/booking' || isEmbeddedBooking);
   const isStandaloneArrival = typeof window !== 'undefined' && window.location.pathname === '/arrival';
@@ -246,6 +246,9 @@ function App() {
               System Settings
             </button>
           </div>
+          <button onClick={onLogout} className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-2.5 py-2 text-[11px] font-bold text-slate-300 hover:bg-slate-800 hover:text-white" title="Log out">
+            <LogOut className="h-3.5 w-3.5" /> Log out
+          </button>
         </header>
       )}
 
@@ -275,6 +278,7 @@ function App() {
               { id: 'arrivals', label: 'Arrivals', icon: <DoorOpen className="w-4.5 h-4.5" />, action: () => navigateTo('arrivals', '/arrivals') },
               { id: 'booking', label: 'Form', icon: <Calendar className="w-4.5 h-4.5" />, action: () => navigateTo('booking', '/booking') },
               { id: 'settings', label: 'Settings', icon: <Settings className="w-4.5 h-4.5" />, action: () => navigateTo('settings', '/settings') },
+              { id: 'logout', label: 'Log out', icon: <LogOut className="w-4.5 h-4.5" />, action: onLogout },
             ].map((tab) => {
               const active = view === tab.id;
               return (
@@ -296,6 +300,80 @@ function App() {
 
     </div>
   )
+}
+
+function AdminLogin({ onAuthenticated }: { onAuthenticated: () => void }) {
+  const [username, setUsername] = useState('admin');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setError('');
+    try {
+      await loginAdmin(username, password);
+      onAuthenticated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Login failed.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="flex min-h-[100dvh] items-center justify-center bg-slate-950 p-5 text-slate-900">
+      <form onSubmit={submit} className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
+        <div className="mb-5 flex items-center gap-3">
+          <div className="rounded-xl bg-indigo-600 p-2.5 text-white"><LockKeyhole className="h-5 w-5" /></div>
+          <div><h1 className="text-lg font-black">Admin login</h1><p className="text-xs text-slate-500">Sign in once on this device.</p></div>
+        </div>
+        <label className="mb-3 block text-xs font-bold text-slate-600">Username
+          <input autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-indigo-500" />
+        </label>
+        <label className="block text-xs font-bold text-slate-600">Password
+          <input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-indigo-500" />
+        </label>
+        {error && <p className="mt-3 rounded-lg bg-rose-50 p-2.5 text-xs font-bold text-rose-700">{error}</p>}
+        <button disabled={submitting || !username || !password} className="mt-5 w-full rounded-xl bg-indigo-600 px-4 py-3 text-sm font-black text-white disabled:opacity-50">
+          {submitting ? 'Signing in…' : 'Sign in'}
+        </button>
+        <p className="mt-3 text-center text-[10px] leading-4 text-slate-400">Your password is verified by the server and is not saved in the app.</p>
+      </form>
+    </div>
+  );
+}
+
+function App() {
+  const isPublicView = window.location.pathname === '/booking'
+    || window.location.pathname.startsWith('/v2')
+    || window.location.pathname === '/arrival';
+  const [authenticated, setAuthenticated] = useState<boolean | null>(isPublicView ? true : null);
+
+  useEffect(() => {
+    if (isPublicView) return;
+    void getAdminAuthStatus()
+      .then(result => setAuthenticated(result.authenticated))
+      .catch(() => setAuthenticated(false));
+  }, [isPublicView]);
+
+  useEffect(() => {
+    if (isPublicView) return;
+    const requireLogin = () => setAuthenticated(false);
+    window.addEventListener('admin-auth-required', requireLogin);
+    return () => window.removeEventListener('admin-auth-required', requireLogin);
+  }, [isPublicView]);
+
+  if (authenticated === null) {
+    return <div className="flex min-h-[100dvh] items-center justify-center bg-slate-950 text-sm font-bold text-slate-400">Checking login…</div>;
+  }
+  if (!authenticated) return <AdminLogin onAuthenticated={() => setAuthenticated(true)} />;
+
+  const handleLogout = () => {
+    void logoutAdmin().finally(() => setAuthenticated(false));
+  };
+  return <PortalApp onLogout={handleLogout} />;
 }
 
 export default App

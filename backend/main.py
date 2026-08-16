@@ -2400,6 +2400,8 @@ async def disable_api_response_caching(request: Request, call_next):
 
 AUTH_USERNAME = os.getenv("APP_USERNAME", "admin")
 AUTH_PASSWORD = os.getenv("APP_PASSWORD", "")
+AUTH_COOKIE_NAME = "assistant_ui_admin_session"
+AUTH_SESSION_MAX_AGE = 60 * 60 * 24 * 365
 PUBLIC_EXACT_PATHS = {
     "/",
     "/docs",
@@ -2414,7 +2416,59 @@ PUBLIC_EXACT_PATHS = {
     "/favicon.ico",
     "/webhooks/sms",
     "/arrival",
+    "/api/auth/status",
+    "/api/auth/login",
+    "/api/auth/logout",
 }
+
+
+def _valid_admin_credentials(username: str, password: str) -> bool:
+    return bool(
+        AUTH_PASSWORD
+        and hmac.compare_digest(username, AUTH_USERNAME)
+        and hmac.compare_digest(password, AUTH_PASSWORD)
+    )
+
+
+def _admin_session_token(expires_at: int) -> str:
+    payload = f"{AUTH_USERNAME}:{expires_at}"
+    signature = hmac.new(
+        AUTH_PASSWORD.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return base64.urlsafe_b64encode(f"{payload}:{signature}".encode("utf-8")).decode("ascii")
+
+
+def _valid_admin_session(token: str) -> bool:
+    if not AUTH_PASSWORD or not token:
+        return False
+    try:
+        decoded = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
+        username, expires_text, signature = decoded.split(":", 2)
+        expires_at = int(expires_text)
+    except (ValueError, UnicodeDecodeError):
+        return False
+    if expires_at <= int(datetime.now(timezone.utc).timestamp()):
+        return False
+    payload = f"{username}:{expires_at}"
+    expected = hmac.new(
+        AUTH_PASSWORD.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(username, AUTH_USERNAME) and hmac.compare_digest(signature, expected)
+
+
+def _set_admin_session_cookie(response: Response, request: Request) -> None:
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    secure = request.url.scheme == "https" or forwarded_proto.lower() == "https"
+    expires_at = int(datetime.now(timezone.utc).timestamp()) + AUTH_SESSION_MAX_AGE
+    response.set_cookie(
+        AUTH_COOKIE_NAME,
+        _admin_session_token(expires_at),
+        max_age=AUTH_SESSION_MAX_AGE,
+        httponly=True,
+        secure=secure,
+        samesite="lax",
+        path="/",
+    )
 
 
 def is_public_request(request: Request) -> bool:
@@ -2462,6 +2516,9 @@ async def require_basic_auth(request: Request, call_next):
     if not AUTH_PASSWORD:
         return await call_next(request)
 
+    if _valid_admin_session(request.cookies.get(AUTH_COOKIE_NAME, "")):
+        return await call_next(request)
+
     authorization = request.headers.get("Authorization", "")
     scheme, _, encoded = authorization.partition(" ")
     supplied_username = ""
@@ -2477,17 +2534,41 @@ async def require_basic_auth(request: Request, call_next):
         except (ValueError, UnicodeDecodeError):
             pass
 
-    if (
-        hmac.compare_digest(supplied_username, AUTH_USERNAME)
-        and hmac.compare_digest(supplied_password, AUTH_PASSWORD)
-    ):
-        return await call_next(request)
+    if _valid_admin_credentials(supplied_username, supplied_password):
+        response = await call_next(request)
+        _set_admin_session_cookie(response, request)
+        return response
 
-    return Response(
-        content="Authentication required.",
-        status_code=401,
-        headers={"WWW-Authenticate": 'Basic realm="Assistant UI", charset="UTF-8"'},
-    )
+    headers = {}
+    if not request.url.path.startswith("/api/"):
+        headers["WWW-Authenticate"] = 'Basic realm="Assistant UI", charset="UTF-8"'
+    return Response(content="Authentication required.", status_code=401, headers=headers)
+
+
+class AdminLoginInput(BaseModel):
+    username: str
+    password: str
+
+
+@app.get("/api/auth/status")
+def admin_auth_status(request: Request):
+    if not AUTH_PASSWORD:
+        return {"authenticated": True}
+    return {"authenticated": _valid_admin_session(request.cookies.get(AUTH_COOKIE_NAME, ""))}
+
+
+@app.post("/api/auth/login")
+def admin_auth_login(payload: AdminLoginInput, request: Request, response: Response):
+    if not _valid_admin_credentials(payload.username, payload.password):
+        raise HTTPException(status_code=401, detail="Incorrect username or password.")
+    _set_admin_session_cookie(response, request)
+    return {"authenticated": True}
+
+
+@app.post("/api/auth/logout")
+def admin_auth_logout(response: Response):
+    response.delete_cookie(AUTH_COOKIE_NAME, path="/")
+    return {"authenticated": False}
 
 
 # Dependency to get db session
