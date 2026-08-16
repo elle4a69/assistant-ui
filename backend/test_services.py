@@ -109,7 +109,7 @@ def test_services_and_manual_bookings(monkeypatch):
         secondary_payload = {
             **booking_payload,
             "startTime": "2026-08-09T06:00:00Z",
-            "smsAccountKey": "secondary",
+            "providerKey": "anonymous",
         }
         response = client.post("/api/calendar/bookings", json=secondary_payload)
         assert response.status_code == 200

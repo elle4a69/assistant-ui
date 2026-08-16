@@ -7472,13 +7472,18 @@ class ServicesListInput(BaseModel):
 class SmsConfirmationInput(BaseModel):
     template: str
 
+BOOKING_PROVIDERS = {
+    "tori": {"name": "Tori", "sms_account_key": "primary"},
+    "anonymous": {"name": "Anonymous", "sms_account_key": "secondary"},
+}
+
 class ManualBookingInput(BaseModel):
     serviceId: str
     name: str
     phone: str
     startTime: str
     notes: Optional[str] = None
-    smsAccountKey: Literal["primary", "secondary"] = "primary"
+    providerKey: Literal["tori", "anonymous"] = "tori"
 
 
 @app.get("/api/services")
@@ -7544,6 +7549,8 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
 
     try:
         customer_phone = "+" + normalized_destination
+        provider = BOOKING_PROVIDERS[payload.providerKey]
+        sms_account_key = provider["sms_account_key"]
         start_dt = parse_business_datetime(payload.startTime)
         
         services_path = os.path.join(DATA_DIR, "services.json")
@@ -7568,7 +7575,7 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
         duration = service.get("duration", 60)
         end_dt = start_dt + timedelta(minutes=duration)
         
-        summary = f"{payload.name} - {service['name']}"
+        summary = f"{payload.name} - {service['name']} ({provider['name']})"
         booking_id = calendar_service.create_booking(
             summary=summary,
             start=start_dt,
@@ -7602,6 +7609,7 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
             **get_business_variable_values(),
             "name": payload.name,
             "service": service["name"],
+            "provider": provider["name"],
             "time": formatted_time,
             "arrival_link": arrival_link,
         }
@@ -7614,7 +7622,7 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
         screen_template = (
             "Hi {name}, your booking for {service} on {time} is confirmed!\n\n"
             "You will receive an SMS from me shortly with the address details.\n\n"
-            "If you do not receive it in the next 20 minutes, please send me a message. See you then! - Tori"
+            "If you do not receive it in the next 20 minutes, please send me a message. See you then! - {provider}"
         )
         if os.path.exists(screen_template_path):
             try:
@@ -7624,12 +7632,12 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
                 pass
         screen_text = render_template_variables(screen_template, confirmation_variables)
 
-        thread = find_thread_by_phone(db, customer_phone, payload.smsAccountKey)
+        thread = find_thread_by_phone(db, customer_phone, sms_account_key)
         if not thread:
             thread = Thread(
                 id=str(uuid.uuid4()),
                 customer_phone=customer_phone,
-                sms_account_key=payload.smsAccountKey,
+                sms_account_key=sms_account_key,
                 state="resolved",
                 priority="medium",
                 sla_due_at=start_dt + timedelta(hours=24),
@@ -7653,7 +7661,7 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
             customer_phone,
             sms_text,
             idempotency_key=confirmation_msg.id,
-            account_key=payload.smsAccountKey,
+            account_key=sms_account_key,
         )
         delivery_failure = mobilemessage_service.delivery_error(dispatch_result)
         if dispatch_result.get("status") == "skipped" or (delivery_failure and ("skipped" in str(delivery_failure).lower() or "not configured" in str(delivery_failure).lower())):

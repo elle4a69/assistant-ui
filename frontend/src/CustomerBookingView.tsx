@@ -12,7 +12,12 @@ import { Sparkles, ChevronLeft, ChevronRight, Info, X } from 'lucide-react';
 
 // Steps: 1=Service, 2=DateTime, 3=ClientDetails, 4=Success
 type Step = 1 | 2 | 3 | 4;
-type SmsAccountKey = 'primary' | 'secondary';
+type ProviderKey = 'tori' | 'anonymous';
+
+const PROVIDER_NAMES: Record<ProviderKey, string> = {
+  tori: 'Tori',
+  anonymous: 'Anonymous',
+};
 
 // ─── Timezone Helpers ─────────────────────────────────────────────────────────
 
@@ -190,7 +195,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('+61');
   const [notes, setNotes] = useState('');
-  const [smsAccountKey, setSmsAccountKey] = useState<SmsAccountKey>('primary');
+  const [providerKey, setProviderKey] = useState<ProviderKey>('tori');
   const [nameError, setNameError] = useState('');
   const [phoneError, setPhoneError] = useState('');
   const [touched, setTouched] = useState({ name: false, phone: false });
@@ -371,7 +376,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
     setName('');
     setPhone('+61');
     setNotes('');
-    setSmsAccountKey('primary');
+    setProviderKey('tori');
     setNameError('');
     setPhoneError('');
     setTouched({ name: false, phone: false });
@@ -411,7 +416,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
         phone,
         startTime: selectedSlot.startTime,
         notes: notes || undefined,
-        smsAccountKey: embedded ? 'primary' : smsAccountKey,
+        providerKey: embedded ? 'tori' : providerKey,
       });
       setConfirmationSms(res.smsSent);
       setConfirmationWarning(res.smsError || '');
@@ -464,32 +469,24 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
 
         {/* ── Header ──────────────────────────────────────────────────────── */}
         {!embedded && <div className="bg-white border-b border-slate-100 px-4 py-3 flex items-center justify-between shrink-0 z-10">
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleReset}
-              className="text-[#7a0b2e] font-serif italic font-extrabold text-xl tracking-tight cursor-pointer bg-transparent border-none p-0"
-            >
-              Tori
-            </button>
-            <fieldset className="flex items-center gap-2 border-0 p-0 m-0" aria-label="Booking confirmation SMS line">
+          <fieldset className="flex items-center gap-3 border-0 p-0 m-0" aria-label="Booking provider">
               {([
-                ['primary', 'Line 1'],
-                ['secondary', 'Line 2'],
+                ['tori', 'Tori'],
+                ['anonymous', 'Anonymous'],
               ] as const).map(([key, label]) => (
-                <label key={key} className="flex items-center gap-1 text-[10px] font-bold text-slate-600 cursor-pointer">
+                <label key={key} className="flex items-center gap-1.5 text-sm font-extrabold text-[#7a0b2e] cursor-pointer">
                   <input
                     type="radio"
-                    name="booking-sms-line"
+                    name="booking-provider"
                     value={key}
-                    checked={smsAccountKey === key}
-                    onChange={() => setSmsAccountKey(key)}
-                    className="size-3 accent-[#7a0b2e] cursor-pointer"
+                    checked={providerKey === key}
+                    onChange={() => setProviderKey(key)}
+                    className="size-3.5 accent-[#7a0b2e] cursor-pointer"
                   />
                   {label}
                 </label>
               ))}
-            </fieldset>
-          </div>
+          </fieldset>
 
           <div className="flex items-center gap-2">
             {/* Online badge */}
@@ -881,7 +878,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
                     </div>
                     <div className="flex justify-between">
                       <span className="text-slate-400">Provider:</span>
-                      <span className="font-bold text-white">Tori</span>
+                      <span className="font-bold text-white">{PROVIDER_NAMES[providerKey]}</span>
                     </div>
 
                     <div className="my-1 border-t border-white/10" />
@@ -930,11 +927,17 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
                   <div className="absolute inset-0 rounded-full bg-[#7a0b2e]/10 animate-ping" style={{ animationDuration: '3s' }}></div>
                   {/* Avatar image container */}
                   <div className="booking-crimson-outline relative size-20 overflow-hidden rounded-full shadow-md">
-                    <img 
-                      src="/tori_avatar.jpg" 
-                      alt="Tori" 
-                      className="size-full object-cover"
-                    />
+                    {providerKey === 'tori' ? (
+                      <img
+                        src="/tori_avatar.jpg"
+                        alt="Tori"
+                        className="size-full object-cover"
+                      />
+                    ) : (
+                      <div className="flex size-full items-center justify-center bg-[#7a0b2e] text-3xl font-black text-white" aria-label="Anonymous">
+                        A
+                      </div>
+                    )}
                   </div>
                   
                   {/* Online/Verified badge */}
@@ -946,7 +949,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
                 <div>
                   <h2 className="text-balance mb-1 text-lg font-bold text-[#d2143a]">Booking Confirmed!</h2>
                   <p className="text-pretty max-w-[280px] text-[11px] font-semibold leading-relaxed text-slate-300">
-                    <span className="font-extrabold text-white">{name}</span>, your booking with me on <span className="font-extrabold text-white">{selectedSlot ? formatConfirmDate(selectedSlot.startTime) : ''}</span> is confirmed!<br /><br />
+                    <span className="font-extrabold text-white">{name}</span>, your booking with <span className="font-extrabold text-white">{PROVIDER_NAMES[providerKey]}</span> on <span className="font-extrabold text-white">{selectedSlot ? formatConfirmDate(selectedSlot.startTime) : ''}</span> is confirmed!<br /><br />
                     {confirmationWarning ? 'Your booking is saved. Please message me directly for the address details.' : "You'll receive a confirmation SMS with the address details shortly."}
                   </p>
                 </div>

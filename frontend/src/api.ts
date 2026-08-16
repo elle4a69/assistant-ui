@@ -822,7 +822,7 @@ export interface BookingPayload {
   phone: string;
   startTime: string;
   notes?: string;
-  smsAccountKey?: 'primary' | 'secondary';
+  providerKey?: 'tori' | 'anonymous';
 }
 
 export async function getServices(): Promise<Service[]> {
