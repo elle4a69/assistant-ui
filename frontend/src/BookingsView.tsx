@@ -820,13 +820,13 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
 
           /* ── LIST VIEW ── */
           <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-3">
-            {bookings.length === 0 ? (
+            {dayFilteredBookings.length === 0 ? (
               <div className="py-24 text-center text-xs text-slate-400 font-bold flex flex-col items-center gap-2">
                 <Calendar className="w-12 h-12 text-slate-200 stroke-[1.5]" />
-                <span>No appointments found.</span>
+                <span>No bookings for {DAY_NAMES[selectedDate.getDay()]}</span>
               </div>
             ) : (
-              bookings.map((booking: CalendarBooking) => {
+              dayFilteredBookings.map((booking: CalendarBooking) => {
                 const dateObj = new Date(booking.startTime);
                 const endObj = new Date(booking.endTime);
                 return (
