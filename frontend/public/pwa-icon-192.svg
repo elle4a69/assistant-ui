@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192" role="img" aria-label="Tori Operations">
+  <rect width="192" height="192" rx="42" fill="#0f172a"/>
+  <circle cx="96" cy="96" r="66" fill="#10b981"/>
+  <path d="M58 60h76v22h-25v58H83V82H58z" fill="#ffffff"/>
+  <circle cx="144" cy="48" r="18" fill="#f59e0b"/>
+</svg>

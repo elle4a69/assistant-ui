@@ -13,11 +13,23 @@
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
     <script>
+      window.__toriInstallPrompt = null;
+      window.addEventListener('beforeinstallprompt', event => {
+        event.preventDefault();
+        window.__toriInstallPrompt = event;
+        window.dispatchEvent(new Event('tori-install-available'));
+      });
+      window.addEventListener('appinstalled', () => {
+        window.__toriInstallPrompt = null;
+        window.dispatchEvent(new Event('tori-app-installed'));
+      });
       if ('serviceWorker' in navigator) window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/sw.js').catch(error => console.warn('Service worker registration failed:', error));
+        navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
+          .then(registration => registration.update())
+          .catch(error => console.warn('Service worker registration failed:', error));
       });
     </script>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
