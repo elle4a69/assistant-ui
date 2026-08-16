@@ -9,3 +9,5 @@ openai
 python-dotenv
 python-multipart
 tzdata
+pywebpush
+cryptography

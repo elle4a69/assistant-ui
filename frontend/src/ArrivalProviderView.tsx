@@ -8,6 +8,7 @@ import {
   sendAdminArrivalMessage,
 } from './api';
 import { getArrivalSoundEnabled, playAirRaidSiren, setArrivalSoundEnabled } from './incomingMessageAlarm';
+import PwaControls from './PwaControls';
 
 function timeLabel(value: string | null) {
   if (!value) return '';
@@ -16,7 +17,7 @@ function timeLabel(value: string | null) {
 
 export default function ArrivalProviderView() {
   const [sessions, setSessions] = useState<ArrivalSession[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(() => new URLSearchParams(window.location.search).get('session'));
   const [selected, setSelected] = useState<ArrivalSession | null>(null);
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
@@ -40,6 +41,7 @@ export default function ArrivalProviderView() {
   }, [selectedId]);
 
   useEffect(() => {
+    if ('clearAppBadge' in navigator) void (navigator as Navigator & { clearAppBadge: () => Promise<void> }).clearAppBadge().catch(() => undefined);
     void refresh();
     const timer = window.setInterval(() => void refresh(), 2000);
     return () => window.clearInterval(timer);
@@ -89,7 +91,8 @@ export default function ArrivalProviderView() {
           <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600"><DoorOpen className="h-6 w-6" /></div>
           <div><h1 className="text-lg font-black">Customer arrivals</h1><p className="text-xs font-semibold text-slate-500">{activeCount} waiting now</p></div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <PwaControls onError={setError} />
           <button onClick={() => void toggleSound()} className={`flex flex-1 items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold sm:flex-none ${soundEnabled ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-500'}`}>
             {soundEnabled ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4" />}
             {soundEnabled ? 'Siren on' : 'Enable siren'}

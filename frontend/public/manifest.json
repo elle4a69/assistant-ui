@@ -1,18 +1,20 @@
 {
-  "name": "Tori Messages",
-  "short_name": "Messages",
-  "description": "A focused mobile inbox for customer conversations and AI replies.",
-  "start_url": "/chat",
+  "id": "/",
+  "name": "Tori Operations",
+  "short_name": "Tori Ops",
+  "description": "Customer messages, bookings and live arrival alerts.",
+  "start_url": "/arrivals",
   "scope": "/",
   "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#059669",
+  "display_override": ["standalone", "minimal-ui"],
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
   "icons": [
     {
-      "src": "https://cdn-icons-png.flaticon.com/512/3616/3616215.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "any maskable"
+      "src": "/tori_avatar.jpg",
+      "sizes": "1024x1024",
+      "type": "image/jpeg",
+      "purpose": "any"
     }
   ]
 }

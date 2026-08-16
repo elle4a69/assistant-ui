@@ -13,6 +13,7 @@ import secrets
 import string
 import json
 import shutil
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any
 
@@ -35,6 +36,16 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from sqlalchemy.exc import IntegrityError
+
+try:
+    from pywebpush import WebPushException, webpush
+    WEB_PUSH_AVAILABLE = True
+except ImportError:
+    WebPushException = Exception
+    webpush = None
+    WEB_PUSH_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
 
 # Initialize python-dotenv to load environment variables
 try:
@@ -982,6 +993,22 @@ class ArrivalChatMessage(Base):
     sender = Column(String, nullable=False)
     text = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class PushSubscription(Base):
+    """An admin device authorized to receive operational Web Push alerts."""
+    __tablename__ = "push_subscriptions"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    endpoint = Column(Text, nullable=False, unique=True)
+    p256dh = Column(Text, nullable=False)
+    auth = Column(Text, nullable=False)
+    user_agent = Column(Text, nullable=True)
+    active = Column(Boolean, nullable=False, default=True, index=True)
+    failure_count = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_success_at = Column(DateTime, nullable=True)
 
 
 class OperationsChatMessage(Base):
@@ -2326,6 +2353,23 @@ class ArrivalMessageInput(BaseModel):
         self.text = self.text.strip()
         if not self.text:
             raise ValueError("Message is required.")
+        return self
+
+
+class PushSubscriptionKeysInput(BaseModel):
+    p256dh: str = Field(min_length=20, max_length=500)
+    auth: str = Field(min_length=8, max_length=200)
+
+
+class PushSubscriptionInput(BaseModel):
+    endpoint: str = Field(min_length=20, max_length=4000)
+    expirationTime: Optional[float] = None
+    keys: PushSubscriptionKeysInput
+
+    @model_validator(mode="after")
+    def require_https_endpoint(self):
+        if not self.endpoint.startswith("https://"):
+            raise ValueError("Push subscription endpoint must use HTTPS.")
         return self
 
 
@@ -4346,6 +4390,179 @@ def _issue_arrival_invite(
     return session, invite_token
 
 
+_vapid_key_lock = threading.Lock()
+
+
+def _ensure_persistent_vapid_keypair() -> tuple[Optional[str], str]:
+    """Generate the app's signing identity once and retain it on the existing data volume."""
+    private_path = os.path.join(DATA_DIR, "vapid_private.pem")
+    public_path = os.path.join(DATA_DIR, "vapid_public.txt")
+    with _vapid_key_lock:
+        try:
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric import ec
+
+            if os.path.exists(private_path):
+                private_key = serialization.load_pem_private_key(Path(private_path).read_bytes(), password=None)
+            else:
+                private_key = ec.generate_private_key(ec.SECP256R1())
+                private_pem = private_key.private_bytes(
+                    serialization.Encoding.PEM,
+                    serialization.PrivateFormat.PKCS8,
+                    serialization.NoEncryption(),
+                )
+                temporary_path = f"{private_path}.{uuid.uuid4().hex}.tmp"
+                Path(temporary_path).write_bytes(private_pem)
+                try:
+                    os.chmod(temporary_path, 0o600)
+                except OSError:
+                    pass
+                os.replace(temporary_path, private_path)
+
+            public_raw = private_key.public_key().public_bytes(
+                serialization.Encoding.X962,
+                serialization.PublicFormat.UncompressedPoint,
+            )
+            public_key = base64.urlsafe_b64encode(public_raw).decode("ascii").rstrip("=")
+            if not os.path.exists(public_path) or Path(public_path).read_text(encoding="utf-8").strip() != public_key:
+                Path(public_path).write_text(public_key, encoding="utf-8")
+            return private_path, public_key
+        except Exception:
+            logger.exception("Could not initialize the persistent Web Push signing key")
+            return None, ""
+
+
+def _vapid_private_key() -> Optional[str]:
+    """Return a pywebpush-compatible PEM path without persisting a secret in source."""
+    configured_path = os.getenv("VAPID_PRIVATE_KEY", "").strip()
+    if configured_path:
+        return configured_path
+    encoded = os.getenv("VAPID_PRIVATE_KEY_B64", "").strip()
+    if encoded:
+        key_path = os.path.join(TMP_DIR, "vapid_private.pem")
+        try:
+            decoded = base64.b64decode(encoded, validate=True)
+            if b"PRIVATE KEY" not in decoded:
+                return None
+            if not os.path.exists(key_path) or Path(key_path).read_bytes() != decoded:
+                Path(key_path).write_bytes(decoded)
+                try:
+                    os.chmod(key_path, 0o600)
+                except OSError:
+                    pass
+            return key_path
+        except (ValueError, OSError):
+            return None
+    return _ensure_persistent_vapid_keypair()[0]
+
+
+def _vapid_public_key() -> str:
+    configured = os.getenv("VAPID_PUBLIC_KEY", "").strip()
+    return configured or _ensure_persistent_vapid_keypair()[1]
+
+
+def _push_configured() -> bool:
+    return bool(
+        WEB_PUSH_AVAILABLE
+        and _vapid_public_key()
+        and _vapid_private_key()
+    )
+
+
+def send_arrival_push_notifications(session_id: str) -> None:
+    """Best-effort delivery: an alert failure must never undo an arrival."""
+    if not _push_configured() or webpush is None:
+        return
+    db = SessionLocal()
+    try:
+        session = db.query(ArrivalSession).filter(ArrivalSession.id == session_id).first()
+        if not session:
+            return
+        booking = _arrival_booking(db, session.booking_id)
+        summary = booking.summary if booking else "A customer"
+        payload = json.dumps({
+            "type": "customer-arrival",
+            "title": "Customer has arrived",
+            "body": f"{summary} is waiting. Tap to open the arrival chat.",
+            "url": f"/arrivals?session={session.id}",
+            "tag": f"arrival-{session.id}",
+            "sessionId": session.id,
+        })
+        private_key = _vapid_private_key()
+        vapid_contact = os.getenv("VAPID_CONTACT", "mailto:admin@assistant-ui-hub.fly.dev")
+        now = datetime.utcnow()
+        for subscription in db.query(PushSubscription).filter(PushSubscription.active.is_(True)).all():
+            try:
+                webpush(
+                    subscription_info={
+                        "endpoint": subscription.endpoint,
+                        "keys": {"p256dh": subscription.p256dh, "auth": subscription.auth},
+                    },
+                    data=payload,
+                    vapid_private_key=private_key,
+                    # pywebpush may add endpoint-specific audience/expiry claims,
+                    # so each device delivery receives a fresh dictionary.
+                    vapid_claims={"sub": vapid_contact},
+                    timeout=10,
+                )
+                subscription.failure_count = 0
+                subscription.last_success_at = now
+                subscription.updated_at = now
+            except Exception as exc:
+                response = getattr(exc, "response", None)
+                status_code = getattr(response, "status_code", None)
+                if status_code in {404, 410}:
+                    subscription.active = False
+                else:
+                    subscription.failure_count = (subscription.failure_count or 0) + 1
+                    if subscription.failure_count >= 5:
+                        subscription.active = False
+                subscription.updated_at = now
+                logger.warning("Web Push delivery failed (status=%s)", status_code or "unknown")
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Arrival Web Push dispatch failed")
+    finally:
+        db.close()
+
+
+@app.get("/api/push/config")
+def get_push_config(db: Session = Depends(get_db)):
+    return {
+        "supported": WEB_PUSH_AVAILABLE,
+        "configured": _push_configured(),
+        "publicKey": _vapid_public_key() if WEB_PUSH_AVAILABLE else "",
+        "activeSubscriptions": db.query(PushSubscription).filter(PushSubscription.active.is_(True)).count(),
+    }
+
+
+@app.post("/api/push/subscriptions")
+def save_push_subscription(payload: PushSubscriptionInput, request: Request, db: Session = Depends(get_db)):
+    if not _push_configured():
+        raise HTTPException(status_code=503, detail="Push notifications are not configured.")
+    now = datetime.utcnow()
+    subscription = db.query(PushSubscription).filter(PushSubscription.endpoint == payload.endpoint).first()
+    if not subscription:
+        subscription = PushSubscription(endpoint=payload.endpoint, created_at=now)
+        db.add(subscription)
+    subscription.p256dh = payload.keys.p256dh
+    subscription.auth = payload.keys.auth
+    subscription.user_agent = (request.headers.get("User-Agent") or "")[:1000]
+    subscription.active = True
+    subscription.failure_count = 0
+    subscription.updated_at = now
+    db.commit()
+    return {"status": "subscribed"}
+
+
+@app.delete("/api/push/subscriptions")
+def delete_push_subscription(payload: PushSubscriptionInput, db: Session = Depends(get_db)):
+    db.query(PushSubscription).filter(PushSubscription.endpoint == payload.endpoint).delete(synchronize_session=False)
+    db.commit()
+    return {"status": "unsubscribed"}
+
+
 @app.get("/a/{invite_token}", include_in_schema=False)
 def follow_arrival_short_link(invite_token: str, db: Session = Depends(get_db)):
     if not re.fullmatch(r"[0-9A-Za-z]{16,17}", invite_token):
@@ -4386,7 +4603,11 @@ def create_arrival_invite(
 
 
 @app.post("/api/arrival/activate")
-def activate_arrival(payload: ArrivalActivateInput, db: Session = Depends(get_db)):
+def activate_arrival(
+    payload: ArrivalActivateInput,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     """Atomically consume an invitation. A token can never trigger arrival twice."""
     now = datetime.utcnow()
     invite_hash = _hash_arrival_token(payload.inviteToken)
@@ -4415,6 +4636,7 @@ def activate_arrival(payload: ArrivalActivateInput, db: Session = Depends(get_db
     ))
     db.commit()
     session = db.query(ArrivalSession).filter(ArrivalSession.id == candidate.id).one()
+    background_tasks.add_task(send_arrival_push_notifications, session.id)
     return {"clientToken": client_token, "session": _arrival_payload(db, session)}
 
 

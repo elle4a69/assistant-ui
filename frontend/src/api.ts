@@ -561,6 +561,37 @@ export async function closeArrivalSession(sessionId: string): Promise<ArrivalSes
   return response.json();
 }
 
+export interface PushConfig {
+  supported: boolean;
+  configured: boolean;
+  publicKey: string;
+  activeSubscriptions: number;
+}
+
+export async function getPushConfig(): Promise<PushConfig> {
+  const response = await fetch(`${API_BASE}/api/push/config`, { cache: 'no-store' });
+  if (!response.ok) throw new Error('Could not load push notification settings.');
+  return response.json();
+}
+
+export async function savePushSubscription(subscription: PushSubscriptionJSON): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/push/subscriptions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(subscription),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Could not enable push alerts.');
+}
+
+export async function deletePushSubscription(subscription: PushSubscriptionJSON): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/push/subscriptions`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(subscription),
+  });
+  if (!response.ok) throw new Error('Could not disable push alerts.');
+}
+
 export interface ManualLearningEntry {
   id: string;
   type: 'manual_guidance';
