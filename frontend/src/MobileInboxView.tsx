@@ -655,12 +655,12 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                   <button
                     type="button"
                     role="switch"
-                    aria-checked={thread.autoReplyEnabled}
-                    disabled={changingThreadAi}
+                    aria-checked={thread?.autoReplyEnabled ?? false}
+                    disabled={changingThreadAi || !thread}
                     onClick={toggleThreadAi}
-                    className={`relative h-4 w-7 rounded-full p-0 transition-colors ${thread.autoReplyEnabled ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                    className={`relative h-4 w-7 rounded-full p-0 transition-colors ${thread?.autoReplyEnabled ? 'bg-emerald-500' : 'bg-slate-300'}`}
                   >
-                    <span className={`absolute left-0.5 top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${thread.autoReplyEnabled ? 'translate-x-3' : 'translate-x-0'}`} />
+                    <span className={`absolute left-0.5 top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${thread?.autoReplyEnabled ? 'translate-x-3' : 'translate-x-0'}`} />
                   </button>
                 </label>
                 <button
