@@ -178,6 +178,9 @@ function StepPane({ children }: { children: React.ReactNode }) {
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function CustomerBookingView({ embedded = false }: { embedded?: boolean }) {
+  const bookingParams = new URLSearchParams(window.location.search);
+  const prefilledPhone = bookingParams.get('phone')?.trim() || '+61';
+  const prefilledProvider: ProviderKey = bookingParams.get('provider') === 'anonymous' ? 'anonymous' : 'tori';
   const [step, setStep] = useState<Step>(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -193,9 +196,9 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
 
   // Client form
   const [name, setName] = useState('');
-  const [phone, setPhone] = useState('+61');
+  const [phone, setPhone] = useState(prefilledPhone);
   const [notes, setNotes] = useState('');
-  const [providerKey, setProviderKey] = useState<ProviderKey>('tori');
+  const [providerKey, setProviderKey] = useState<ProviderKey>(prefilledProvider);
   const [nameError, setNameError] = useState('');
   const [phoneError, setPhoneError] = useState('');
   const [touched, setTouched] = useState({ name: false, phone: false });
@@ -374,9 +377,9 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
     setSelectedService(null);
     setSelectedSlot(null);
     setName('');
-    setPhone('+61');
+    setPhone(prefilledPhone);
     setNotes('');
-    setProviderKey('tori');
+    setProviderKey(prefilledProvider);
     setNameError('');
     setPhoneError('');
     setTouched({ name: false, phone: false });

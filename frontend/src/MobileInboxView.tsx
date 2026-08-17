@@ -1,6 +1,7 @@
 import { FormEvent, TouchEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
+  CalendarPlus,
   Check,
   CheckCheck,
   MessageCircle,
@@ -15,6 +16,7 @@ import {
   getThread,
   listThreads,
   sendThreadReply,
+  toggleAutoresponder,
   updateSettings,
   catchUpMissedMessage,
   approveDraft,
@@ -67,6 +69,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const [showAvatars, setShowAvatars] = useState<boolean | null>(null)
   const [loading, setLoading] = useState(true)
   const [sending, setSending] = useState(false)
+  const [changingThreadAi, setChangingThreadAi] = useState(false)
   const [catchingUp, setCatchingUp] = useState(false)
   const [notice, setNotice] = useState('')
   const [reviewingDraftId, setReviewingDraftId] = useState<string | null>(null)
@@ -297,6 +300,33 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
       sendingRef.current = false
       setSending(false)
     }
+  }
+
+  const toggleThreadAi = async () => {
+    if (!thread || changingThreadAi) return
+    const enabled = !thread.autoReplyEnabled
+    setChangingThreadAi(true)
+    setThread(current => current ? { ...current, autoReplyEnabled: enabled } : current)
+    try {
+      const result = await toggleAutoresponder(thread.id, enabled)
+      setThread(current => current ? { ...current, autoReplyEnabled: result.autoReplyEnabled } : current)
+      await loadThreads()
+      setError('')
+    } catch {
+      setThread(current => current ? { ...current, autoReplyEnabled: !enabled } : current)
+      setError('Could not change AI for this conversation')
+    } finally {
+      setChangingThreadAi(false)
+    }
+  }
+
+  const openBookingForThread = () => {
+    if (!thread) return
+    const params = new URLSearchParams({
+      phone: thread.customerPhone,
+      provider: thread.smsAccountKey === 'secondary' ? 'anonymous' : 'tori',
+    })
+    window.location.assign(`/booking?${params.toString()}`)
   }
 
   const answerInformationRequest = async () => {
@@ -595,31 +625,52 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
               </div>
             )}
 
-            <form
-              onSubmit={sendMessage}
-              className="flex shrink-0 items-end gap-2 border-t border-slate-200 bg-white px-3 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]"
-            >
-              <textarea
-                value={composer}
-                onChange={event => setComposer(event.target.value)}
-                onKeyDown={event => {
-                  if (event.key === 'Enter' && !event.shiftKey) {
-                    event.preventDefault()
-                    event.currentTarget.form?.requestSubmit()
-                  }
-                }}
-                rows={1}
-                placeholder="Message"
-                className="max-h-28 min-h-11 flex-1 resize-none rounded-3xl border border-slate-300 bg-slate-50 px-4 py-2.5 text-[15px] outline-none focus:border-emerald-500 focus:bg-white"
-              />
-              <button
-                type="submit"
-                disabled={!composer.trim() || sending}
-                className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-emerald-600 text-white shadow-sm disabled:bg-slate-300"
-                aria-label="Send message"
-              >
-                {sending ? <Wifi className="h-4 w-4 animate-pulse" /> : <Send className="h-5 w-5" />}
-              </button>
+            <form onSubmit={sendMessage} className="shrink-0 border-t border-slate-200 bg-white px-3 py-2 pb-[max(0.35rem,env(safe-area-inset-bottom))]">
+              <div className="flex items-end gap-2">
+                <textarea
+                  value={composer}
+                  onChange={event => setComposer(event.target.value)}
+                  onKeyDown={event => {
+                    if (event.key === 'Enter' && !event.shiftKey) {
+                      event.preventDefault()
+                      event.currentTarget.form?.requestSubmit()
+                    }
+                  }}
+                  rows={1}
+                  placeholder="Message"
+                  className="max-h-28 min-h-11 flex-1 resize-none rounded-3xl border border-slate-300 bg-slate-50 px-4 py-2.5 text-[15px] outline-none focus:border-emerald-500 focus:bg-white"
+                />
+                <button
+                  type="submit"
+                  disabled={!composer.trim() || sending}
+                  className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-emerald-600 text-white shadow-sm disabled:bg-slate-300"
+                  aria-label="Send message"
+                >
+                  {sending ? <Wifi className="h-4 w-4 animate-pulse" /> : <Send className="h-5 w-5" />}
+                </button>
+              </div>
+              <div className="mt-1.5 flex h-6 items-center justify-between gap-2 px-1">
+                <label className="flex items-center gap-1.5 text-[10px] font-extrabold text-slate-500">
+                  AI replies
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={thread.autoReplyEnabled}
+                    disabled={changingThreadAi}
+                    onClick={toggleThreadAi}
+                    className={`relative h-4 w-7 rounded-full p-0 transition-colors ${thread.autoReplyEnabled ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                  >
+                    <span className={`absolute left-0.5 top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${thread.autoReplyEnabled ? 'translate-x-3' : 'translate-x-0'}`} />
+                  </button>
+                </label>
+                <button
+                  type="button"
+                  onClick={openBookingForThread}
+                  className="flex h-6 items-center gap-1 rounded-md bg-indigo-50 px-2 text-[10px] font-extrabold text-indigo-700"
+                >
+                  <CalendarPlus className="h-3 w-3" /> Booking
+                </button>
+              </div>
             </form>
           </section>
         )}
