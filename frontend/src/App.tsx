@@ -8,9 +8,9 @@ import MobileInboxView from './MobileInboxView'
 import BootcampView from './BootcampView'
 import ArrivalClientView from './ArrivalClientView'
 import ArrivalProviderView from './ArrivalProviderView'
-import { getAdminAuthStatus, listArrivalSessions, listThreads, loginAdmin, logoutAdmin } from './api'
-import { processArrivalSessionSnapshot, processArrivalThreadSnapshot, unlockIncomingAlarmAudio } from './incomingMessageAlarm'
-import { UserCheck, Smartphone, Settings, Calendar, MessagesSquare, CalendarCheck, Bot, DoorOpen, LogOut, LockKeyhole } from 'lucide-react'
+import { getAdminAuthStatus, listArrivalSessions, listBookings, listThreads, loginAdmin, logoutAdmin, type ArrivalSession, type CalendarBooking } from './api'
+import { playBookingAlarm, processArrivalSessionSnapshot, processArrivalThreadSnapshot, processBookingSnapshot, stopIncomingAlarm, unlockIncomingAlarmAudio } from './incomingMessageAlarm'
+import { UserCheck, Smartphone, Settings, Calendar, MessagesSquare, CalendarCheck, Bot, DoorOpen, LogOut, LockKeyhole, BellRing } from 'lucide-react'
 
 class BootcampErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
@@ -44,6 +44,8 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
   };
 
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(getThreadIdFromUrl());
+  const [newBookingAlert, setNewBookingAlert] = useState<CalendarBooking | null>(null);
+  const [customerArrivalAlert, setCustomerArrivalAlert] = useState<ArrivalSession | null>(null);
 
   const [view, setView] = useState<'agent' | 'customer' | 'settings' | 'booking' | 'bookings' | 'chat' | 'bootcamp' | 'arrival' | 'arrivals'>(
     initialPath === '/arrival' ? 'arrival'
@@ -93,12 +95,26 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
     const pollForIncomingMessages = async () => {
       while (active) {
         try {
-          const [threads, arrivalSessions] = await Promise.all([
+          const [threads, arrivalSessions, bookings] = await Promise.all([
             listThreads(),
             listArrivalSessions(),
+            listBookings(),
           ]);
           processArrivalThreadSnapshot(threads);
-          processArrivalSessionSnapshot(arrivalSessions);
+          const newArrivals = processArrivalSessionSnapshot(arrivalSessions);
+          if (newArrivals.length > 0) {
+            setCustomerArrivalAlert(newArrivals[0]);
+          }
+          const newBookings = processBookingSnapshot(bookings);
+          if (newBookings.length > 0) {
+            const newestBooking = [...newBookings].sort(
+              (left, right) => new Date(right.startTime).getTime() - new Date(left.startTime).getTime(),
+            )[0];
+            setNewBookingAlert(newestBooking);
+            void playBookingAlarm().catch((error) => {
+              console.warn('New booking sound was blocked by the browser:', error);
+            });
+          }
         } catch (error) {
           console.warn('Customer arrival alarm check failed:', error);
         }
@@ -143,6 +159,26 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
 
   // Only the public booking widget page is strictly standalone (no portal headers/navigation)
   const isStandalone = isStandaloneBooking || isStandaloneArrival;
+
+  const dismissBookingAlert = () => {
+    stopIncomingAlarm();
+    setNewBookingAlert(null);
+  };
+
+  const openNewBooking = () => {
+    dismissBookingAlert();
+    navigateTo('bookings', '/bookings');
+  };
+
+  const dismissArrivalAlert = () => {
+    stopIncomingAlarm();
+    setCustomerArrivalAlert(null);
+  };
+
+  const openArrival = () => {
+    dismissArrivalAlert();
+    navigateTo('arrivals', '/arrivals');
+  };
 
   return (
     <div className={`flex w-full flex-col bg-slate-900 ${isEmbeddedBooking ? 'min-h-0 overflow-visible' : 'h-[100dvh] overflow-hidden'}`}>
@@ -296,6 +332,46 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
             })}
           </div>
         </nav>
+      )}
+
+      {newBookingAlert && !isStandalone && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="new-booking-title">
+          <div className="w-full max-w-sm overflow-hidden rounded-3xl border-4 border-amber-400 bg-white text-center shadow-2xl">
+            <div className="bg-amber-400 px-5 py-5 text-slate-950">
+              <BellRing className="mx-auto h-12 w-12 animate-bounce" />
+              <h2 id="new-booking-title" className="mt-2 text-2xl font-black uppercase tracking-tight">New Booking</h2>
+            </div>
+            <div className="space-y-2 px-6 py-5 text-slate-800">
+              <p className="text-lg font-black">{newBookingAlert.summary || 'Appointment'}</p>
+              <p className="text-sm font-bold">{new Date(newBookingAlert.startTime).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}</p>
+              {newBookingAlert.customerPhone && <p className="text-sm text-slate-500">{newBookingAlert.customerPhone}</p>}
+            </div>
+            <div className="grid grid-cols-2 gap-3 px-5 pb-5">
+              <button type="button" onClick={dismissBookingAlert} className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-black text-slate-600">Dismiss</button>
+              <button type="button" onClick={openNewBooking} className="rounded-xl bg-indigo-600 px-4 py-3 text-sm font-black text-white">View booking</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {customerArrivalAlert && !isStandalone && (
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="customer-arrival-title">
+          <div className="w-full max-w-sm overflow-hidden rounded-3xl border-4 border-emerald-400 bg-white text-center shadow-2xl">
+            <div className="bg-emerald-500 px-5 py-5 text-white">
+              <DoorOpen className="mx-auto h-12 w-12 animate-pulse" />
+              <h2 id="customer-arrival-title" className="mt-2 text-2xl font-black uppercase tracking-tight">Customer Arrived</h2>
+            </div>
+            <div className="space-y-2 px-6 py-5 text-slate-800">
+              <p className="text-lg font-black">{customerArrivalAlert.booking.summary || 'Customer booking'}</p>
+              {customerArrivalAlert.booking.customerPhone && <p className="text-sm text-slate-500">{customerArrivalAlert.booking.customerPhone}</p>}
+              <p className="text-sm font-bold text-emerald-700">The customer has activated their arrival link.</p>
+            </div>
+            <div className="grid grid-cols-2 gap-3 px-5 pb-5">
+              <button type="button" onClick={dismissArrivalAlert} className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-black text-slate-600">Dismiss</button>
+              <button type="button" onClick={openArrival} className="rounded-xl bg-emerald-600 px-4 py-3 text-sm font-black text-white">Open arrivals</button>
+            </div>
+          </div>
+        </div>
       )}
 
     </div>
