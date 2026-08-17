@@ -2792,8 +2792,13 @@ def confirm_conversational_booking(
         return {"status": "rejected", "reason": availability_error}, False
 
     end = start + timedelta(minutes=duration)
+    booking_provider_name = "Anonymous" if thread.sms_account_key == "secondary" else "Tori"
+    booking_summary = (
+        f"{proposal['customer_name']} - {proposal['service_name']} "
+        f"({booking_provider_name})"
+    )
     booking_id = calendar_service.create_booking(
-        summary=f"{proposal['customer_name']} - {proposal['service_name']}",
+        summary=booking_summary,
         start=start,
         end=end,
         customer_phone=thread.customer_phone,
@@ -2804,7 +2809,7 @@ def confirm_conversational_booking(
     arrival_session, arrival_token = _issue_arrival_invite(
         db,
         booking_id=str(booking_id),
-        summary=f"{proposal['customer_name']} - {proposal['service_name']}",
+        summary=booking_summary,
         customer_phone=thread.customer_phone,
         start_time=start,
         end_time=end,
@@ -7553,6 +7558,11 @@ class ServicesListInput(BaseModel):
 class SmsConfirmationInput(BaseModel):
     template: str
 
+class BookingReminderInput(BaseModel):
+    enabled: bool = True
+    minutesBefore: int = Field(default=60, ge=5, le=10080)
+    template: str = Field(min_length=1, max_length=4000)
+
 BOOKING_PROVIDERS = {
     "tori": {"name": "Tori", "sms_account_key": "primary"},
     "anonymous": {"name": "Anonymous", "sms_account_key": "secondary"},
@@ -7615,6 +7625,138 @@ def save_sms_confirmation(payload: SmsConfirmationInput):
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save SMS confirmation template: {e}")
+
+BOOKING_REMINDER_CONFIG_PATH = os.path.join(DATA_DIR, "booking_reminder.json")
+BOOKING_REMINDER_SENT_PATH = os.path.join(DATA_DIR, "booking_reminders_sent.json")
+BOOKING_REMINDER_LOCK = threading.Lock()
+DEFAULT_BOOKING_REMINDER_TEMPLATE = (
+    "Hi {name}, just a reminder that your booking for {service} is at {time}. "
+    "See you then. - {provider}"
+)
+
+def load_booking_reminder_config() -> Dict[str, Any]:
+    default = {"enabled": True, "minutesBefore": 60, "template": DEFAULT_BOOKING_REMINDER_TEMPLATE}
+    try:
+        if os.path.exists(BOOKING_REMINDER_CONFIG_PATH):
+            with open(BOOKING_REMINDER_CONFIG_PATH, "r", encoding="utf-8") as handle:
+                saved = json.load(handle)
+            return {
+                "enabled": bool(saved.get("enabled", True)),
+                "minutesBefore": min(10080, max(5, int(saved.get("minutesBefore", 60)))),
+                "template": str(saved.get("template") or DEFAULT_BOOKING_REMINDER_TEMPLATE),
+            }
+    except Exception as exc:
+        logger.warning("Could not load booking reminder settings: %s", type(exc).__name__)
+    return default
+
+@app.get("/api/settings/booking-reminder")
+def get_booking_reminder_settings():
+    return load_booking_reminder_config()
+
+@app.post("/api/settings/booking-reminder")
+def save_booking_reminder_settings(payload: BookingReminderInput):
+    os.makedirs(os.path.dirname(BOOKING_REMINDER_CONFIG_PATH), exist_ok=True)
+    with open(BOOKING_REMINDER_CONFIG_PATH, "w", encoding="utf-8") as handle:
+        json.dump(payload.model_dump(), handle, indent=2)
+    return {"status": "success"}
+
+def _booking_reminder_parts(summary: str) -> tuple[str, str, str, str]:
+    provider_key = "anonymous" if re.search(r"\(Anonymous\)\s*$", summary or "", re.IGNORECASE) else "tori"
+    provider = BOOKING_PROVIDERS[provider_key]
+    cleaned = re.sub(r"\s*\((?:Tori|Anonymous)\)\s*$", "", summary or "", flags=re.IGNORECASE)
+    if " - " in cleaned:
+        name, service = cleaned.split(" - ", 1)
+    else:
+        name, service = "there", cleaned or "your appointment"
+    return name.strip(), service.strip(), provider["name"], provider["sms_account_key"]
+
+def _read_sent_booking_reminders() -> set[str]:
+    try:
+        if os.path.exists(BOOKING_REMINDER_SENT_PATH):
+            with open(BOOKING_REMINDER_SENT_PATH, "r", encoding="utf-8") as handle:
+                return set(json.load(handle))
+    except Exception:
+        pass
+    return set()
+
+def _write_sent_booking_reminders(sent: set[str]) -> None:
+    os.makedirs(os.path.dirname(BOOKING_REMINDER_SENT_PATH), exist_ok=True)
+    temporary_path = BOOKING_REMINDER_SENT_PATH + ".tmp"
+    with open(temporary_path, "w", encoding="utf-8") as handle:
+        json.dump(sorted(sent), handle, indent=2)
+    os.replace(temporary_path, BOOKING_REMINDER_SENT_PATH)
+
+def process_due_booking_reminders() -> None:
+    config = load_booking_reminder_config()
+    if not config["enabled"]:
+        return
+    now = datetime.now()
+    due_limit = now + timedelta(minutes=config["minutesBefore"])
+    db = SessionLocal()
+    try:
+        due_bookings = db.query(CalendarEvent).filter(
+            CalendarEvent.status == "scheduled",
+            CalendarEvent.start_time > now,
+            CalendarEvent.start_time <= due_limit,
+            CalendarEvent.customer_phone.isnot(None),
+        ).order_by(CalendarEvent.start_time.asc()).all()
+        with BOOKING_REMINDER_LOCK:
+            sent = _read_sent_booking_reminders()
+            for booking in due_bookings:
+                if booking.id in sent:
+                    continue
+                name, service, provider_name, account_key = _booking_reminder_parts(booking.summary)
+                formatted_time = booking.start_time.strftime("%A, %b %d at %I:%M %p")
+                variables = {
+                    **get_business_variable_values(),
+                    "name": name,
+                    "service": service,
+                    "provider": provider_name,
+                    "provider_name": provider_name,
+                    "time": formatted_time,
+                    "date": booking.start_time.strftime("%A, %b %d"),
+                    "customer_phone": booking.customer_phone or "",
+                }
+                sms_text = render_template_variables(config["template"], variables)
+                reminder_key = f"booking-reminder:{booking.id}"
+                result = mobilemessage_service.send_sms(
+                    booking.customer_phone,
+                    sms_text,
+                    idempotency_key=reminder_key,
+                    account_key=account_key,
+                )
+                failure = mobilemessage_service.delivery_error(result)
+                if failure:
+                    logger.warning("Booking reminder delivery failed for booking %s", booking.id)
+                    continue
+                thread = find_thread_by_phone(db, booking.customer_phone, account_key)
+                if thread:
+                    db.add(Message(
+                        id=str(uuid.uuid4()),
+                        thread_id=thread.id,
+                        role="agent",
+                        text=sms_text,
+                        provider_message_id=reminder_key,
+                        at=datetime.utcnow(),
+                    ))
+                    thread.updated_at = datetime.utcnow()
+                sent.add(booking.id)
+                _write_sent_booking_reminders(sent)
+            db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Booking reminder check failed: %s", type(exc).__name__)
+    finally:
+        db.close()
+
+async def booking_reminder_worker() -> None:
+    while True:
+        await asyncio.to_thread(process_due_booking_reminders)
+        await asyncio.sleep(30)
+
+@app.on_event("startup")
+async def start_booking_reminder_worker():
+    asyncio.create_task(booking_reminder_worker())
 
 @app.post("/api/calendar/bookings")
 def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get_db)):

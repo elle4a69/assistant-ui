@@ -21,6 +21,9 @@ import {
   saveServices,
   getSmsTemplate,
   saveSmsTemplate,
+  getBookingReminderConfig,
+  saveBookingReminderConfig,
+  BookingReminderConfig,
   Service,
   getWorkingHours,
   saveWorkingHours,
@@ -155,6 +158,12 @@ export default function SettingsView() {
   const [services, setServices] = useState<Service[]>([]);
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
   const [smsTemplate, setSmsTemplate] = useState('');
+  const [bookingReminder, setBookingReminder] = useState<BookingReminderConfig>({
+    enabled: true,
+    minutesBefore: 60,
+    template: 'Hi {name}, just a reminder that your booking for {service} is at {time}. See you then. - {provider}',
+  });
+  const [savingBookingReminder, setSavingBookingReminder] = useState(false);
   const [savingServices, setSavingServices] = useState(false);
   const [savingSmsTemplate, setSavingSmsTemplate] = useState(false);
 
@@ -235,6 +244,7 @@ export default function SettingsView() {
     try { setServices(await retryOnce(getServices)); } catch (e) { console.error('services fetch failed:', e); }
     try { setBusinessVariables(await retryOnce(getBusinessVariables)); } catch (e) { console.error('business variables fetch failed:', e); }
     try { setSmsTemplate((await retryOnce(getSmsTemplate)).template); } catch (e) { console.error('sms template fetch failed:', e); }
+    try { setBookingReminder(await retryOnce(getBookingReminderConfig)); } catch (e) { console.error('booking reminder settings fetch failed:', e); }
     try { setWorkingHours(await retryOnce(getWorkingHours)); } catch (e) { console.error('working hours fetch failed:', e); }
     try {
       const mm = await retryOnce(getMobileMessageConfig);
@@ -641,6 +651,19 @@ export default function SettingsView() {
       triggerBanner('error', 'Failed to save SMS confirmation template.');
     } finally {
       setSavingSmsTemplate(false);
+    }
+  };
+
+  const handleSaveBookingReminder = async () => {
+    setSavingBookingReminder(true);
+    try {
+      await saveBookingReminderConfig(bookingReminder);
+      triggerBanner('success', 'Booking reminder settings saved.');
+    } catch (err) {
+      console.error(err);
+      triggerBanner('error', 'Failed to save booking reminder settings.');
+    } finally {
+      setSavingBookingReminder(false);
     }
   };
 
@@ -1499,6 +1522,31 @@ export default function SettingsView() {
                       {savingSmsTemplate ? 'Saving...' : 'Save Template'}
                     </button>
                   </div>
+                </div>
+
+                <div className="flex flex-col gap-3 pb-5 border-b border-slate-150">
+                  <div>
+                    <h3 className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
+                      <BellRing className="w-3.5 h-3.5 text-amber-600" />
+                      Automatic Booking Reminder
+                    </h3>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Send one reminder before each booking from its selected provider SMS line. Tokens include <code>{`{name}`}</code>, <code>{`{service}`}</code>, <code>{`{time}`}</code>, <code>{`{date}`}</code>, <code>{`{provider}`}</code> and all saved business variables.</p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-4">
+                    <label className="flex items-center gap-2 text-xs font-bold text-slate-700">
+                      <input type="checkbox" checked={bookingReminder.enabled} onChange={event => setBookingReminder(current => ({ ...current, enabled: event.target.checked }))} className="h-4 w-4 accent-indigo-600" />
+                      Enabled
+                    </label>
+                    <label className="flex items-center gap-2 text-xs font-bold text-slate-700">
+                      Send
+                      <input type="number" min={5} max={10080} value={bookingReminder.minutesBefore} onChange={event => setBookingReminder(current => ({ ...current, minutesBefore: Math.max(5, Number(event.target.value) || 60) }))} className="w-20 rounded-lg border border-slate-300 px-2 py-1.5 text-xs" />
+                      minutes before
+                    </label>
+                  </div>
+                  <textarea value={bookingReminder.template} onChange={event => setBookingReminder(current => ({ ...current, template: event.target.value }))} rows={3} className="w-full font-mono text-[11px] p-2.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                  <button onClick={handleSaveBookingReminder} disabled={savingBookingReminder || !bookingReminder.template.trim()} className="self-end rounded-lg bg-amber-500 px-4 py-2 text-xs font-bold text-slate-950 hover:bg-amber-400 disabled:opacity-50">
+                    {savingBookingReminder ? 'Saving...' : 'Save Reminder'}
+                  </button>
                 </div>
 
                 {/* Services List Section */}

@@ -899,6 +899,28 @@ export async function saveSmsTemplate(template: string): Promise<{ status: strin
   return response.json();
 }
 
+export interface BookingReminderConfig {
+  enabled: boolean;
+  minutesBefore: number;
+  template: string;
+}
+
+export async function getBookingReminderConfig(): Promise<BookingReminderConfig> {
+  const response = await apiFetch(`${API_BASE}/api/settings/booking-reminder`, { cache: 'no-store' });
+  if (!response.ok) throw new Error('Failed to load booking reminder settings');
+  return response.json();
+}
+
+export async function saveBookingReminderConfig(config: BookingReminderConfig): Promise<{ status: string }> {
+  const response = await apiFetch(`${API_BASE}/api/settings/booking-reminder`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+  if (!response.ok) throw new Error('Failed to save booking reminder settings');
+  return response.json();
+}
+
 export async function createBooking(booking: BookingPayload): Promise<{ status: string; smsSent: string; smsError?: string | null }> {
   const response = await apiFetch(`${API_BASE}/api/calendar/bookings`, {
     method: 'POST',
