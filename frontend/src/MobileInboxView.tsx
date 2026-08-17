@@ -626,7 +626,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
             )}
 
             <form onSubmit={sendMessage} className="shrink-0 border-t border-slate-200 bg-white px-3 pt-1 pb-0">
-              <div className="mb-0.5 flex h-6 items-center justify-between gap-2 px-1">
+              <div className="relative mb-0.5 flex h-6 items-center px-1">
                 <label className="flex items-center gap-1.5 text-[10px] font-extrabold text-slate-500">
                   AI replies
                   <button
@@ -643,7 +643,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                 <button
                   type="button"
                   onClick={openBookingForThread}
-                  className="flex h-6 items-center gap-1 rounded-md bg-indigo-50 px-2 text-[10px] font-extrabold text-indigo-700"
+                  className="absolute left-1/2 flex h-6 -translate-x-1/2 items-center gap-1 rounded-md bg-indigo-50 px-2 text-[10px] font-extrabold text-indigo-700"
                 >
                   <CalendarPlus className="h-3 w-3" /> Booking
                 </button>
