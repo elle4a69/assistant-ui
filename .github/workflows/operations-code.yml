@@ -222,7 +222,7 @@ jobs:
           PY
           )
           echo "::add-mask::$worker_credential"
-          export OPENAI_API_KEY="$worker_credential"
+          export CODEX_API_KEY="$worker_credential"
           rm -f "$RUNNER_TEMP/operations-claim.json"
           unset worker_credential
           codex exec \
@@ -233,7 +233,7 @@ jobs:
             --ephemeral \
             --color never \
             - < "$RUNNER_TEMP/operations-prompt.txt"
-          unset OPENAI_API_KEY
+          unset CODEX_API_KEY
 
       - name: Run independent application checks
         if: env.WORK_KIND == 'coding'
