@@ -6975,7 +6975,7 @@ def _operations_verified_queue_run(oidc_token: str) -> tuple[Dict[str, Any], Dic
     event_name = str(claims.get("event_name") or "")
     if (
         any(str(claims.get(name) or "") != expected for name, expected in required_claims.items())
-        or event_name not in {"schedule", "workflow_dispatch"}
+        or event_name not in {"push", "schedule", "workflow_dispatch"}
         or not re.fullmatch(r"[0-9a-f]{40}", claim_sha)
         or workflow_sha != claim_sha
     ):

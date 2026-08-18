@@ -2,6 +2,9 @@ name: Operations Cloud Coding
 run-name: Operations cloud queue
 
 on:
+  push:
+    branches:
+      - main
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
@@ -10,6 +13,7 @@ permissions:
   actions: write
   contents: write
   id-token: write
+  statuses: write
 
 concurrency:
   group: operations-cloud-coding
@@ -27,19 +31,35 @@ jobs:
           CLAIM_ENDPOINT: https://assistant-ui-hub.fly.dev/api/internal/operations/worker-claim
         run: |
           set -euo pipefail
-          oidc_response=$(curl --fail --silent --show-error \
-            --header "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=assistant-ui-hub-operations")
-          oidc_token=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<< "$oidc_response")
           umask 077
-          curl --fail --silent --show-error \
-            --retry 2 --retry-delay 2 --retry-all-errors \
-            --request POST \
-            --header "Authorization: Bearer $oidc_token" \
-            --header "Content-Type: application/json" \
-            --data '{}' \
-            "$CLAIM_ENDPOINT" > "$RUNNER_TEMP/operations-claim.json"
-          unset oidc_response oidc_token
+          claim_status=000
+          for attempt in $(seq 1 90); do
+            oidc_response=$(curl --fail --silent --show-error \
+              --header "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=assistant-ui-hub-operations")
+            oidc_token=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<< "$oidc_response")
+            claim_status=$(curl --silent --show-error \
+              --output "$RUNNER_TEMP/operations-claim.json" \
+              --write-out '%{http_code}' \
+              --request POST \
+              --header "Authorization: Bearer $oidc_token" \
+              --header "Content-Type: application/json" \
+              --data '{}' \
+              "$CLAIM_ENDPOINT" || true)
+            unset oidc_response oidc_token
+            if [ "$claim_status" = "200" ]; then
+              break
+            fi
+            rm -f "$RUNNER_TEMP/operations-claim.json"
+            if [ "$GITHUB_EVENT_NAME" != "push" ]; then
+              break
+            fi
+            sleep 5
+          done
+          if [ "$claim_status" != "200" ]; then
+            echo "The Operations queue endpoint did not accept this verified worker (HTTP $claim_status)." >&2
+            exit 1
+          fi
           python3 - <<'PY'
           import json
           import os
@@ -344,6 +364,37 @@ jobs:
             --header "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/workflows/fly.yml/dispatches" \
             --data '{"ref":"main"}'
+
+      - name: Report cloud queue result
+        if: always() && (github.event_name == 'push' || env.WORK_KIND != 'none')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          state=success
+          description="Operations cloud queue passed"
+          if [ "$JOB_STATUS" != "success" ]; then
+            state=failure
+            description="Operations cloud queue failed"
+          fi
+          status_sha="$GITHUB_SHA"
+          if [ "${WORK_KIND:-}" = "deployment" ] && [ -n "${EXPECTED_COMMIT:-}" ]; then
+            status_sha="$EXPECTED_COMMIT"
+          fi
+          jq -n \
+            --arg state "$state" \
+            --arg description "$description" \
+            --arg target_url "$RUN_URL" \
+            '{state: $state, context: "operations-cloud-queue", description: $description, target_url: $target_url}' \
+          | curl --fail --silent --show-error \
+              --request POST \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/statuses/$status_sha" \
+              --data-binary @-
 
       - name: Remove private queue response
         if: always()

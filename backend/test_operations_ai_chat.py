@@ -406,7 +406,8 @@ def test_completed_github_run_becomes_reviewable_task(monkeypatch):
     db.close()
 
 
-def test_scheduled_worker_claim_requires_exact_github_run(monkeypatch):
+@pytest.mark.parametrize("event_name", ["push", "schedule", "workflow_dispatch"])
+def test_worker_claim_requires_exact_github_run(monkeypatch, event_name):
     task_sha = "a" * 40
 
     class FakeOIDCVerifier:
@@ -415,7 +416,7 @@ def test_scheduled_worker_claim_requires_exact_github_run(monkeypatch):
             assert audience == "assistant-ui-hub-operations"
             return {
                 "repository": "elle4a69/assistant-ui",
-                "event_name": "schedule",
+                "event_name": event_name,
                 "ref": "refs/heads/main",
                 "runner_environment": "github-hosted",
                 "workflow": "Operations Cloud Coding",
@@ -443,7 +444,7 @@ def test_scheduled_worker_claim_requires_exact_github_run(monkeypatch):
                 "path": ".github/workflows/operations-code.yml",
                 "head_sha": task_sha,
                 "status": "in_progress",
-                "event": "schedule",
+                "event": event_name,
             }
 
     monkeypatch.setattr(main, "operations_github_oidc_verifier", FakeOIDCVerifier())
