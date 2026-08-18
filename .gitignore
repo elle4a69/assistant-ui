@@ -51,6 +51,7 @@ backend/refine_training_pairs.py
 # Local browser and editor state
 .edge-mobile-preview*/
 .remote-code-express/
+.ops-worktrees/
 .vscode/
 .idea/
 

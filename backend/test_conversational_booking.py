@@ -162,7 +162,7 @@ def test_proposal_then_later_confirmation_books_without_a_web_form(tmp_path, mon
     assert confirmation_result["status"] == "confirmed"
     assert thread.pending_booking is None
     assert len(calendar.created) == 1
-    assert calendar.created[0]["summary"] == "Example Customer - 60 minute massage"
+    assert calendar.created[0]["summary"] == "Example Customer - 60 minute massage (Tori)"
     assert calendar.created[0]["end"] - calendar.created[0]["start"] == timedelta(minutes=60)
     db.close()
 
@@ -371,7 +371,7 @@ def test_live_reply_flow_proposes_then_confirms_on_the_next_customer_turn(tmp_pa
     assert booked is True
     assert thread.pending_booking is None
     assert len(calendar.created) == 1
-    assert calendar.created[0]["summary"] == "Example Customer - Service"
+    assert calendar.created[0]["summary"] == "Example Customer - Service (Tori)"
     confirmation_reply = db.query(Message).filter(
         Message.thread_id == thread.id,
         Message.role.in_(["agent", "draft", "system"]),

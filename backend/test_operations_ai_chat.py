@@ -163,6 +163,177 @@ def test_operations_runtime_change_requires_exact_separate_confirmation(tmp_path
     db.close()
 
 
+def test_operations_runtime_change_can_update_message_ui_and_account_responder(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "MESSAGE_UI_SETTINGS_PATH", str(tmp_path / "message_ui_settings.json"))
+    responders = {
+        "primary": {"enabled": True, "cooldownDays": 1, "delaySeconds": 5, "message": "Tori"},
+        "secondary": {"enabled": True, "cooldownDays": 1, "delaySeconds": 5, "message": "Anonymous"},
+    }
+    monkeypatch.setattr(main, "load_first_contact_autoresponders", lambda: responders)
+    monkeypatch.setattr(main, "save_first_contact_autoresponders", lambda value: responders.update(value))
+    db = make_db()
+
+    avatars = main.execute_operations_tool(
+        db,
+        "propose_runtime_change",
+        {"action": "hide_message_avatars", "reason": "Use the compact message display."},
+        "Hide them",
+    )
+    avatar_result = main.execute_operations_tool(
+        db, "execute_runtime_change", {"action_id": avatars["action_id"]}, avatars["confirmation_phrase"]
+    )
+    responder = main.execute_operations_tool(
+        db,
+        "propose_runtime_change",
+        {"action": "disable_anonymous_autoresponder", "reason": "Pause the line-two greeting."},
+        "Pause it",
+    )
+    responder_result = main.execute_operations_tool(
+        db, "execute_runtime_change", {"action_id": responder["action_id"]}, responder["confirmation_phrase"]
+    )
+
+    assert avatar_result["current_settings"]["show_message_avatars"] is False
+    assert responder_result["current_settings"]["first_contact_autoresponders"]["secondary"] is False
+    assert responders["primary"]["enabled"] is True
+    db.close()
+
+
+def test_operations_coding_tools_are_wired_and_start_one_audited_task(monkeypatch):
+    class FakeMCPClient:
+        configured = True
+
+    launched = []
+    monkeypatch.setattr(main, "operations_mcp_client", FakeMCPClient())
+    monkeypatch.setattr(main, "AUTH_PASSWORD", "configured-admin-password")
+    monkeypatch.setenv("OPS_AGENT_CODE_MODE", "workspace")
+    monkeypatch.setattr(main, "_launch_operations_worker", lambda *args: launched.append(args))
+    db = make_db()
+
+    started = main.execute_operations_tool(
+        db,
+        "start_coding_task",
+        {
+            "title": "Fix chronological message display",
+            "instructions": "Inspect the message list and ensure stable chronological ordering for equal timestamps.",
+            "acceptance_test": "Focused message ordering tests and the frontend build pass.",
+        },
+        "Fix it",
+    )
+    duplicate = main.execute_operations_tool(
+        db,
+        "start_coding_task",
+        {
+            "title": "Try the same work again",
+            "instructions": "Start another task while the first implementation is still active and running.",
+            "acceptance_test": "It should not start.",
+        },
+        "Do it again",
+    )
+    inspected = main.execute_operations_tool(
+        db, "inspect_coding_task", {"task_id": started["task_id"]}, "How is it going?"
+    )
+
+    assert started["status"] == "started"
+    assert duplicate["status"] == "already_running"
+    assert inspected["task"]["state"] == "starting"
+    assert len(launched) == 1
+    assert db.query(main.OperationsAction).filter(main.OperationsAction.action_type == "coding_task").count() == 1
+    assert {item["name"] for item in main.OPERATIONS_AI_TOOLS} >= {
+        "inspect_coding_bridge",
+        "read_code_file",
+        "start_coding_task",
+        "inspect_coding_task",
+        "inspect_code_changes",
+        "inspect_deployments",
+        "propose_code_deployment",
+        "execute_code_deployment",
+    }
+    db.close()
+
+
+def test_code_deployment_requires_separate_exact_confirmation(monkeypatch):
+    class FakeMCPClient:
+        configured = True
+
+    launched = []
+    monkeypatch.setattr(main, "operations_mcp_client", FakeMCPClient())
+    monkeypatch.setattr(main, "AUTH_PASSWORD", "configured-admin-password")
+    monkeypatch.setenv("OPS_AGENT_CODE_MODE", "workspace")
+    monkeypatch.setenv("OPS_AGENT_ALLOW_DEPLOY", "true")
+    monkeypatch.setattr(main, "_launch_operations_worker", lambda *args: launched.append(args))
+    db = make_db()
+    task = main.OperationsAction(
+        action_type="coding_task",
+        payload='{"title":"Fix","branch":"ops/test","commit_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","worktree_path":"F:\\\\worktree"}',
+        reason="Owner-authorised coding task",
+        status="completed",
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+
+    proposed = main.execute_operations_tool(
+        db,
+        "propose_code_deployment",
+        {"task_id": task.id, "reason": "The implementation and focused checks passed."},
+        "Deploy it",
+    )
+    second_task = main.OperationsAction(
+        action_type="coding_task",
+        payload='{"title":"Second fix","branch":"ops/second","commit_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","worktree_path":"F:\\\\second"}',
+        reason="Another owner-authorised coding task",
+        status="completed",
+    )
+    db.add(second_task)
+    db.commit()
+    db.refresh(second_task)
+    busy = main.execute_operations_tool(
+        db,
+        "propose_code_deployment",
+        {"task_id": second_task.id, "reason": "The second task also passed its checks."},
+        "Deploy the second one",
+    )
+    rejected = main.execute_operations_tool(
+        db, "execute_code_deployment", {"action_id": proposed["action_id"]}, "yes deploy it"
+    )
+    started = main.execute_operations_tool(
+        db,
+        "execute_code_deployment",
+        {"action_id": proposed["action_id"]},
+        proposed["confirmation_phrase"],
+    )
+
+    assert proposed["status"] == "pending_confirmation"
+    assert busy["status"] == "deployment_busy"
+    assert busy["action_id"] == proposed["action_id"]
+    assert rejected["status"] == "rejected"
+    assert started["status"] == "deployment_started"
+    assert len(launched) == 1
+    db.close()
+
+
+def test_code_file_reader_blocks_secrets_before_calling_bridge(monkeypatch):
+    class FakeMCPClient:
+        configured = True
+
+        def call_tool(self, *_args, **_kwargs):
+            raise AssertionError("blocked paths must not reach the bridge")
+
+    monkeypatch.setattr(main, "operations_mcp_client", FakeMCPClient())
+    monkeypatch.setattr(main, "AUTH_PASSWORD", "configured-admin-password")
+    monkeypatch.setenv("OPS_AGENT_CODE_MODE", "workspace")
+
+    result = main.execute_operations_tool(
+        make_db(),
+        "read_code_file",
+        {"path": ".vscode/settings.json", "start_line": 1, "end_line": 20},
+        "Read it",
+    )
+
+    assert result["status"] == "rejected"
+    assert "not available" in result["reason"]
+
+
 def test_operations_tool_does_not_expose_sms_credentials(monkeypatch):
     monkeypatch.setattr(main.mobilemessage_service, "load_accounts_config", lambda: {
         "primary": {
