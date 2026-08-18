@@ -33,6 +33,7 @@ jobs:
           set -euo pipefail
           umask 077
           claim_status=000
+          claim_protocol=0
           for attempt in $(seq 1 90); do
             oidc_response=$(curl --fail --silent --show-error \
               --header "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
@@ -44,11 +45,15 @@ jobs:
               --request POST \
               --header "Authorization: Bearer $oidc_token" \
               --header "Content-Type: application/json" \
-              --data '{}' \
+              --data '{"smoke_test":true}' \
               "$CLAIM_ENDPOINT" || true)
             unset oidc_response oidc_token
             if [ "$claim_status" = "200" ]; then
-              break
+              claim_protocol=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("protocol_version", 0))' \
+                < "$RUNNER_TEMP/operations-claim.json" || true)
+              if [ "$claim_protocol" = "2" ]; then
+                break
+              fi
             fi
             rm -f "$RUNNER_TEMP/operations-claim.json"
             if [ "$GITHUB_EVENT_NAME" != "push" ]; then
@@ -56,8 +61,8 @@ jobs:
             fi
             sleep 5
           done
-          if [ "$claim_status" != "200" ]; then
-            echo "The Operations queue endpoint did not accept this verified worker (HTTP $claim_status)." >&2
+          if [ "$claim_status" != "200" ] || [ "$claim_protocol" != "2" ]; then
+            echo "The Operations queue endpoint did not accept this worker protocol (HTTP $claim_status)." >&2
             exit 1
           fi
           python3 - <<'PY'

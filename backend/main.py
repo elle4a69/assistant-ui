@@ -5771,6 +5771,10 @@ class OperationsChatInput(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
 
 
+class OperationsWorkerClaimInput(BaseModel):
+    smoke_test: bool = False
+
+
 class OperationsVoiceToolInput(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     arguments: Dict[str, Any] = Field(default_factory=dict)
@@ -6895,6 +6899,7 @@ OPERATIONS_CODE_ACTIVE_STATUSES = {"starting", "running", "queued"}
 OPERATIONS_CODE_IMMUTABLE_PATHS = {".github/workflows/operations-code.yml"}
 OPERATIONS_WORKER_OIDC_AUDIENCE = "assistant-ui-hub-operations"
 OPERATIONS_WORKER_WORKFLOW_PATH = ".github/workflows/operations-code.yml"
+OPERATIONS_WORKER_PROTOCOL_VERSION = 2
 _operations_code_task_lock = threading.Lock()
 _operations_code_deployment_lock = threading.Lock()
 
@@ -7004,7 +7009,12 @@ def _operations_verified_queue_run(oidc_token: str) -> tuple[Dict[str, Any], Dic
     return claims, run, current_main
 
 
-def _operations_claim_worker_task(db: Session, oidc_token: str) -> Dict[str, Any]:
+def _operations_claim_worker_task(
+    db: Session,
+    oidc_token: str,
+    *,
+    smoke_test: bool = False,
+) -> Dict[str, Any]:
     """Give one queued audited action to a verified GitHub-hosted worker."""
     claims, run, current_main = _operations_verified_queue_run(oidc_token)
     run_id = int(str(claims.get("run_id") or "0"))
@@ -7034,8 +7044,35 @@ def _operations_claim_worker_task(db: Session, oidc_token: str) -> Dict[str, Any
             action = next((item for item in queued if item.action_type == "code_deployment"), None)
             action = action or next((item for item in queued if item.action_type == "coding_task"), None)
         if not action:
-            return {"kind": "none"}
-        payload = _operations_action_payload(action)
+            if not smoke_test or str(claims.get("event_name") or "") != "push":
+                return {"protocol_version": OPERATIONS_WORKER_PROTOCOL_VERSION, "kind": "none"}
+            action_id = str(uuid.uuid4())
+            action = OperationsAction(
+                id=action_id,
+                action_type="coding_task",
+                payload=json.dumps({
+                    "title": "Verify the Operations cloud coding runner",
+                    "instructions": (
+                        "Run an end-to-end cloud worker smoke verification. Inspect the repository state, but "
+                        "intentionally make no source changes. Do not modify, add, rename or delete any file."
+                    ),
+                    "acceptance_test": (
+                        "The full backend test suite and frontend production build pass, then an empty isolated "
+                        "review commit is published."
+                    ),
+                    "instructions_sha256": hashlib.sha256(b"operations-cloud-runner-smoke-test-v1").hexdigest(),
+                    "stage": "awaiting_runner",
+                    "branch": f"ops/task-{action_id}",
+                    "queued_at": datetime.utcnow().isoformat() + "Z",
+                    "smoke_test": True,
+                }),
+                reason="Audited Operations cloud coding runner smoke verification",
+                status="queued",
+            )
+            db.add(action)
+            payload = _operations_action_payload(action)
+        else:
+            payload = _operations_action_payload(action)
         openai_key = ""
         title = ""
         instructions = ""
@@ -7067,6 +7104,7 @@ def _operations_claim_worker_task(db: Session, oidc_token: str) -> Dict[str, Any
         db.commit()
     if action.action_type == "code_deployment":
         return {
+            "protocol_version": OPERATIONS_WORKER_PROTOCOL_VERSION,
             "kind": "deployment",
             "action_id": action.id,
             "task_id": str(payload.get("task_id") or ""),
@@ -7074,6 +7112,7 @@ def _operations_claim_worker_task(db: Session, oidc_token: str) -> Dict[str, Any
             "commit_sha": str(payload.get("commit_sha") or ""),
         }
     return {
+        "protocol_version": OPERATIONS_WORKER_PROTOCOL_VERSION,
         "kind": "coding",
         "action_id": action.id,
         "task_id": action.id,
@@ -7866,6 +7905,7 @@ def _operations_web_source_urls(response: Any) -> List[str]:
 
 @app.post("/api/internal/operations/worker-claim")
 def claim_operations_worker_task(
+    payload: OperationsWorkerClaimInput,
     request: Request,
     response: Response,
     db: Session = Depends(get_db),
@@ -7875,7 +7915,7 @@ def claim_operations_worker_task(
     if scheme.casefold() != "bearer" or not token.strip():
         raise HTTPException(status_code=401, detail="The GitHub worker identity was rejected.")
     response.headers["Cache-Control"] = "no-store"
-    return _operations_claim_worker_task(db, token.strip())
+    return _operations_claim_worker_task(db, token.strip(), smoke_test=payload.smoke_test)
 
 
 @app.get("/api/settings/operations-chat/messages")
