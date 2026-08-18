@@ -199,14 +199,24 @@ def test_operations_runtime_change_can_update_message_ui_and_account_responder(t
 
 
 def test_operations_coding_tools_are_wired_and_start_one_audited_task(monkeypatch):
-    class FakeMCPClient:
+    class FakeGitHubClient:
         configured = True
+        repository = "elle4a69/assistant-ui"
 
-    launched = []
-    monkeypatch.setattr(main, "operations_mcp_client", FakeMCPClient())
+        def __init__(self):
+            self.dispatched = []
+
+        def dispatch_code_task(self, **values):
+            self.dispatched.append(values)
+            return f"ops/task-{values['task_id']}"
+
+        def list_workflow_runs(self, **_values):
+            return []
+
+    github = FakeGitHubClient()
+    monkeypatch.setattr(main, "operations_github_client", github)
     monkeypatch.setattr(main, "AUTH_PASSWORD", "configured-admin-password")
-    monkeypatch.setenv("OPS_AGENT_CODE_MODE", "workspace")
-    monkeypatch.setattr(main, "_launch_operations_worker", lambda *args: launched.append(args))
+    monkeypatch.setenv("OPS_AGENT_CODE_MODE", "github")
     db = make_db()
 
     started = main.execute_operations_tool(
@@ -235,11 +245,12 @@ def test_operations_coding_tools_are_wired_and_start_one_audited_task(monkeypatc
 
     assert started["status"] == "started"
     assert duplicate["status"] == "already_running"
-    assert inspected["task"]["state"] == "starting"
-    assert len(launched) == 1
+    assert inspected["task"]["state"] == "queued"
+    assert len(github.dispatched) == 1
+    assert github.dispatched[0]["title"] == "Fix chronological message display"
     assert db.query(main.OperationsAction).filter(main.OperationsAction.action_type == "coding_task").count() == 1
     assert {item["name"] for item in main.OPERATIONS_AI_TOOLS} >= {
-        "inspect_coding_bridge",
+        "inspect_coding_runner",
         "read_code_file",
         "start_coding_task",
         "inspect_coding_task",
@@ -252,19 +263,47 @@ def test_operations_coding_tools_are_wired_and_start_one_audited_task(monkeypatc
 
 
 def test_code_deployment_requires_separate_exact_confirmation(monkeypatch):
-    class FakeMCPClient:
+    class FakeGitHubClient:
         configured = True
+        repository = "elle4a69/assistant-ui"
 
-    launched = []
-    monkeypatch.setattr(main, "operations_mcp_client", FakeMCPClient())
+        def __init__(self):
+            self.updated = []
+
+        def get_ref(self, ref):
+            assert ref == "heads/main"
+            return {"object": {"sha": "a" * 40}}
+
+        def get_branch(self, branch):
+            assert branch == "ops/task-one"
+            return {"commit": {"sha": "b" * 40}}
+
+        def get_git_commit(self, sha):
+            assert sha == "b" * 40
+            return {"sha": sha, "parents": [{"sha": "a" * 40}]}
+
+        def compare(self, base, head):
+            assert base == "a" * 40
+            assert head == "ops/task-one"
+            return {
+                "status": "ahead",
+                "ahead_by": 1,
+                "files": [{"filename": "backend/main.py", "status": "modified"}],
+            }
+
+        def update_ref(self, ref, sha, force=False):
+            self.updated.append((ref, sha, force))
+            return {"object": {"sha": sha}}
+
+    github = FakeGitHubClient()
+    monkeypatch.setattr(main, "operations_github_client", github)
     monkeypatch.setattr(main, "AUTH_PASSWORD", "configured-admin-password")
-    monkeypatch.setenv("OPS_AGENT_CODE_MODE", "workspace")
+    monkeypatch.setenv("OPS_AGENT_CODE_MODE", "github")
     monkeypatch.setenv("OPS_AGENT_ALLOW_DEPLOY", "true")
-    monkeypatch.setattr(main, "_launch_operations_worker", lambda *args: launched.append(args))
     db = make_db()
     task = main.OperationsAction(
         action_type="coding_task",
-        payload='{"title":"Fix","branch":"ops/test","commit_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","worktree_path":"F:\\\\worktree"}',
+        payload='{"title":"Fix","branch":"ops/task-one","commit_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","base_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}',
         reason="Owner-authorised coding task",
         status="completed",
     )
@@ -280,7 +319,7 @@ def test_code_deployment_requires_separate_exact_confirmation(monkeypatch):
     )
     second_task = main.OperationsAction(
         action_type="coding_task",
-        payload='{"title":"Second fix","branch":"ops/second","commit_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","worktree_path":"F:\\\\second"}',
+        payload='{"title":"Second fix","branch":"ops/task-two","commit_sha":"cccccccccccccccccccccccccccccccccccccccc","base_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}',
         reason="Another owner-authorised coding task",
         status="completed",
     )
@@ -307,21 +346,161 @@ def test_code_deployment_requires_separate_exact_confirmation(monkeypatch):
     assert busy["status"] == "deployment_busy"
     assert busy["action_id"] == proposed["action_id"]
     assert rejected["status"] == "rejected"
-    assert started["status"] == "deployment_started"
-    assert len(launched) == 1
+    assert started["status"] == "pushed"
+    assert github.updated == [("heads/main", "b" * 40, False)]
     db.close()
 
 
-def test_code_file_reader_blocks_secrets_before_calling_bridge(monkeypatch):
-    class FakeMCPClient:
+def test_completed_github_run_becomes_reviewable_task(monkeypatch):
+    class FakeGitHubClient:
         configured = True
+        repository = "elle4a69/assistant-ui"
 
-        def call_tool(self, *_args, **_kwargs):
-            raise AssertionError("blocked paths must not reach the bridge")
+        def list_workflow_runs(self, **_values):
+            return [{
+                "id": 99,
+                "display_title": f"Operations coding task {task.id}",
+                "status": "completed",
+                "conclusion": "success",
+                "html_url": "https://github.example/runs/99",
+            }]
 
-    monkeypatch.setattr(main, "operations_mcp_client", FakeMCPClient())
+        def get_branch(self, branch):
+            assert branch == f"ops/task-{task.id}"
+            return {"commit": {"sha": "d" * 40}}
+
+        def compare(self, base, head):
+            assert (base, head) == ("main", f"ops/task-{task.id}")
+            return {
+                "status": "ahead",
+                "ahead_by": 1,
+                "base_commit": {"sha": "a" * 40},
+                "commits": [{"sha": "d" * 40}],
+                "files": [{
+                    "filename": "frontend/src/App.tsx",
+                    "status": "modified",
+                    "additions": 2,
+                    "deletions": 1,
+                    "changes": 3,
+                }],
+            }
+
     monkeypatch.setattr(main, "AUTH_PASSWORD", "configured-admin-password")
-    monkeypatch.setenv("OPS_AGENT_CODE_MODE", "workspace")
+    monkeypatch.setenv("OPS_AGENT_CODE_MODE", "github")
+    db = make_db()
+    task = main.OperationsAction(
+        action_type="coding_task",
+        payload='{"title":"Cloud task","stage":"queued"}',
+        reason="Owner-authorised coding task",
+        status="queued",
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    task.payload = '{"title":"Cloud task","stage":"queued","branch":"ops/task-' + task.id + '"}'
+    db.commit()
+    monkeypatch.setattr(main, "operations_github_client", FakeGitHubClient())
+
+    inspected = main.execute_operations_tool(
+        db, "inspect_coding_task", {"task_id": task.id}, "Check it"
+    )
+    changes = main.execute_operations_tool(
+        db, "inspect_code_changes", {"task_id": task.id}, "Show changes"
+    )
+
+    assert inspected["task"]["state"] == "completed"
+    assert inspected["task"]["commit_sha"] == "d" * 40
+    assert changes["status"] == "ok"
+    assert changes["files"] == [{
+        "path": "frontend/src/App.tsx",
+        "status": "modified",
+        "additions": 2,
+        "deletions": 1,
+        "changes": 3,
+    }]
+    db.close()
+
+
+def test_worker_credential_requires_exact_active_github_run(monkeypatch):
+    task_sha = "a" * 40
+
+    class FakeOIDCVerifier:
+        def verify(self, token, *, audience):
+            assert token == "signed-oidc-token"
+            assert audience == "assistant-ui-hub-operations"
+            return {
+                "repository": "elle4a69/assistant-ui",
+                "event_name": "repository_dispatch",
+                "ref": "refs/heads/main",
+                "runner_environment": "github-hosted",
+                "workflow": "Operations Cloud Coding",
+                "workflow_ref": "elle4a69/assistant-ui/.github/workflows/operations-code.yml@refs/heads/main",
+                "sha": task_sha,
+                "workflow_sha": task_sha,
+                "run_id": "321",
+                "run_attempt": "1",
+                "jti": "one-time-worker-identity",
+            }
+
+    class FakeGitHubClient:
+        configured = True
+        repository = "elle4a69/assistant-ui"
+
+        def get_ref(self, ref):
+            assert ref == "heads/main"
+            return {"object": {"sha": task_sha}}
+
+        def get_workflow_run(self, run_id):
+            assert run_id == 321
+            return {
+                "id": 321,
+                "event": "repository_dispatch",
+                "display_title": f"Operations coding task {task.id}",
+                "path": ".github/workflows/operations-code.yml",
+                "head_sha": task_sha,
+                "status": "in_progress",
+            }
+
+    monkeypatch.setattr(main, "operations_github_oidc_verifier", FakeOIDCVerifier())
+    monkeypatch.setattr(main, "operations_github_client", FakeGitHubClient())
+    monkeypatch.setattr(main, "AUTH_PASSWORD", "configured-admin-password")
+    monkeypatch.setenv("OPS_AGENT_CODE_MODE", "github")
+    monkeypatch.setenv("OPENAI_API_KEY", "worker-key-for-test")
+    db = make_db()
+    task = main.OperationsAction(
+        action_type="coding_task",
+        payload="{}",
+        reason="Owner-authorised coding task",
+        status="queued",
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    task.payload = '{"branch":"ops/task-' + task.id + '"}'
+    db.commit()
+
+    result = main._operations_issue_worker_credential(db, task.id, "signed-oidc-token")
+    db.refresh(task)
+    audit = main._operations_action_payload(task)
+
+    assert result == {"credential": "worker-key-for-test"}
+    assert audit["credential_run_id"] == "321"
+    assert audit["credential_issue_count"] == 1
+    assert "worker-key-for-test" not in task.payload
+    db.close()
+
+
+def test_code_file_reader_blocks_secrets_before_calling_github(monkeypatch):
+    class FakeGitHubClient:
+        configured = True
+        repository = "elle4a69/assistant-ui"
+
+        def read_file(self, *_args, **_kwargs):
+            raise AssertionError("blocked paths must not reach GitHub")
+
+    monkeypatch.setattr(main, "operations_github_client", FakeGitHubClient())
+    monkeypatch.setattr(main, "AUTH_PASSWORD", "configured-admin-password")
+    monkeypatch.setenv("OPS_AGENT_CODE_MODE", "github")
 
     result = main.execute_operations_tool(
         make_db(),

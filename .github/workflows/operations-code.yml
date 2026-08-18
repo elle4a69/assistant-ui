@@ -1,0 +1,224 @@
+name: Operations Cloud Coding
+run-name: Operations coding task ${{ github.event.client_payload.task_id }}
+
+on:
+  repository_dispatch:
+    types:
+      - operations-code-task
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: operations-cloud-coding
+  cancel-in-progress: false
+
+jobs:
+  implement:
+    name: Implement and verify review branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      TASK_ID: ${{ github.event.client_payload.task_id }}
+      TASK_TITLE: ${{ github.event.client_payload.title }}
+      TASK_BRANCH: ${{ github.event.client_payload.branch }}
+      INSTRUCTIONS_B64: ${{ github.event.client_payload.instructions_b64 }}
+      ACCEPTANCE_TEST_B64: ${{ github.event.client_payload.acceptance_test_b64 }}
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Validate task and build private prompt
+        shell: bash
+        run: |
+          python - <<'PY'
+          import base64
+          import os
+          import re
+          from pathlib import Path
+
+          task_id = os.environ.get("TASK_ID", "")
+          title = os.environ.get("TASK_TITLE", "")
+          branch = os.environ.get("TASK_BRANCH", "")
+          if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f-]{27,55}", task_id, re.IGNORECASE):
+              raise SystemExit("Invalid Operations AI task ID")
+          if branch != f"ops/task-{task_id.lower()}":
+              raise SystemExit("Invalid Operations AI review branch")
+          if not 3 <= len(title) <= 160 or "\n" in title or "\r" in title:
+              raise SystemExit("Invalid Operations AI task title")
+
+          def decode(name: str, minimum: int, maximum: int) -> str:
+              try:
+                  value = base64.b64decode(os.environ.get(name, ""), validate=True).decode("utf-8")
+              except (ValueError, UnicodeDecodeError) as exc:
+                  raise SystemExit(f"Invalid {name}") from exc
+              if not minimum <= len(value) <= maximum or "\x00" in value:
+                  raise SystemExit(f"Invalid {name} length")
+              return value
+
+          instructions = decode("INSTRUCTIONS_B64", 20, 6_000)
+          acceptance_test = decode("ACCEPTANCE_TEST_B64", 5, 1_000)
+          prompt = f"""You are the implementation worker for the owner's production assistant-ui application.
+
+          Task: {title}
+          {instructions}
+
+          Acceptance test: {acceptance_test}
+
+          Work only in the current GitHub-hosted checkout. Inspect the relevant implementation and tests first. Implement
+          the requested outcome end to end, preserve unrelated behaviour, add or update focused tests, and run useful
+          checks while working. Fix failures you introduce. Do not read, reveal, search for or copy secrets, credentials,
+          GitHub Actions secrets, environment values, editor settings, customer data or production data. Do not modify
+          .github/workflows/operations-code.yml. Do not commit, push, deploy, send messages, change production settings or
+          access external systems. The workflow independently validates and tests your changes, then pushes only an
+          isolated review branch. Report the outcome and verification briefly when finished.
+          """
+          runner_temp = Path(os.environ["RUNNER_TEMP"])
+          (runner_temp / "operations-prompt.txt").write_text(prompt, encoding="utf-8")
+          (runner_temp / "operations-commit-message.txt").write_text(
+              f"ops: {title}"[:180] + "\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Create isolated review branch
+        shell: bash
+        run: git switch --create "ops/task-$TASK_ID"
+
+      - name: Install worker and project dependencies
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check -r backend/requirements.txt
+          npm ci --prefix frontend
+          npm install --global @openai/codex@0.144.4
+
+      - name: Obtain audited cloud worker credential
+        shell: bash
+        env:
+          CREDENTIAL_ENDPOINT: https://assistant-ui-hub.fly.dev/api/internal/operations/worker-credential
+        run: |
+          set -euo pipefail
+          oidc_response=$(curl --fail --silent --show-error \
+            --header "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=assistant-ui-hub-operations")
+          oidc_token=$(jq -er '.value' <<< "$oidc_response")
+          request_body=$(jq -cn --arg task_id "$TASK_ID" '{task_id: $task_id}')
+          credential_response=$(curl --fail --silent --show-error \
+            --retry 2 --retry-delay 2 --retry-all-errors \
+            --request POST \
+            --header "Authorization: Bearer $oidc_token" \
+            --header "Content-Type: application/json" \
+            --data "$request_body" \
+            "$CREDENTIAL_ENDPOINT")
+          worker_credential=$(jq -er '.credential' <<< "$credential_response")
+          echo "::add-mask::$worker_credential"
+          umask 077
+          printf '%s' "$worker_credential" > "$RUNNER_TEMP/operations-openai-key"
+          unset oidc_token credential_response worker_credential
+
+      - name: Run Codex implementation worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$RUNNER_TEMP/operations-openai-key"
+          export OPENAI_API_KEY="$(< "$RUNNER_TEMP/operations-openai-key")"
+          rm -f "$RUNNER_TEMP/operations-openai-key"
+          codex exec \
+            --ignore-user-config \
+            --model gpt-5.6-sol \
+            -c 'model_reasoning_effort="medium"' \
+            --sandbox workspace-write \
+            --ephemeral \
+            --color never \
+            - < "$RUNNER_TEMP/operations-prompt.txt"
+          unset OPENAI_API_KEY
+
+      - name: Run independent application checks
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check -r backend/requirements.txt
+          python -m pytest backend -q
+          npm ci --prefix frontend
+          npm run build --prefix frontend
+          git diff --check
+
+      - name: Validate and commit bounded changes
+        shell: bash
+        run: |
+          git add -A
+          python - <<'PY'
+          import re
+          import subprocess
+          from pathlib import PurePosixPath
+
+          allowed_suffixes = {
+              ".bat", ".css", ".html", ".js", ".json", ".jsx", ".md", ".mjs", ".ps1",
+              ".py", ".sql", ".svg", ".toml", ".ts", ".tsx", ".txt", ".yaml", ".yml",
+          }
+          allowed_names = {".dockerignore", ".gitignore", "Dockerfile", "Procfile"}
+          blocked_parts = {
+              ".codex-secrets", ".git", ".ops-worktrees", ".venv", ".vscode", "__pycache__",
+              "node_modules",
+          }
+          blocked_names = {".env", "credentials.json", "service_account.json", "settings.json"}
+          names_raw = subprocess.check_output(
+              ["git", "-c", "core.quotepath=false", "diff", "--cached", "--name-only", "-z"]
+          )
+          names = [item.decode("utf-8") for item in names_raw.split(b"\0") if item]
+          if len(names) > 100:
+              raise SystemExit("The coding task changed too many files")
+          for raw in names:
+              path = PurePosixPath(raw)
+              parts = [part.lower() for part in path.parts]
+              if path.is_absolute() or ".." in path.parts or any(part in blocked_parts for part in parts):
+                  raise SystemExit(f"Restricted changed path: {raw}")
+              if raw.lower().startswith(".github/workflows/"):
+                  raise SystemExit(f"Workflow changes require a separate trusted update: {raw}")
+              if path.name.lower() in blocked_names or path.suffix.lower() in {".pem", ".key", ".p12", ".pfx"}:
+                  raise SystemExit(f"Credential-shaped changed path: {raw}")
+              if path.name not in allowed_names and path.suffix.lower() not in allowed_suffixes:
+                  raise SystemExit(f"Unsupported changed file type: {raw}")
+
+          diff_raw = subprocess.check_output(["git", "diff", "--cached", "--unified=0", "--no-ext-diff"])
+          if len(diff_raw) > 2_000_000:
+              raise SystemExit("The coding task diff is too large")
+          added_lines = "\n".join(
+              line[1:] for line in diff_raw.decode("utf-8", errors="replace").splitlines()
+              if line.startswith("+") and not line.startswith("+++")
+          )
+          secret_patterns = (
+              r"github_pat_[A-Za-z0-9_]{20,}",
+              r"gh[pousr]_[A-Za-z0-9]{20,}",
+              r"sk-[A-Za-z0-9_-]{20,}",
+              r"FlyV1\s+[A-Za-z0-9+/=,_-]{20,}",
+              r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+              r"(?i)(?:password|api[_-]?key|bearer[_-]?token|access[_-]?token|secret)\s*[:=]\s*[\"']?[A-Za-z0-9+/=_-]{20,}",
+          )
+          if any(re.search(pattern, added_lines) for pattern in secret_patterns):
+              raise SystemExit("The coding result contains a secret-shaped value")
+          PY
+          git diff --cached --check
+          git config user.name "Tori Operations AI"
+          git config user.email "operations-ai@users.noreply.github.com"
+          git commit --allow-empty --file "$RUNNER_TEMP/operations-commit-message.txt"
+
+      - name: Push review branch only
+        shell: bash
+        run: git push origin "HEAD:refs/heads/ops/task-$TASK_ID"

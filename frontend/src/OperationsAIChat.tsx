@@ -253,7 +253,7 @@ export default function OperationsAIChat() {
       <div className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-3 text-[10px] leading-relaxed text-amber-900">
         <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
         <p>
-          Text chat can self-diagnose, research, remember, update confirmed settings, and run isolated coding tasks. Production deployment requires your separate exact confirmation. Voice can privately read message threads and reply-decision events, but remains read-only. Voice is not added to persistent text history.
+          Text chat can self-diagnose, research, remember, update confirmed settings, and run isolated coding tasks on GitHub-hosted cloud runners. Production deployment requires your separate exact confirmation. Voice can privately read message threads and reply-decision events, but remains read-only. Voice is not added to persistent text history.
         </p>
       </div>
 

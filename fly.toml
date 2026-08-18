@@ -7,7 +7,7 @@ primary_region = "syd"
 [env]
   PORT = "8080"
   PUBLIC_APP_URL = "https://assistant-ui-hub.fly.dev"
-  OPS_AGENT_CODE_MODE = "workspace"
+  OPS_AGENT_CODE_MODE = "github"
   OPS_AGENT_ALLOW_DEPLOY = "true"
   OPS_AGENT_GITHUB_REPO = "elle4a69/assistant-ui"
 
