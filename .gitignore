@@ -25,6 +25,8 @@ backend/tmp/
 backend/messages*.csv*
 backend/data/*.json
 backend/data/*.jsonl
+backend/data/vapid_private.pem
+backend/data/vapid_public.txt
 !backend/data/approved_intent_examples.jsonl
 !backend/data/approved_knowledge_cards.jsonl
 
