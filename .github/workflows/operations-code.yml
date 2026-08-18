@@ -124,6 +124,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 2
+          persist-credentials: false
 
       - name: Set up Python
         if: env.WORK_KIND == 'coding'
@@ -199,7 +200,7 @@ jobs:
         if: env.WORK_KIND == 'coding'
         shell: bash
         run: |
-          python -m pip install --disable-pip-version-check -r backend/requirements.txt
+          python -m pip install --disable-pip-version-check -r backend/requirements.txt pytest
           npm ci --prefix frontend
           npm install --global @openai/codex@0.144.4
 
@@ -229,7 +230,8 @@ jobs:
             --ignore-user-config \
             --model gpt-5.6-sol \
             -c 'model_reasoning_effort="medium"' \
-            --sandbox workspace-write \
+            -c 'shell_environment_policy.exclude=["CODEX_API_KEY"]' \
+            --sandbox danger-full-access \
             --ephemeral \
             --color never \
             - < "$RUNNER_TEMP/operations-prompt.txt"
@@ -307,13 +309,20 @@ jobs:
       - name: Push review branch only
         if: env.WORK_KIND == 'coding'
         shell: bash
-        run: git push origin "HEAD:refs/heads/$TASK_BRANCH"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh auth setup-git
+          git push origin "HEAD:refs/heads/$TASK_BRANCH"
 
       - name: Validate confirmed deployment
         if: env.WORK_KIND == 'deployment'
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          gh auth setup-git
           git fetch --no-tags origin "refs/heads/$TASK_BRANCH:refs/remotes/origin/$TASK_BRANCH"
           current_main=$(git rev-parse HEAD)
           remote_main=$(git rev-parse refs/remotes/origin/main)
@@ -354,7 +363,11 @@ jobs:
       - name: Promote exact reviewed commit
         if: env.WORK_KIND == 'deployment'
         shell: bash
-        run: git push origin "$EXPECTED_COMMIT:refs/heads/main"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh auth setup-git
+          git push origin "$EXPECTED_COMMIT:refs/heads/main"
 
       - name: Start Fly deployment
         if: env.WORK_KIND == 'deployment'
