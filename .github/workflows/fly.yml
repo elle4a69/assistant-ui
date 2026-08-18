@@ -55,6 +55,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           DEPLOY_OUTCOME: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           state=success
           description="Fly deployment and health check passed"
@@ -66,7 +67,8 @@ jobs:
           jq -n \
             --arg state "$state" \
             --arg description "$description" \
-            '{state: $state, context: "fly-deploy", description: $description}' \
+            --arg target_url "$RUN_URL" \
+            '{state: $state, context: "fly-deploy", description: $description, target_url: $target_url}' \
           | curl --fail-with-body --silent --show-error \
               --request POST \
               --header "Accept: application/vnd.github+json" \
