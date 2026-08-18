@@ -45,7 +45,7 @@ jobs:
               --request POST \
               --header "Authorization: Bearer $oidc_token" \
               --header "Content-Type: application/json" \
-              --data '{"smoke_test":true}' \
+              --data '{}' \
               "$CLAIM_ENDPOINT" || true)
             unset oidc_response oidc_token
             if [ "$claim_status" = "200" ]; then

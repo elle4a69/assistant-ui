@@ -545,32 +545,25 @@ def test_worker_claim_does_not_consume_coding_task_without_worker_credential(mon
     db.close()
 
 
-def test_verified_push_can_create_one_audited_smoke_task(monkeypatch):
+def test_verified_worker_gets_versioned_empty_queue_response(monkeypatch):
     monkeypatch.setattr(
         main,
         "_operations_verified_queue_run",
         lambda _token: ({
             "run_id": "765",
             "run_attempt": "1",
-            "jti": "smoke-worker-identity",
-            "event_name": "push",
+            "jti": "empty-queue-worker",
+            "event_name": "schedule",
         }, {}, "a" * 40),
     )
-    monkeypatch.setenv("OPENAI_API_KEY", "worker-key-for-test")
     db = make_db()
 
-    result = main._operations_claim_worker_task(db, "signed-oidc-token", smoke_test=True)
-    task = db.query(main.OperationsAction).filter(main.OperationsAction.action_type == "coding_task").one()
-    audit = main._operations_action_payload(task)
+    result = main._operations_claim_worker_task(db, "signed-oidc-token")
 
-    assert result["protocol_version"] == main.OPERATIONS_WORKER_PROTOCOL_VERSION
-    assert result["kind"] == "coding"
-    assert result["task_id"] == task.id
-    assert result["branch"] == f"ops/task-{task.id}"
-    assert task.status == "running"
-    assert audit["smoke_test"] is True
-    assert audit["worker_run_id"] == "765"
-    assert "worker-key-for-test" not in task.payload
+    assert result == {
+        "protocol_version": main.OPERATIONS_WORKER_PROTOCOL_VERSION,
+        "kind": "none",
+    }
     db.close()
 
 
