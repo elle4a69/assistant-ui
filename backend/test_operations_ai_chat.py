@@ -811,7 +811,7 @@ def test_realtime_session_uses_server_key_and_current_voice_model(monkeypatch):
     request = captured["request"]
     assert request.full_url == "https://api.openai.com/v1/realtime/calls"
     assert request.headers["Authorization"] == "Bearer protected-test-key"
-    assert b'gpt-realtime-2.1' in request.data
+    assert b'"model": "gpt-realtime"' in request.data
     assert b'"voice": "marin"' in request.data
     assert b'find_message_threads' in request.data
     assert b'inspect_message_thread' in request.data
@@ -827,6 +827,20 @@ def test_realtime_session_fails_closed_without_server_key(monkeypatch):
         main.create_operations_realtime_session("v=0\r\no=offer", "{}")
 
     assert exc_info.value.status_code == 503
+
+
+def test_realtime_availability_reports_configuration_without_exposing_it(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert main.get_operations_realtime_availability() == {
+        "available": False,
+        "detail": "Realtime voice is not configured on this server.",
+    }
+
+    monkeypatch.setenv("OPENAI_API_KEY", "protected-test-key")
+    assert main.get_operations_realtime_availability() == {
+        "available": True,
+        "detail": None,
+    }
 
 
 def test_voice_can_read_full_account_bound_thread_and_reply_events():

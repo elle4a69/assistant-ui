@@ -6373,7 +6373,7 @@ def create_operations_realtime_session(sdp: str, snapshot: str, memory: str = "[
     boundary = f"----assistant-ui-{uuid.uuid4().hex}"
     session_config = json.dumps({
         "type": "realtime",
-        "model": "gpt-realtime-2.1",
+        "model": "gpt-realtime",
         "instructions": operations_ai_instructions(
             snapshot, memory, tool_access=False, voice_read_access=True
         ),
@@ -8015,6 +8015,15 @@ async def start_operations_realtime_session(request: Request, db: Session = Depe
         build_operations_ai_memory_context(db),
     )
     return Response(content=answer, media_type="application/sdp")
+
+
+@app.get("/api/settings/operations-chat/realtime")
+def get_operations_realtime_availability():
+    available = bool(os.getenv("OPENAI_API_KEY", "").strip())
+    return {
+        "available": available,
+        "detail": None if available else "Realtime voice is not configured on this server.",
+    }
 
 
 @app.post("/api/settings/operations-chat/realtime/tool")

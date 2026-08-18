@@ -1140,6 +1140,17 @@ export async function createOperationsRealtimeSession(sdp: string): Promise<stri
   return response.text();
 }
 
+export async function getOperationsRealtimeAvailability(): Promise<{ available: boolean; detail: string | null }> {
+  const response = await apiFetch(`${API_BASE}/api/settings/operations-chat/realtime`, {
+    cache: 'no-store',
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Could not check realtime voice availability: ${response.statusText}`);
+  }
+  return response.json();
+}
+
 export async function runOperationsRealtimeTool(
   name: string,
   args: Record<string, unknown>,

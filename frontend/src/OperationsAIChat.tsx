@@ -3,12 +3,22 @@ import { Bot, CornerDownLeft, Mic, PhoneOff, RefreshCw, Send, ShieldCheck, UserR
 import {
   createOperationsRealtimeSession,
   getOperationsChatMessages,
+  getOperationsRealtimeAvailability,
   OperationsChatMessage,
   runOperationsRealtimeTool,
   sendOperationsChatMessage,
 } from './api';
 
 const OPERATIONS_URL_PATTERN = /(https?:\/\/[^\s<>\])]+)/g;
+
+type VoiceAvailability = 'checking' | 'available' | 'unavailable';
+
+function realtimeBrowserUnavailableReason(): string | null {
+  if (!window.isSecureContext) return 'Realtime voice requires a secure browser connection.';
+  if (!navigator.mediaDevices?.getUserMedia) return 'This browser cannot access a microphone for realtime voice.';
+  if (typeof RTCPeerConnection === 'undefined') return 'This browser does not support realtime voice connections.';
+  return null;
+}
 
 function renderLinkedText(content: string): ReactNode[] {
   return content.split(OPERATIONS_URL_PATTERN).map((part, index) => (
@@ -25,6 +35,9 @@ export default function OperationsAIChat() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [voiceState, setVoiceState] = useState<'idle' | 'connecting' | 'live'>('idle');
+  const [voiceAvailability, setVoiceAvailability] = useState<VoiceAvailability>('checking');
+  const [voiceUnavailableReason, setVoiceUnavailableReason] = useState<string | null>(null);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
@@ -45,8 +58,31 @@ export default function OperationsAIChat() {
     }
   };
 
+  const checkVoiceAvailability = async () => {
+    const browserReason = realtimeBrowserUnavailableReason();
+    if (browserReason) {
+      setVoiceAvailability('unavailable');
+      setVoiceUnavailableReason(browserReason);
+      return;
+    }
+
+    setVoiceAvailability('checking');
+    setVoiceUnavailableReason(null);
+    try {
+      const result = await getOperationsRealtimeAvailability();
+      setVoiceAvailability(result.available ? 'available' : 'unavailable');
+      setVoiceUnavailableReason(result.available ? null : (result.detail || 'Realtime voice is not configured on this server.'));
+    } catch (requestError) {
+      setVoiceAvailability('unavailable');
+      setVoiceUnavailableReason(
+        requestError instanceof Error ? requestError.message : 'Could not check realtime voice availability.',
+      );
+    }
+  };
+
   useEffect(() => {
     void loadMessages();
+    void checkVoiceAvailability();
     return () => stopVoice();
   }, []);
 
@@ -95,7 +131,11 @@ export default function OperationsAIChat() {
   const stopVoice = () => {
     microphoneStreamRef.current?.getTracks().forEach((track) => track.stop());
     microphoneStreamRef.current = null;
-    peerConnectionRef.current?.close();
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.onconnectionstatechange = null;
+      peerConnectionRef.current.ontrack = null;
+      peerConnectionRef.current.close();
+    }
     peerConnectionRef.current = null;
     voiceDataChannelRef.current?.close();
     voiceDataChannelRef.current = null;
@@ -109,8 +149,14 @@ export default function OperationsAIChat() {
   };
 
   const startVoice = async () => {
-    if (voiceState !== 'idle') return;
-    setError(null);
+    if (voiceState !== 'idle' || voiceAvailability !== 'available') return;
+    const browserReason = realtimeBrowserUnavailableReason();
+    if (browserReason) {
+      setVoiceAvailability('unavailable');
+      setVoiceUnavailableReason(browserReason);
+      return;
+    }
+    setVoiceError(null);
     setVoiceState('connecting');
     try {
       const microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -123,11 +169,19 @@ export default function OperationsAIChat() {
       audioElementRef.current = audioElement;
       peerConnection.ontrack = (event) => {
         audioElement.srcObject = event.streams[0];
-        void audioElement.play().catch(() => undefined);
+        void audioElement.play().catch(() => {
+          setVoiceError('Voice connected, but audio playback was blocked. Check this site\'s sound permission and try again.');
+        });
       };
       peerConnection.onconnectionstatechange = () => {
         if (peerConnection.connectionState === 'connected') setVoiceState('live');
-        if (['failed', 'disconnected', 'closed'].includes(peerConnection.connectionState)) stopVoice();
+        if (peerConnection.connectionState === 'failed') {
+          stopVoice();
+          setVoiceError('The realtime voice connection failed. Check your network and try again.');
+        } else if (peerConnection.connectionState === 'disconnected') {
+          stopVoice();
+          setVoiceError('The realtime voice connection was interrupted. Check your network and try again.');
+        }
       };
       microphoneStream.getAudioTracks().forEach((track) => peerConnection.addTrack(track, microphoneStream));
       const dataChannel = peerConnection.createDataChannel('oai-events');
@@ -138,6 +192,14 @@ export default function OperationsAIChat() {
           try {
             payload = JSON.parse(String(event.data)) as Record<string, unknown>;
           } catch {
+            return;
+          }
+          if (payload.type === 'error') {
+            const realtimeError = payload.error;
+            const message = realtimeError && typeof realtimeError === 'object' && 'message' in realtimeError
+              ? String(realtimeError.message)
+              : 'The realtime voice service reported an error.';
+            setVoiceError(`${message} End the conversation and try again.`);
             return;
           }
           if (payload.type !== 'response.function_call_arguments.done') return;
@@ -180,9 +242,11 @@ export default function OperationsAIChat() {
     } catch (requestError) {
       stopVoice();
       if (requestError instanceof DOMException && requestError.name === 'NotAllowedError') {
-        setError('Microphone access was declined. Allow microphone access in this browser to use realtime voice.');
+        setVoiceError('Microphone access was declined. Allow microphone access in this browser, then try again.');
+      } else if (requestError instanceof DOMException && requestError.name === 'NotFoundError') {
+        setVoiceError('No microphone is available. Connect or enable a microphone, then try again.');
       } else {
-        setError(requestError instanceof Error ? requestError.message : 'Realtime voice could not start.');
+        setVoiceError(requestError instanceof Error ? requestError.message : 'Realtime voice could not start.');
       }
     }
   };
@@ -211,10 +275,12 @@ export default function OperationsAIChat() {
             <button
               type="button"
               onClick={() => void startVoice()}
+              disabled={voiceAvailability !== 'available'}
               data-testid="operations-voice-start"
-              className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-indigo-300/30 bg-indigo-300/10 px-3 py-2 text-[10px] font-bold text-indigo-100 transition hover:bg-indigo-300/20"
+              className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-indigo-300/30 bg-indigo-300/10 px-3 py-2 text-[10px] font-bold text-indigo-100 transition hover:bg-indigo-300/20 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <Mic className="h-3.5 w-3.5" /> Start realtime voice
+              {voiceAvailability === 'checking' ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Mic className="h-3.5 w-3.5" />}
+              {voiceAvailability === 'checking' ? 'Checking voice…' : 'Start realtime voice'}
             </button>
           ) : (
             <button
@@ -239,6 +305,24 @@ export default function OperationsAIChat() {
           </button>
         </div>
       </div>
+
+      {voiceState === 'idle' && voiceAvailability === 'unavailable' && voiceUnavailableReason && (
+        <div className="flex items-center justify-between gap-3 border-b border-amber-200 bg-amber-50 px-4 py-2.5 text-[10px] font-semibold text-amber-900" role="status">
+          <span>{voiceUnavailableReason}</span>
+          <button type="button" onClick={() => void checkVoiceAvailability()} className="shrink-0 rounded-md border border-amber-300 px-2 py-1 hover:bg-amber-100">
+            Check again
+          </button>
+        </div>
+      )}
+
+      {voiceError && (
+        <div className="flex items-center justify-between gap-3 border-b border-rose-200 bg-rose-50 px-4 py-2.5 text-[10px] font-semibold text-rose-800" role="alert">
+          <span>{voiceError}</span>
+          <button type="button" onClick={() => setVoiceError(null)} className="shrink-0 rounded-md border border-rose-300 px-2 py-1 hover:bg-rose-100">
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {voiceState !== 'idle' && (
         <div className="flex items-center justify-between gap-3 border-b border-emerald-200 bg-emerald-50 px-4 py-2.5 text-[10px] font-semibold text-emerald-900" role="status">
