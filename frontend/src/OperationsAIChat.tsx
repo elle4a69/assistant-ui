@@ -7,8 +7,10 @@ import {
   runOperationsRealtimeTool,
   sendOperationsChatMessage,
 } from './api';
+import { describeRealtimeVoiceError, getRealtimeVoiceUnavailableReason } from './realtimeVoiceSupport.js';
 
 const OPERATIONS_URL_PATTERN = /(https?:\/\/[^\s<>\])]+)/g;
+const VOICE_CONNECTION_TIMEOUT_MS = 20_000;
 
 function renderLinkedText(content: string): ReactNode[] {
   return content.split(OPERATIONS_URL_PATTERN).map((part, index) => (
@@ -25,12 +27,20 @@ export default function OperationsAIChat() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [voiceState, setVoiceState] = useState<'idle' | 'connecting' | 'live'>('idle');
+  const [voiceError, setVoiceError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const microphoneStreamRef = useRef<MediaStream | null>(null);
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
   const voiceDataChannelRef = useRef<RTCDataChannel | null>(null);
+  const voiceConnectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const voiceUnavailableReason = getRealtimeVoiceUnavailableReason({
+    isSecureContext: window.isSecureContext,
+    hasGetUserMedia: typeof navigator.mediaDevices?.getUserMedia === 'function',
+    hasPeerConnection: typeof RTCPeerConnection !== 'undefined',
+  });
 
   const loadMessages = async () => {
     setLoading(true);
@@ -93,6 +103,10 @@ export default function OperationsAIChat() {
   };
 
   const stopVoice = () => {
+    if (voiceConnectionTimeoutRef.current) {
+      clearTimeout(voiceConnectionTimeoutRef.current);
+      voiceConnectionTimeoutRef.current = null;
+    }
     microphoneStreamRef.current?.getTracks().forEach((track) => track.stop());
     microphoneStreamRef.current = null;
     peerConnectionRef.current?.close();
@@ -110,28 +124,52 @@ export default function OperationsAIChat() {
 
   const startVoice = async () => {
     if (voiceState !== 'idle') return;
-    setError(null);
+    setVoiceError(null);
+    if (voiceUnavailableReason) {
+      setVoiceError(voiceUnavailableReason);
+      return;
+    }
     setVoiceState('connecting');
     try {
-      const microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const microphoneStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true },
+      });
+      if (microphoneStream.getAudioTracks().length === 0) {
+        throw Object.assign(new Error('No microphone audio track was available.'), { name: 'NotFoundError' });
+      }
       microphoneStreamRef.current = microphoneStream;
 
       const peerConnection = new RTCPeerConnection();
       peerConnectionRef.current = peerConnection;
       const audioElement = document.createElement('audio');
       audioElement.autoplay = true;
+      audioElement.setAttribute('playsinline', '');
+      audioElement.hidden = true;
+      document.body.appendChild(audioElement);
       audioElementRef.current = audioElement;
       peerConnection.ontrack = (event) => {
-        audioElement.srcObject = event.streams[0];
-        void audioElement.play().catch(() => undefined);
+        audioElement.srcObject = event.streams[0] || new MediaStream([event.track]);
+        void audioElement.play().catch(() => {
+          setVoiceError('Voice connected, but browser audio playback was blocked. Allow sound for this site, then restart voice.');
+        });
       };
       peerConnection.onconnectionstatechange = () => {
-        if (peerConnection.connectionState === 'connected') setVoiceState('live');
-        if (['failed', 'disconnected', 'closed'].includes(peerConnection.connectionState)) stopVoice();
+        if (peerConnection.connectionState === 'connected') {
+          if (voiceConnectionTimeoutRef.current) clearTimeout(voiceConnectionTimeoutRef.current);
+          voiceConnectionTimeoutRef.current = null;
+          setVoiceState('live');
+        }
+        if (['failed', 'disconnected'].includes(peerConnection.connectionState)) {
+          stopVoice();
+          setVoiceError('The realtime voice connection was lost. Check your network and try again.');
+        }
       };
       microphoneStream.getAudioTracks().forEach((track) => peerConnection.addTrack(track, microphoneStream));
       const dataChannel = peerConnection.createDataChannel('oai-events');
       voiceDataChannelRef.current = dataChannel;
+      dataChannel.onerror = () => {
+        setVoiceError('The realtime voice control connection failed. Check your network and restart voice.');
+      };
       dataChannel.onmessage = (event) => {
         void (async () => {
           let payload: Record<string, unknown>;
@@ -177,13 +215,15 @@ export default function OperationsAIChat() {
       if (!offer.sdp) throw new Error('The browser could not create a realtime audio offer.');
       const answerSdp = await createOperationsRealtimeSession(offer.sdp);
       await peerConnection.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+      voiceConnectionTimeoutRef.current = setTimeout(() => {
+        if (peerConnection.connectionState !== 'connected') {
+          stopVoice();
+          setVoiceError('Realtime voice timed out while connecting. Check your network and try again.');
+        }
+      }, VOICE_CONNECTION_TIMEOUT_MS);
     } catch (requestError) {
       stopVoice();
-      if (requestError instanceof DOMException && requestError.name === 'NotAllowedError') {
-        setError('Microphone access was declined. Allow microphone access in this browser to use realtime voice.');
-      } else {
-        setError(requestError instanceof Error ? requestError.message : 'Realtime voice could not start.');
-      }
+      setVoiceError(describeRealtimeVoiceError(requestError));
     }
   };
 
@@ -212,6 +252,8 @@ export default function OperationsAIChat() {
               type="button"
               onClick={() => void startVoice()}
               data-testid="operations-voice-start"
+              aria-describedby={voiceError ? 'operations-voice-error' : undefined}
+              title={voiceUnavailableReason || undefined}
               className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-indigo-300/30 bg-indigo-300/10 px-3 py-2 text-[10px] font-bold text-indigo-100 transition hover:bg-indigo-300/20"
             >
               <Mic className="h-3.5 w-3.5" /> Start realtime voice
@@ -239,6 +281,17 @@ export default function OperationsAIChat() {
           </button>
         </div>
       </div>
+
+      {voiceError && (
+        <div
+          id="operations-voice-error"
+          data-testid="operations-voice-error"
+          className="border-b border-rose-200 bg-rose-50 px-4 py-3 text-[10px] font-semibold text-rose-900"
+          role="alert"
+        >
+          {voiceError}
+        </div>
+      )}
 
       {voiceState !== 'idle' && (
         <div className="flex items-center justify-between gap-3 border-b border-emerald-200 bg-emerald-50 px-4 py-2.5 text-[10px] font-semibold text-emerald-900" role="status">

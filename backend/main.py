@@ -6404,10 +6404,16 @@ def create_operations_realtime_session(sdp: str, snapshot: str, memory: str = "[
             answer = upstream_response.read().decode("utf-8")
     except url_error.HTTPError as exc:
         print(f"Operations realtime session rejected with HTTP {exc.code}")
-        raise HTTPException(status_code=502, detail="Realtime voice could not start.") from exc
+        raise HTTPException(
+            status_code=502,
+            detail="The realtime voice service rejected the session. Try again; if it continues, verify the configured voice model and service access.",
+        ) from exc
     except (url_error.URLError, TimeoutError) as exc:
         print(f"Operations realtime connection failed: {type(exc).__name__}")
-        raise HTTPException(status_code=502, detail="Realtime voice could not connect.") from exc
+        raise HTTPException(
+            status_code=502,
+            detail="The realtime voice service could not be reached. Check the server network connection and try again.",
+        ) from exc
     if not answer.strip():
         raise HTTPException(status_code=502, detail="Realtime voice returned an empty session response.")
     return answer

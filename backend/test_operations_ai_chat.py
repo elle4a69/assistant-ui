@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from urllib import error as url_error
 from urllib import request as url_request
 
 import pytest
@@ -827,6 +828,29 @@ def test_realtime_session_fails_closed_without_server_key(monkeypatch):
         main.create_operations_realtime_session("v=0\r\no=offer", "{}")
 
     assert exc_info.value.status_code == 503
+    assert "not configured" in exc_info.value.detail
+
+
+@pytest.mark.parametrize(
+    ("upstream_error", "expected_detail"),
+    [
+        (url_error.HTTPError("https://api.openai.com", 400, "bad request", {}, None), "verify the configured voice model"),
+        (url_error.URLError("offline"), "Check the server network connection"),
+        (TimeoutError(), "Check the server network connection"),
+    ],
+)
+def test_realtime_session_surfaces_actionable_service_failures(monkeypatch, upstream_error, expected_detail):
+    def fail_urlopen(request, timeout):
+        raise upstream_error
+
+    monkeypatch.setenv("OPENAI_API_KEY", "protected-test-key")
+    monkeypatch.setattr(url_request, "urlopen", fail_urlopen)
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        main.create_operations_realtime_session("v=0\r\no=offer", "{}")
+
+    assert exc_info.value.status_code == 502
+    assert expected_detail in exc_info.value.detail
 
 
 def test_voice_can_read_full_account_bound_thread_and_reply_events():
