@@ -1,12 +1,13 @@
 name: Operations Cloud Coding
-run-name: Operations coding task ${{ github.event.client_payload.task_id }}
+run-name: Operations cloud queue
 
 on:
-  repository_dispatch:
-    types:
-      - operations-code-task
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
   id-token: write
 
@@ -15,24 +16,92 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  implement:
-    name: Implement and verify review branch
+  process-queue:
+    name: Process one audited Operations AI action
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    env:
-      TASK_ID: ${{ github.event.client_payload.task_id }}
-      TASK_TITLE: ${{ github.event.client_payload.title }}
-      TASK_BRANCH: ${{ github.event.client_payload.branch }}
-      INSTRUCTIONS_B64: ${{ github.event.client_payload.instructions_b64 }}
-      ACCEPTANCE_TEST_B64: ${{ github.event.client_payload.acceptance_test_b64 }}
     steps:
+      - name: Claim one audited action
+        shell: bash
+        env:
+          CLAIM_ENDPOINT: https://assistant-ui-hub.fly.dev/api/internal/operations/worker-claim
+        run: |
+          set -euo pipefail
+          oidc_response=$(curl --fail --silent --show-error \
+            --header "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=assistant-ui-hub-operations")
+          oidc_token=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<< "$oidc_response")
+          umask 077
+          curl --fail --silent --show-error \
+            --retry 2 --retry-delay 2 --retry-all-errors \
+            --request POST \
+            --header "Authorization: Bearer $oidc_token" \
+            --header "Content-Type: application/json" \
+            --data '{}' \
+            "$CLAIM_ENDPOINT" > "$RUNNER_TEMP/operations-claim.json"
+          unset oidc_response oidc_token
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          claim_path = Path(os.environ["RUNNER_TEMP"]) / "operations-claim.json"
+          claim = json.loads(claim_path.read_text(encoding="utf-8"))
+          kind = str(claim.get("kind") or "")
+          if kind not in {"none", "coding", "deployment"}:
+              raise SystemExit("The queue returned an invalid action kind")
+
+          values = {"WORK_KIND": kind}
+          if kind != "none":
+              action_id = str(claim.get("action_id") or "")
+              if not re.fullmatch(
+                  r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                  action_id,
+                  re.IGNORECASE,
+              ):
+                  raise SystemExit("The queue returned an invalid action ID")
+              values["ACTION_ID"] = action_id.lower()
+          if kind == "coding":
+              task_id = str(claim.get("task_id") or "")
+              branch = str(claim.get("branch") or "")
+              if task_id.lower() != values["ACTION_ID"] or branch != f"ops/task-{task_id.lower()}":
+                  raise SystemExit("The queue returned an invalid coding branch")
+              values.update({"TASK_ID": task_id.lower(), "TASK_BRANCH": branch})
+          elif kind == "deployment":
+              task_id = str(claim.get("task_id") or "")
+              branch = str(claim.get("branch") or "")
+              commit_sha = str(claim.get("commit_sha") or "").lower()
+              if not re.fullmatch(
+                  r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                  task_id,
+                  re.IGNORECASE,
+              ):
+                  raise SystemExit("The queue returned an invalid task ID")
+              if branch != f"ops/task-{task_id.lower()}":
+                  raise SystemExit("The queue returned an invalid deployment branch")
+              if not re.fullmatch(r"[0-9a-f]{40}", commit_sha):
+                  raise SystemExit("The queue returned an invalid deployment commit")
+              values.update({
+                  "TASK_ID": task_id.lower(),
+                  "TASK_BRANCH": branch,
+                  "EXPECTED_COMMIT": commit_sha,
+              })
+
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as handle:
+              for name, value in values.items():
+                  handle.write(f"{name}={value}\n")
+          PY
+
       - name: Check out current main
+        if: env.WORK_KIND != 'none'
         uses: actions/checkout@v4
         with:
           ref: main
-          fetch-depth: 1
+          fetch-depth: 2
 
       - name: Set up Python
+        if: env.WORK_KIND == 'coding'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -40,42 +109,41 @@ jobs:
           cache-dependency-path: backend/requirements.txt
 
       - name: Set up Node.js
+        if: env.WORK_KIND == 'coding'
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Validate task and build private prompt
+      - name: Build private coding prompt
+        if: env.WORK_KIND == 'coding'
         shell: bash
         run: |
+          set -euo pipefail
           python - <<'PY'
           import base64
+          import json
           import os
-          import re
           from pathlib import Path
 
-          task_id = os.environ.get("TASK_ID", "")
-          title = os.environ.get("TASK_TITLE", "")
-          branch = os.environ.get("TASK_BRANCH", "")
-          if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f-]{27,55}", task_id, re.IGNORECASE):
-              raise SystemExit("Invalid Operations AI task ID")
-          if branch != f"ops/task-{task_id.lower()}":
-              raise SystemExit("Invalid Operations AI review branch")
+          runner_temp = Path(os.environ["RUNNER_TEMP"])
+          claim = json.loads((runner_temp / "operations-claim.json").read_text(encoding="utf-8"))
+          title = str(claim.get("title") or "")
           if not 3 <= len(title) <= 160 or "\n" in title or "\r" in title:
               raise SystemExit("Invalid Operations AI task title")
 
           def decode(name: str, minimum: int, maximum: int) -> str:
               try:
-                  value = base64.b64decode(os.environ.get(name, ""), validate=True).decode("utf-8")
+                  value = base64.b64decode(str(claim.get(name) or ""), validate=True).decode("utf-8")
               except (ValueError, UnicodeDecodeError) as exc:
                   raise SystemExit(f"Invalid {name}") from exc
               if not minimum <= len(value) <= maximum or "\x00" in value:
                   raise SystemExit(f"Invalid {name} length")
               return value
 
-          instructions = decode("INSTRUCTIONS_B64", 20, 6_000)
-          acceptance_test = decode("ACCEPTANCE_TEST_B64", 5, 1_000)
+          instructions = decode("instructions_b64", 20, 6_000)
+          acceptance_test = decode("acceptance_test_b64", 5, 1_000)
           prompt = f"""You are the implementation worker for the owner's production assistant-ui application.
 
           Task: {title}
@@ -91,7 +159,6 @@ jobs:
           access external systems. The workflow independently validates and tests your changes, then pushes only an
           isolated review branch. Report the outcome and verification briefly when finished.
           """
-          runner_temp = Path(os.environ["RUNNER_TEMP"])
           (runner_temp / "operations-prompt.txt").write_text(prompt, encoding="utf-8")
           (runner_temp / "operations-commit-message.txt").write_text(
               f"ops: {title}"[:180] + "\n", encoding="utf-8"
@@ -99,47 +166,40 @@ jobs:
           PY
 
       - name: Create isolated review branch
+        if: env.WORK_KIND == 'coding'
         shell: bash
-        run: git switch --create "ops/task-$TASK_ID"
+        run: git switch --create "$TASK_BRANCH"
 
       - name: Install worker and project dependencies
+        if: env.WORK_KIND == 'coding'
         shell: bash
         run: |
           python -m pip install --disable-pip-version-check -r backend/requirements.txt
           npm ci --prefix frontend
           npm install --global @openai/codex@0.144.4
 
-      - name: Obtain audited cloud worker credential
-        shell: bash
-        env:
-          CREDENTIAL_ENDPOINT: https://assistant-ui-hub.fly.dev/api/internal/operations/worker-credential
-        run: |
-          set -euo pipefail
-          oidc_response=$(curl --fail --silent --show-error \
-            --header "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=assistant-ui-hub-operations")
-          oidc_token=$(jq -er '.value' <<< "$oidc_response")
-          request_body=$(jq -cn --arg task_id "$TASK_ID" '{task_id: $task_id}')
-          credential_response=$(curl --fail --silent --show-error \
-            --retry 2 --retry-delay 2 --retry-all-errors \
-            --request POST \
-            --header "Authorization: Bearer $oidc_token" \
-            --header "Content-Type: application/json" \
-            --data "$request_body" \
-            "$CREDENTIAL_ENDPOINT")
-          worker_credential=$(jq -er '.credential' <<< "$credential_response")
-          echo "::add-mask::$worker_credential"
-          umask 077
-          printf '%s' "$worker_credential" > "$RUNNER_TEMP/operations-openai-key"
-          unset oidc_token credential_response worker_credential
-
       - name: Run Codex implementation worker
+        if: env.WORK_KIND == 'coding'
         shell: bash
         run: |
           set -euo pipefail
-          test -s "$RUNNER_TEMP/operations-openai-key"
-          export OPENAI_API_KEY="$(< "$RUNNER_TEMP/operations-openai-key")"
-          rm -f "$RUNNER_TEMP/operations-openai-key"
+          worker_credential=$(python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["RUNNER_TEMP"]) / "operations-claim.json"
+          claim = json.loads(path.read_text(encoding="utf-8"))
+          credential = str(claim.get("credential") or "")
+          if len(credential) < 20 or "\n" in credential or "\r" in credential:
+              raise SystemExit("The coding worker credential is invalid")
+          print(credential, end="")
+          PY
+          )
+          echo "::add-mask::$worker_credential"
+          export OPENAI_API_KEY="$worker_credential"
+          rm -f "$RUNNER_TEMP/operations-claim.json"
+          unset worker_credential
           codex exec \
             --ignore-user-config \
             --model gpt-5.6-sol \
@@ -151,15 +211,15 @@ jobs:
           unset OPENAI_API_KEY
 
       - name: Run independent application checks
+        if: env.WORK_KIND == 'coding'
         shell: bash
         run: |
-          python -m pip install --disable-pip-version-check -r backend/requirements.txt
           python -m pytest backend -q
-          npm ci --prefix frontend
           npm run build --prefix frontend
           git diff --check
 
       - name: Validate and commit bounded changes
+        if: env.WORK_KIND == 'coding'
         shell: bash
         run: |
           git add -A
@@ -220,5 +280,72 @@ jobs:
           git commit --allow-empty --file "$RUNNER_TEMP/operations-commit-message.txt"
 
       - name: Push review branch only
+        if: env.WORK_KIND == 'coding'
         shell: bash
-        run: git push origin "HEAD:refs/heads/ops/task-$TASK_ID"
+        run: git push origin "HEAD:refs/heads/$TASK_BRANCH"
+
+      - name: Validate confirmed deployment
+        if: env.WORK_KIND == 'deployment'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "refs/heads/$TASK_BRANCH:refs/remotes/origin/$TASK_BRANCH"
+          current_main=$(git rev-parse HEAD)
+          remote_main=$(git rev-parse refs/remotes/origin/main)
+          branch_commit=$(git rev-parse "refs/remotes/origin/$TASK_BRANCH")
+          parent_count=$(git cat-file -p "$EXPECTED_COMMIT" | grep -c '^parent ')
+          parent_commit=$(git rev-parse "$EXPECTED_COMMIT^")
+          test "$current_main" = "$remote_main"
+          test "$branch_commit" = "$EXPECTED_COMMIT"
+          test "$parent_count" = "1"
+          test "$parent_commit" = "$current_main"
+          git diff --check "$current_main..$EXPECTED_COMMIT"
+          CURRENT_MAIN="$current_main" python3 - <<'PY'
+          import os
+          import subprocess
+          from pathlib import PurePosixPath
+
+          base = os.environ["CURRENT_MAIN"]
+          head = os.environ["EXPECTED_COMMIT"]
+          raw_names = subprocess.check_output(
+              ["git", "-c", "core.quotepath=false", "diff", "--name-only", "-z", f"{base}..{head}"]
+          )
+          names = [item.decode("utf-8") for item in raw_names.split(b"\0") if item]
+          if not names or len(names) > 100:
+              raise SystemExit("The deployment has an invalid changed-file count")
+          blocked_parts = {".git", ".ops-worktrees", ".venv", ".vscode", "node_modules", "__pycache__"}
+          blocked_names = {".env", "credentials.json", "service_account.json", "settings.json"}
+          for raw in names:
+              path = PurePosixPath(raw)
+              parts = [part.lower() for part in path.parts]
+              if path.is_absolute() or ".." in path.parts or any(part in blocked_parts for part in parts):
+                  raise SystemExit(f"Restricted deployment path: {raw}")
+              if raw.lower().startswith(".github/workflows/"):
+                  raise SystemExit(f"Workflow changes require a trusted manual deployment: {raw}")
+              if path.name.lower() in blocked_names or path.suffix.lower() in {".pem", ".key", ".p12", ".pfx"}:
+                  raise SystemExit(f"Credential-shaped deployment path: {raw}")
+          PY
+
+      - name: Promote exact reviewed commit
+        if: env.WORK_KIND == 'deployment'
+        shell: bash
+        run: git push origin "$EXPECTED_COMMIT:refs/heads/main"
+
+      - name: Start Fly deployment
+        if: env.WORK_KIND == 'deployment'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl --fail --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/workflows/fly.yml/dispatches" \
+            --data '{"ref":"main"}'
+
+      - name: Remove private queue response
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/operations-claim.json" "$RUNNER_TEMP/operations-openai-key"

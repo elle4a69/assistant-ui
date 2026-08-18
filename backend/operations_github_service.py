@@ -1,9 +1,9 @@
-"""Bounded GitHub transport for cloud-hosted Operations AI coding tasks.
+"""Bounded, read-only GitHub transport for Operations AI cloud tasks.
 
-The production application uses this client to dispatch a trusted GitHub
-Actions workflow, inspect its review branch, and fast-forward ``main`` only
-after the owner has confirmed a deployment.  It never logs or returns the
-configured GitHub token.
+The production application uses this client to verify GitHub-hosted queue
+workers and inspect their review branches. Repository writes are performed by
+short-lived GitHub Actions job tokens, never by the production application.
+This client never logs or returns its configured GitHub token.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from urllib import request as url_request
 DEFAULT_TIMEOUT_SECONDS = 20.0
 MAX_RESPONSE_BYTES = 2_000_000
 GITHUB_API_VERSION = "2022-11-28"
-OPERATIONS_CODE_EVENT = "operations-code-task"
 OPERATIONS_CODE_WORKFLOW = "operations-code.yml"
 
 
@@ -37,7 +36,6 @@ class _GitHubConfiguration:
 
 
 _REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
-_TASK_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f-]{27,55}", re.IGNORECASE)
 _COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}", re.IGNORECASE)
 _SECRET_PATTERNS = (
     re.compile(r"(?i)(authorization\s*:\s*bearer)\s+\S+"),
@@ -166,40 +164,6 @@ class OperationsGitHubClient:
             raise OperationsGitHubError("GitHub returned an unexpected response.")
         return value
 
-    def dispatch_code_task(
-        self,
-        *,
-        task_id: str,
-        title: str,
-        instructions: str,
-        acceptance_test: str,
-    ) -> str:
-        if not _TASK_ID_RE.fullmatch(task_id):
-            raise OperationsGitHubError("The coding task ID is invalid.")
-        if not 3 <= len(title) <= 160 or "\n" in title or "\r" in title:
-            raise OperationsGitHubError("The coding task title is invalid.")
-        if not 20 <= len(instructions) <= 6_000:
-            raise OperationsGitHubError("The coding task instructions are invalid.")
-        if not 5 <= len(acceptance_test) <= 1_000:
-            raise OperationsGitHubError("The coding task acceptance test is invalid.")
-        branch = f"ops/task-{task_id.casefold()}"
-        repository = self._validated_configuration().repository
-        self._request(
-            "POST",
-            f"/repos/{repository}/dispatches",
-            {
-                "event_type": OPERATIONS_CODE_EVENT,
-                "client_payload": {
-                    "task_id": task_id.casefold(),
-                    "title": title,
-                    "instructions_b64": base64.b64encode(instructions.encode("utf-8")).decode("ascii"),
-                    "acceptance_test_b64": base64.b64encode(acceptance_test.encode("utf-8")).decode("ascii"),
-                    "branch": branch,
-                },
-            },
-        )
-        return branch
-
     def list_workflow_runs(
         self,
         *,
@@ -273,14 +237,3 @@ class OperationsGitHubClient:
         repository = self._validated_configuration().repository
         encoded_ref = url_parse.quote(ref.strip("/"), safe="/")
         return self._request("GET", f"/repos/{repository}/git/ref/{encoded_ref}")
-
-    def update_ref(self, ref: str, sha: str, *, force: bool = False) -> Dict[str, Any]:
-        if not _COMMIT_SHA_RE.fullmatch(sha):
-            raise OperationsGitHubError("The Git commit ID is invalid.")
-        repository = self._validated_configuration().repository
-        encoded_ref = url_parse.quote(ref.strip("/"), safe="/")
-        return self._request(
-            "PATCH",
-            f"/repos/{repository}/git/refs/{encoded_ref}",
-            {"sha": sha.casefold(), "force": bool(force)},
-        )

@@ -203,16 +203,6 @@ def test_operations_coding_tools_are_wired_and_start_one_audited_task(monkeypatc
         configured = True
         repository = "elle4a69/assistant-ui"
 
-        def __init__(self):
-            self.dispatched = []
-
-        def dispatch_code_task(self, **values):
-            self.dispatched.append(values)
-            return f"ops/task-{values['task_id']}"
-
-        def list_workflow_runs(self, **_values):
-            return []
-
     github = FakeGitHubClient()
     monkeypatch.setattr(main, "operations_github_client", github)
     monkeypatch.setattr(main, "AUTH_PASSWORD", "configured-admin-password")
@@ -246,9 +236,9 @@ def test_operations_coding_tools_are_wired_and_start_one_audited_task(monkeypatc
     assert started["status"] == "started"
     assert duplicate["status"] == "already_running"
     assert inspected["task"]["state"] == "queued"
-    assert len(github.dispatched) == 1
-    assert github.dispatched[0]["title"] == "Fix chronological message display"
     assert db.query(main.OperationsAction).filter(main.OperationsAction.action_type == "coding_task").count() == 1
+    saved = db.query(main.OperationsAction).filter(main.OperationsAction.action_type == "coding_task").one()
+    assert main._operations_action_payload(saved)["stage"] == "awaiting_runner"
     assert {item["name"] for item in main.OPERATIONS_AI_TOOLS} >= {
         "inspect_coding_runner",
         "read_code_file",
@@ -266,9 +256,6 @@ def test_code_deployment_requires_separate_exact_confirmation(monkeypatch):
     class FakeGitHubClient:
         configured = True
         repository = "elle4a69/assistant-ui"
-
-        def __init__(self):
-            self.updated = []
 
         def get_ref(self, ref):
             assert ref == "heads/main"
@@ -290,10 +277,6 @@ def test_code_deployment_requires_separate_exact_confirmation(monkeypatch):
                 "ahead_by": 1,
                 "files": [{"filename": "backend/main.py", "status": "modified"}],
             }
-
-        def update_ref(self, ref, sha, force=False):
-            self.updated.append((ref, sha, force))
-            return {"object": {"sha": sha}}
 
     github = FakeGitHubClient()
     monkeypatch.setattr(main, "operations_github_client", github)
@@ -346,8 +329,9 @@ def test_code_deployment_requires_separate_exact_confirmation(monkeypatch):
     assert busy["status"] == "deployment_busy"
     assert busy["action_id"] == proposed["action_id"]
     assert rejected["status"] == "rejected"
-    assert started["status"] == "pushed"
-    assert github.updated == [("heads/main", "b" * 40, False)]
+    assert started["status"] == "deployment_queued"
+    deployment = db.query(main.OperationsAction).filter(main.OperationsAction.id == proposed["action_id"]).one()
+    assert deployment.status == "queued"
     db.close()
 
 
@@ -356,14 +340,15 @@ def test_completed_github_run_becomes_reviewable_task(monkeypatch):
         configured = True
         repository = "elle4a69/assistant-ui"
 
-        def list_workflow_runs(self, **_values):
-            return [{
+        def get_workflow_run(self, run_id):
+            assert run_id == 99
+            return {
                 "id": 99,
-                "display_title": f"Operations coding task {task.id}",
+                "display_title": "Operations cloud queue",
                 "status": "completed",
                 "conclusion": "success",
                 "html_url": "https://github.example/runs/99",
-            }]
+            }
 
         def get_branch(self, branch):
             assert branch == f"ops/task-{task.id}"
@@ -397,7 +382,7 @@ def test_completed_github_run_becomes_reviewable_task(monkeypatch):
     db.add(task)
     db.commit()
     db.refresh(task)
-    task.payload = '{"title":"Cloud task","stage":"queued","branch":"ops/task-' + task.id + '"}'
+    task.payload = '{"title":"Cloud task","stage":"queued","worker_run_id":"99","branch":"ops/task-' + task.id + '"}'
     db.commit()
     monkeypatch.setattr(main, "operations_github_client", FakeGitHubClient())
 
@@ -421,7 +406,7 @@ def test_completed_github_run_becomes_reviewable_task(monkeypatch):
     db.close()
 
 
-def test_worker_credential_requires_exact_active_github_run(monkeypatch):
+def test_scheduled_worker_claim_requires_exact_github_run(monkeypatch):
     task_sha = "a" * 40
 
     class FakeOIDCVerifier:
@@ -430,7 +415,7 @@ def test_worker_credential_requires_exact_active_github_run(monkeypatch):
             assert audience == "assistant-ui-hub-operations"
             return {
                 "repository": "elle4a69/assistant-ui",
-                "event_name": "repository_dispatch",
+                "event_name": "schedule",
                 "ref": "refs/heads/main",
                 "runner_environment": "github-hosted",
                 "workflow": "Operations Cloud Coding",
@@ -454,11 +439,11 @@ def test_worker_credential_requires_exact_active_github_run(monkeypatch):
             assert run_id == 321
             return {
                 "id": 321,
-                "event": "repository_dispatch",
-                "display_title": f"Operations coding task {task.id}",
+                "display_title": "Operations cloud queue",
                 "path": ".github/workflows/operations-code.yml",
                 "head_sha": task_sha,
                 "status": "in_progress",
+                "event": "schedule",
             }
 
     monkeypatch.setattr(main, "operations_github_oidc_verifier", FakeOIDCVerifier())
@@ -469,24 +454,127 @@ def test_worker_credential_requires_exact_active_github_run(monkeypatch):
     db = make_db()
     task = main.OperationsAction(
         action_type="coding_task",
-        payload="{}",
+        payload='{"title":"Cloud task","instructions":"Inspect the repository and make no unnecessary changes.","acceptance_test":"All focused tests pass."}',
         reason="Owner-authorised coding task",
         status="queued",
     )
     db.add(task)
     db.commit()
     db.refresh(task)
-    task.payload = '{"branch":"ops/task-' + task.id + '"}'
+    task_payload = main._operations_action_payload(task)
+    task_payload["branch"] = "ops/task-" + task.id
+    task.payload = main.json.dumps(task_payload)
     db.commit()
 
-    result = main._operations_issue_worker_credential(db, task.id, "signed-oidc-token")
+    result = main._operations_claim_worker_task(db, "signed-oidc-token")
     db.refresh(task)
     audit = main._operations_action_payload(task)
 
-    assert result == {"credential": "worker-key-for-test"}
-    assert audit["credential_run_id"] == "321"
-    assert audit["credential_issue_count"] == 1
+    assert result["kind"] == "coding"
+    assert result["task_id"] == task.id
+    assert result["credential"] == "worker-key-for-test"
+    assert audit["worker_run_id"] == "321"
+    assert audit["worker_claim_count"] == 1
     assert "worker-key-for-test" not in task.payload
+    db.close()
+
+
+def test_worker_claim_does_not_consume_coding_task_without_worker_credential(monkeypatch):
+    task_sha = "a" * 40
+
+    class FakeOIDCVerifier:
+        def verify(self, _token, *, audience):
+            assert audience == "assistant-ui-hub-operations"
+            return {
+                "repository": "elle4a69/assistant-ui",
+                "event_name": "schedule",
+                "ref": "refs/heads/main",
+                "runner_environment": "github-hosted",
+                "workflow": "Operations Cloud Coding",
+                "workflow_ref": "elle4a69/assistant-ui/.github/workflows/operations-code.yml@refs/heads/main",
+                "sha": task_sha,
+                "workflow_sha": task_sha,
+                "run_id": "654",
+                "run_attempt": "1",
+                "jti": "missing-credential-test",
+            }
+
+    class FakeGitHubClient:
+        configured = True
+        repository = "elle4a69/assistant-ui"
+
+        def get_ref(self, _ref):
+            return {"object": {"sha": task_sha}}
+
+        def get_workflow_run(self, _run_id):
+            return {
+                "id": 654,
+                "event": "schedule",
+                "display_title": "Operations cloud queue",
+                "path": ".github/workflows/operations-code.yml",
+                "head_sha": task_sha,
+                "status": "in_progress",
+            }
+
+    monkeypatch.setattr(main, "operations_github_oidc_verifier", FakeOIDCVerifier())
+    monkeypatch.setattr(main, "operations_github_client", FakeGitHubClient())
+    monkeypatch.setattr(main, "AUTH_PASSWORD", "configured-admin-password")
+    monkeypatch.setenv("OPS_AGENT_CODE_MODE", "github")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    db = make_db()
+    task = main.OperationsAction(
+        action_type="coding_task",
+        payload=(
+            '{"title":"Cloud task","instructions":"Inspect the repository and make no unnecessary changes.",'
+            '"acceptance_test":"All focused tests pass.","branch":"ops/task-placeholder"}'
+        ),
+        reason="Owner-authorised coding task",
+        status="queued",
+    )
+    db.add(task)
+    db.commit()
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        main._operations_claim_worker_task(db, "signed-oidc-token")
+    db.refresh(task)
+
+    assert exc_info.value.status_code == 503
+    assert task.status == "queued"
+    assert "worker_run_id" not in main._operations_action_payload(task)
+    db.close()
+
+
+@pytest.mark.parametrize(
+    ("conclusion", "expected_state"),
+    [("success", "pushed"), ("failure", "failed")],
+)
+def test_deployment_reconciliation_requires_successful_worker(monkeypatch, conclusion, expected_state):
+    expected_commit = "b" * 40
+
+    class FakeGitHubClient:
+        def get_ref(self, _ref):
+            return {"object": {"sha": expected_commit}}
+
+        def get_workflow_run(self, run_id):
+            assert run_id == 987
+            return {"status": "completed", "conclusion": conclusion}
+
+    monkeypatch.setattr(main, "operations_github_client", FakeGitHubClient())
+    db = make_db()
+    action = main.OperationsAction(
+        action_type="code_deployment",
+        payload='{"worker_run_id":"987","commit_sha":"' + expected_commit + '"}',
+        reason="Owner-confirmed deployment",
+        status="running",
+    )
+    db.add(action)
+    db.commit()
+
+    main._operations_reconcile_deployment_actions(db)
+    db.refresh(action)
+
+    assert action.status == expected_state
+    assert main._operations_action_payload(action)["stage"] == expected_state
     db.close()
 
 

@@ -52,32 +52,7 @@ def make_client(opener):
     )
 
 
-def test_dispatch_code_task_authenticates_and_encodes_untrusted_instructions():
-    opener = FakeOpener(FakeResponse())
-    client = make_client(opener)
-    task_id = "12345678-1234-1234-1234-123456789abc"
-
-    branch = client.dispatch_code_task(
-        task_id=task_id,
-        title="Fix chronological messages",
-        instructions="Inspect the message ordering and implement a stable chronological tie-breaker.",
-        acceptance_test="Message ordering tests pass.",
-    )
-
-    request, timeout = opener.requests[0]
-    body = json.loads(request.data)
-    assert request.get_method() == "POST"
-    assert request.headers["Authorization"] == "Bearer test-token"
-    assert request.full_url.endswith("/repos/elle4a69/assistant-ui/dispatches")
-    assert timeout <= 60
-    assert body["event_type"] == "operations-code-task"
-    assert body["client_payload"]["task_id"] == task_id
-    assert body["client_payload"]["branch"] == branch == f"ops/task-{task_id}"
-    assert base64.b64decode(body["client_payload"]["instructions_b64"]).decode("utf-8").startswith("Inspect")
-    assert "Inspect the message" not in request.full_url
-
-
-def test_read_file_decodes_content_and_update_ref_never_forces():
+def test_read_file_decodes_content_from_main():
     source = "first line\nsecond line\n"
     opener = FakeOpener(
         FakeResponse({
@@ -88,19 +63,14 @@ def test_read_file_decodes_content_and_update_ref_never_forces():
             "size": len(source),
             "content": base64.b64encode(source.encode("utf-8")).decode("ascii"),
         }),
-        FakeResponse({"ref": "refs/heads/main", "object": {"sha": "b" * 40}}),
     )
     client = make_client(opener)
 
     result = client.read_file("backend/main.py", ref="main")
-    updated = client.update_ref("heads/main", "b" * 40, force=False)
 
     assert result["content"] == source
     assert result["path"] == "backend/main.py"
     assert "contents/backend/main.py?ref=main" in opener.requests[0][0].full_url
-    assert opener.requests[1][0].get_method() == "PATCH"
-    assert json.loads(opener.requests[1][0].data) == {"sha": "b" * 40, "force": False}
-    assert updated["object"]["sha"] == "b" * 40
 
 
 def test_workflow_and_branch_paths_are_url_encoded():
@@ -111,13 +81,13 @@ def test_workflow_and_branch_paths_are_url_encoded():
     )
     client = make_client(opener)
 
-    runs = client.list_workflow_runs(limit=5, workflow="operations-code.yml", event="repository_dispatch")
+    runs = client.list_workflow_runs(limit=5, workflow="operations-code.yml", event="schedule")
     branch = client.get_branch("ops/task-123")
     workflow_run = client.get_workflow_run(123)
 
     assert runs[0]["id"] == 1
     assert "actions/workflows/operations-code.yml/runs?" in opener.requests[0][0].full_url
-    assert "event=repository_dispatch" in opener.requests[0][0].full_url
+    assert "event=schedule" in opener.requests[0][0].full_url
     assert opener.requests[1][0].full_url.endswith("/branches/ops%2Ftask-123")
     assert branch["commit"]["sha"] == "c" * 40
     assert opener.requests[2][0].full_url.endswith("/actions/runs/123")

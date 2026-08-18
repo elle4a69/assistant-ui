@@ -2427,7 +2427,7 @@ PUBLIC_EXACT_PATHS = {
     "/api/auth/status",
     "/api/auth/login",
     "/api/auth/logout",
-    "/api/internal/operations/worker-credential",
+    "/api/internal/operations/worker-claim",
 }
 
 
@@ -5771,10 +5771,6 @@ class OperationsChatInput(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
 
 
-class OperationsWorkerCredentialInput(BaseModel):
-    task_id: str = Field(min_length=36, max_length=64)
-
-
 class OperationsVoiceToolInput(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     arguments: Dict[str, Any] = Field(default_factory=dict)
@@ -6953,19 +6949,10 @@ def _operations_safe_run(item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _operations_issue_worker_credential(
-    db: Session,
-    task_id: str,
-    oidc_token: str,
-) -> Dict[str, str]:
-    """Release the existing OpenAI key only to the exact audited GitHub job."""
+def _operations_verified_queue_run(oidc_token: str) -> tuple[Dict[str, Any], Dict[str, Any], str]:
+    """Verify the exact scheduled GitHub-hosted queue worker and current main."""
     if not operations_code_access_available():
         raise HTTPException(status_code=503, detail="Cloud coding is unavailable.")
-    if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f-]{27,55}", task_id, re.IGNORECASE):
-        raise HTTPException(status_code=404, detail="The coding task is unavailable.")
-    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not openai_key:
-        raise HTTPException(status_code=503, detail="The coding worker credential is unavailable.")
     try:
         claims = operations_github_oidc_verifier.verify(
             oidc_token,
@@ -6980,14 +6967,15 @@ def _operations_issue_worker_credential(
     workflow_sha = str(claims.get("workflow_sha") or "").casefold()
     required_claims = {
         "repository": repository,
-        "event_name": "repository_dispatch",
         "ref": "refs/heads/main",
         "runner_environment": "github-hosted",
         "workflow": "Operations Cloud Coding",
         "workflow_ref": workflow_ref,
     }
+    event_name = str(claims.get("event_name") or "")
     if (
         any(str(claims.get(name) or "") != expected for name, expected in required_claims.items())
+        or event_name not in {"schedule", "workflow_dispatch"}
         or not re.fullmatch(r"[0-9a-f]{40}", claim_sha)
         or workflow_sha != claim_sha
     ):
@@ -7001,47 +6989,100 @@ def _operations_issue_worker_credential(
         run = operations_github_client.get_workflow_run(run_id)
     except (OperationsGitHubError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=503, detail="The GitHub coding run could not be verified.") from exc
-    expected_title = f"Operations coding task {task_id.casefold()}"
     if (
         run_id <= 0
         or run_attempt <= 0
         or current_main != claim_sha
         or str(run.get("id") or "") != str(run_id)
-        or str(run.get("event") or "") != "repository_dispatch"
-        or str(run.get("display_title") or "").casefold() != expected_title.casefold()
+        or str(run.get("event") or "") != event_name
+        or str(run.get("display_title") or "").casefold() != "operations cloud queue"
         or str(run.get("path") or "") != OPERATIONS_WORKER_WORKFLOW_PATH
         or str(run.get("head_sha") or "").casefold() != claim_sha
         or str(run.get("status") or "").casefold() not in {"queued", "in_progress"}
     ):
         raise HTTPException(status_code=401, detail="The GitHub worker identity was rejected.")
+    return claims, run, current_main
+
+
+def _operations_claim_worker_task(db: Session, oidc_token: str) -> Dict[str, Any]:
+    """Give one queued audited action to a verified GitHub-hosted worker."""
+    claims, run, current_main = _operations_verified_queue_run(oidc_token)
+    run_id = int(str(claims.get("run_id") or "0"))
+    run_attempt = int(str(claims.get("run_attempt") or "0"))
+
+    # A later queue run also acts as the watchdog for an earlier worker. This
+    # prevents a cancelled job from leaving the coding queue permanently busy.
+    running_coding = db.query(OperationsAction).filter(
+        OperationsAction.action_type == "coding_task",
+        OperationsAction.status == "running",
+    ).all()
+    for running_action in running_coding:
+        _operations_refresh_coding_task(db, running_action)
+    _operations_reconcile_deployment_actions(db)
 
     with _operations_code_task_lock:
-        action = db.query(OperationsAction).filter(
-            OperationsAction.id == task_id,
-            OperationsAction.action_type == "coding_task",
-            OperationsAction.status.in_(OPERATIONS_CODE_ACTIVE_STATUSES),
-        ).first()
+        candidates = db.query(OperationsAction).filter(
+            OperationsAction.action_type.in_(["coding_task", "code_deployment"]),
+            OperationsAction.status.in_(["queued", "running"]),
+        ).order_by(OperationsAction.created_at.asc(), OperationsAction.id.asc()).all()
+        action = next(
+            (item for item in candidates if str(_operations_action_payload(item).get("worker_run_id") or "") == str(run_id)),
+            None,
+        )
         if not action:
-            raise HTTPException(status_code=409, detail="The coding task is no longer active.")
+            queued = [item for item in candidates if item.status == "queued"]
+            action = next((item for item in queued if item.action_type == "code_deployment"), None)
+            action = action or next((item for item in queued if item.action_type == "coding_task"), None)
+        if not action:
+            return {"kind": "none"}
         payload = _operations_action_payload(action)
-        expected_branch = f"ops/task-{task_id.casefold()}"
-        if str(payload.get("branch") or "").casefold() != expected_branch:
-            raise HTTPException(status_code=409, detail="The coding task is unavailable.")
-        existing_run_id = str(payload.get("credential_run_id") or "")
-        issue_count = int(payload.get("credential_issue_count") or 0)
-        if (existing_run_id and existing_run_id != str(run_id)) or issue_count >= 3:
-            raise HTTPException(status_code=409, detail="The coding worker credential was already issued.")
+        openai_key = ""
+        title = ""
+        instructions = ""
+        acceptance_test = ""
+        if action.action_type == "coding_task":
+            openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+            title = str(payload.get("title") or "")
+            instructions = str(payload.get("instructions") or "")
+            acceptance_test = str(payload.get("acceptance_test") or "")
+            if not openai_key:
+                raise HTTPException(status_code=503, detail="The coding worker credential is unavailable.")
+            if not title or not instructions or not acceptance_test:
+                raise HTTPException(status_code=409, detail="The queued coding task is incomplete.")
+        issue_count = int(payload.get("worker_claim_count") or 0)
+        if issue_count >= 3:
+            raise HTTPException(status_code=409, detail="The cloud worker action was already claimed.")
         payload.update({
-            "credential_run_id": str(run_id),
-            "credential_run_attempt": run_attempt,
-            "credential_issue_count": issue_count + 1,
-            "credential_jti_sha256": hashlib.sha256(str(claims.get("jti") or "").encode("utf-8")).hexdigest(),
-            "credential_issued_at": datetime.utcnow().isoformat() + "Z",
-            "workflow_sha": claim_sha,
+            "worker_run_id": str(run_id),
+            "worker_run_attempt": run_attempt,
+            "worker_claim_count": issue_count + 1,
+            "worker_jti_sha256": hashlib.sha256(str(claims.get("jti") or "").encode("utf-8")).hexdigest(),
+            "worker_claimed_at": datetime.utcnow().isoformat() + "Z",
+            "workflow_sha": current_main,
+            "base_sha": payload.get("base_sha") or current_main,
+            "stage": "coding" if action.action_type == "coding_task" else "promoting",
         })
         action.payload = json.dumps(payload, ensure_ascii=False)
+        action.status = "running"
         db.commit()
-    return {"credential": openai_key}
+    if action.action_type == "code_deployment":
+        return {
+            "kind": "deployment",
+            "action_id": action.id,
+            "task_id": str(payload.get("task_id") or ""),
+            "branch": str(payload.get("branch") or ""),
+            "commit_sha": str(payload.get("commit_sha") or ""),
+        }
+    return {
+        "kind": "coding",
+        "action_id": action.id,
+        "task_id": action.id,
+        "branch": str(payload.get("branch") or ""),
+        "title": title,
+        "instructions_b64": base64.b64encode(instructions.encode("utf-8")).decode("ascii"),
+        "acceptance_test_b64": base64.b64encode(acceptance_test.encode("utf-8")).decode("ascii"),
+        "credential": openai_key,
+    }
 
 
 def _operations_inspect_coding_runner() -> Dict[str, Any]:
@@ -7055,7 +7096,6 @@ def _operations_inspect_coding_runner() -> Dict[str, Any]:
         runs = operations_github_client.list_workflow_runs(
             limit=5,
             workflow="operations-code.yml",
-            event="repository_dispatch",
         )
         return {
             "status": "ok",
@@ -7139,10 +7179,12 @@ def _operations_start_coding_task(
             action_type="coding_task",
             payload=json.dumps({
                 "title": title,
+                "instructions": instructions,
                 "acceptance_test": acceptance_test,
                 "instructions_sha256": hashlib.sha256(instructions.encode("utf-8")).hexdigest(),
-                "stage": "dispatching",
+                "stage": "awaiting_runner",
                 "branch": branch,
+                "queued_at": datetime.utcnow().isoformat() + "Z",
             }),
             reason=f"Owner-authorised coding task: {title}",
             status="queued",
@@ -7150,55 +7192,21 @@ def _operations_start_coding_task(
         db.add(action)
         db.commit()
         db.refresh(action)
-        try:
-            dispatched_branch = operations_github_client.dispatch_code_task(
-                task_id=action.id,
-                title=title,
-                instructions=instructions,
-                acceptance_test=acceptance_test,
-            )
-            payload = _operations_action_payload(action)
-            payload.update({
-                "branch": dispatched_branch,
-                "stage": "queued",
-                "dispatched_at": datetime.utcnow().isoformat() + "Z",
-            })
-            action.payload = json.dumps(payload, ensure_ascii=False)
-            db.commit()
-        except OperationsGitHubError as exc:
-            payload = _operations_action_payload(action)
-            payload.update({
-                "stage": "failed",
-                "error": redact_sensitive_text(str(exc), limit=1_500),
-                "finished_at": datetime.utcnow().isoformat() + "Z",
-            })
-            action.payload = json.dumps(payload, ensure_ascii=False)
-            action.status = "failed"
-            action.executed_at = datetime.utcnow()
-            db.commit()
-            return {"status": "failed", "task_id": action.id, "reason": str(exc)}
     return {
         "status": "started",
         "task_id": action.id,
         "title": title,
         "isolation": "GitHub-hosted runner with a dedicated review branch",
         "deployment": "not authorised; this task cannot change main or deploy",
-        "next_step": "Use inspect_coding_task with this task_id to check progress.",
+        "next_step": "The GitHub queue collects tasks every five minutes; use inspect_coding_task to check progress.",
     }
 
 
-def _operations_matching_task_run(task_id: str) -> Optional[Dict[str, Any]]:
-    runs = operations_github_client.list_workflow_runs(
-        limit=50,
-        workflow="operations-code.yml",
-        event="repository_dispatch",
-    )
-    marker = task_id.casefold()
-    matching = [
-        item for item in runs
-        if marker in str(item.get("display_title") or "").casefold()
-    ]
-    return matching[0] if matching else None
+def _operations_matching_task_run(action: OperationsAction) -> Optional[Dict[str, Any]]:
+    run_id = _operations_action_payload(action).get("worker_run_id")
+    if not run_id:
+        return None
+    return operations_github_client.get_workflow_run(int(run_id))
 
 
 def _operations_change_summary(comparison: Dict[str, Any]) -> str:
@@ -7230,7 +7238,7 @@ def _operations_refresh_coding_task(db: Session, action: OperationsAction) -> Op
     if action.status not in OPERATIONS_CODE_ACTIVE_STATUSES:
         return None
     try:
-        run = _operations_matching_task_run(action.id)
+        run = _operations_matching_task_run(action)
         payload = _operations_action_payload(action)
         if not run:
             payload["stage"] = "awaiting_runner"
@@ -7399,11 +7407,56 @@ def _operations_inspect_code_changes(db: Session, task_id: str) -> Dict[str, Any
         return {"status": "unavailable", "task_id": task_id, "reason": str(exc)}
 
 
-def _operations_deployment_status(limit: int) -> Dict[str, Any]:
+def _operations_reconcile_deployment_actions(db: Session) -> None:
+    active = db.query(OperationsAction).filter(
+        OperationsAction.action_type == "code_deployment",
+        OperationsAction.status == "running",
+    ).all()
+    if not active:
+        return
+    try:
+        main_ref = operations_github_client.get_ref("heads/main")
+        main_object = main_ref.get("object", {}) if isinstance(main_ref, dict) else {}
+        current_main = str(main_object.get("sha") or "").casefold() if isinstance(main_object, dict) else ""
+        changed = False
+        for action in active:
+            payload = _operations_action_payload(action)
+            run_id = payload.get("worker_run_id")
+            expected_commit = str(payload.get("commit_sha") or "").casefold()
+            if not run_id or not re.fullmatch(r"[0-9a-f]{40}", expected_commit):
+                continue
+            run = operations_github_client.get_workflow_run(int(run_id))
+            if str(run.get("status") or "").casefold() != "completed":
+                continue
+            conclusion = str(run.get("conclusion") or "unknown").casefold()
+            payload["promotion_worker_conclusion"] = conclusion
+            payload["finished_at"] = datetime.utcnow().isoformat() + "Z"
+            if conclusion == "success" and current_main == expected_commit:
+                action.status = "pushed"
+                payload["stage"] = "pushed"
+                payload["pushed_at"] = payload["finished_at"]
+            else:
+                action.status = "failed"
+                payload["stage"] = "failed"
+                payload["error"] = (
+                    f"The GitHub promotion worker finished with status {conclusion}; "
+                    f"main {'does' if current_main == expected_commit else 'does not'} contain the reviewed commit."
+                )
+            action.payload = json.dumps(payload, ensure_ascii=False)
+            action.executed_at = datetime.utcnow()
+            changed = True
+        if changed:
+            db.commit()
+    except (OperationsGitHubError, TypeError, ValueError):
+        db.rollback()
+
+
+def _operations_deployment_status(db: Session, limit: int) -> Dict[str, Any]:
     from urllib import error as url_error
     from urllib import request as url_request
 
     bounded_limit = max(1, min(10, int(limit)))
+    _operations_reconcile_deployment_actions(db)
     repository = operations_github_client.repository
     if not operations_github_client.configured:
         return {"status": "unavailable", "reason": "The deployment repository is not configured."}
@@ -7430,7 +7483,26 @@ def _operations_deployment_status(limit: int) -> Dict[str, Any]:
             }
     except (url_error.URLError, TimeoutError, OSError) as exc:
         health = {"status": "unreachable", "reason": type(exc).__name__}
-    return {"status": "ok", "repository": repository, "runs": runs, "application_health": health}
+    deployment_actions = db.query(OperationsAction).filter(
+        OperationsAction.action_type == "code_deployment",
+    ).order_by(OperationsAction.created_at.desc()).limit(bounded_limit).all()
+    return {
+        "status": "ok",
+        "repository": repository,
+        "runs": runs,
+        "deployment_actions": [
+            {
+                "action_id": item.id,
+                "state": item.status,
+                "task_id": _operations_action_payload(item).get("task_id"),
+                "commit_sha": _operations_action_payload(item).get("commit_sha"),
+                "worker_run_id": _operations_action_payload(item).get("worker_run_id"),
+                "worker_conclusion": _operations_action_payload(item).get("promotion_worker_conclusion"),
+            }
+            for item in deployment_actions
+        ],
+        "application_health": health,
+    }
 
 
 def _operations_propose_code_deployment(db: Session, task_id: str, reason: str) -> Dict[str, Any]:
@@ -7453,7 +7525,7 @@ def _operations_propose_code_deployment(db: Session, task_id: str, reason: str) 
     with _operations_code_deployment_lock:
         existing = db.query(OperationsAction).filter(
             OperationsAction.action_type == "code_deployment",
-            OperationsAction.status.in_(["pending", "running", "pushed"]),
+            OperationsAction.status.in_(["pending", "queued", "running", "pushed"]),
         ).all()
         for candidate in existing:
             if _operations_action_payload(candidate).get("task_id") == task_id:
@@ -7463,7 +7535,7 @@ def _operations_propose_code_deployment(db: Session, task_id: str, reason: str) 
                     "confirmation_phrase": f"deploy {candidate.id}" if candidate.status == "pending" else None,
                     "deployment_state": candidate.status,
                 }
-        active_deployment = next((candidate for candidate in existing if candidate.status in {"pending", "running"}), None)
+        active_deployment = next((candidate for candidate in existing if candidate.status in {"pending", "queued", "running"}), None)
         if active_deployment:
             return {
                 "status": "deployment_busy",
@@ -7521,13 +7593,11 @@ def _operations_execute_code_deployment(
             return {"status": "rejected", "reason": "That deployment proposal is unavailable or already handled."}
         other_running = db.query(OperationsAction).filter(
             OperationsAction.action_type == "code_deployment",
-            OperationsAction.status == "running",
+            OperationsAction.status.in_(["queued", "running"]),
             OperationsAction.id != action.id,
         ).first()
         if other_running:
             return {"status": "deployment_busy", "reason": "Another deployment is already running."}
-        action.status = "running"
-        db.commit()
         try:
             payload = _operations_action_payload(action)
             branch = str(payload.get("branch") or "")
@@ -7558,19 +7628,14 @@ def _operations_execute_code_deployment(
             for item in files:
                 if isinstance(item, dict):
                     _operations_validate_change_path(str(item.get("filename") or ""))
-            updated_ref = operations_github_client.update_ref("heads/main", expected_commit, force=False)
-            updated_object = updated_ref.get("object", {}) if isinstance(updated_ref, dict) else {}
-            updated_sha = str(updated_object.get("sha") or "").casefold() if isinstance(updated_object, dict) else ""
-            if updated_sha and updated_sha != expected_commit:
-                raise OperationsGitHubError("GitHub returned an unexpected main commit after promotion.")
             payload.update({
                 "previous_main_sha": current_main,
-                "pushed_at": datetime.utcnow().isoformat() + "Z",
-                "promotion": "non-force fast-forward through the GitHub API",
+                "queued_at": datetime.utcnow().isoformat() + "Z",
+                "stage": "awaiting_runner",
+                "promotion": "queued for a GitHub-hosted non-force fast-forward",
             })
             action.payload = json.dumps(payload, ensure_ascii=False)
-            action.status = "pushed"
-            action.executed_at = datetime.utcnow()
+            action.status = "queued"
             db.commit()
         except OperationsGitHubError as exc:
             payload = _operations_action_payload(action)
@@ -7584,10 +7649,10 @@ def _operations_execute_code_deployment(
             db.commit()
             return {"status": "failed", "action_id": action.id, "reason": str(exc)}
     return {
-        "status": "pushed",
+        "status": "deployment_queued",
         "action_id": action.id,
-        "main_commit": expected_commit,
-        "next_step": "Use inspect_deployments to verify the Fly deployment and production health.",
+        "commit": expected_commit,
+        "next_step": "The GitHub queue will promote this commit, then use inspect_deployments to verify Fly health.",
     }
 
 
@@ -7655,7 +7720,7 @@ def execute_operations_tool(
     if tool_name == "inspect_code_changes":
         return _operations_inspect_code_changes(db, str(arguments.get("task_id", "")).strip())
     if tool_name == "inspect_deployments":
-        return _operations_deployment_status(int(arguments.get("limit", 5)))
+        return _operations_deployment_status(db, int(arguments.get("limit", 5)))
     if tool_name == "propose_code_deployment":
         return _operations_propose_code_deployment(
             db,
@@ -7799,19 +7864,18 @@ def _operations_web_source_urls(response: Any) -> List[str]:
     return urls[:8]
 
 
-@app.post("/api/internal/operations/worker-credential")
-def issue_operations_worker_credential(
-    payload: OperationsWorkerCredentialInput,
+@app.post("/api/internal/operations/worker-claim")
+def claim_operations_worker_task(
     request: Request,
     response: Response,
     db: Session = Depends(get_db),
 ):
-    """Exchange a verified GitHub-hosted job identity for the worker credential."""
+    """Let one verified GitHub-hosted queue run claim an audited action."""
     scheme, _, token = request.headers.get("Authorization", "").partition(" ")
     if scheme.casefold() != "bearer" or not token.strip():
         raise HTTPException(status_code=401, detail="The GitHub worker identity was rejected.")
     response.headers["Cache-Control"] = "no-store"
-    return _operations_issue_worker_credential(db, payload.task_id.casefold(), token.strip())
+    return _operations_claim_worker_task(db, token.strip())
 
 
 @app.get("/api/settings/operations-chat/messages")
