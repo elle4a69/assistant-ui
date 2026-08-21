@@ -2256,6 +2256,23 @@ class WebhookSMSInput(BaseModel):
     class Config:
         populate_by_name = True
 
+
+class AdminSmsSimulationInput(BaseModel):
+    customer_phone: str
+    body: str
+    sms_account_key: Literal["primary", "secondary"]
+
+
+def normalize_simulator_customer_phone(phone: str) -> str:
+    """Apply the SMS transport's phone rules and return the app's canonical form."""
+    normalized = mobilemessage_service.normalize_sms_destination(phone)
+    if not normalized:
+        raise HTTPException(
+            status_code=422,
+            detail="Customer phone must be a valid Australian mobile or E.164 phone number.",
+        )
+    return f"+{normalized}"
+
 class TakeoverInput(BaseModel):
     agentId: str
 
@@ -4971,18 +4988,15 @@ def find_legacy_inbound_duplicate(
     )
 
 
-@app.post("/webhooks/sms")
-def webhook_sms(payload: WebhookSMSInput, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def process_inbound_sms(
+    payload: WebhookSMSInput,
+    background_tasks: BackgroundTasks,
+    db: Session,
+    sms_account_key: str,
+):
+    """Persist and process one already-routed inbound message."""
     import sys
     from_phone = canonical_phone_number(payload.from_phone)
-    supplied_destination = (payload.to or "").strip()
-    matched_account = mobilemessage_service.matched_account_key_for_inbound_number(supplied_destination)
-    if supplied_destination and not matched_account:
-        print("[Webhook Rejected] Inbound destination is not assigned to an enabled SMS account.")
-        raise HTTPException(status_code=422, detail="Inbound SMS destination is not configured.")
-    # Missing `to` remains a legacy primary-line compatibility path. Any supplied
-    # destination must match exactly, so line 2 can never fall through to Tori.
-    sms_account_key = matched_account or "primary"
     received_at_naive = to_naive_utc(payload.receivedAt)
     provider_message_id, has_explicit_inbound_id = inbound_webhook_identity(
         payload,
@@ -5189,6 +5203,63 @@ def webhook_sms(payload: WebhookSMSInput, background_tasks: BackgroundTasks, db:
                 received_at_naive
             )
         return {"status": "success", "thread_id": thread.id}
+
+
+@app.post("/webhooks/sms")
+def webhook_sms(payload: WebhookSMSInput, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    supplied_destination = (payload.to or "").strip()
+    matched_account = mobilemessage_service.matched_account_key_for_inbound_number(supplied_destination)
+    if supplied_destination and not matched_account:
+        print("[Webhook Rejected] Inbound destination is not assigned to an enabled SMS account.")
+        raise HTTPException(status_code=422, detail="Inbound SMS destination is not configured.")
+    # Missing `to` remains a legacy primary-line compatibility path. Any supplied
+    # destination must match exactly, so line 2 can never fall through to Tori.
+    return process_inbound_sms(payload, background_tasks, db, matched_account or "primary")
+
+
+@app.post("/api/admin/sms-simulator")
+def simulate_inbound_sms(
+    simulation: AdminSmsSimulationInput,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Run an inbound SMS through the app without contacting the SMS provider."""
+    customer_phone = normalize_simulator_customer_phone(simulation.customer_phone)
+    if not simulation.body.strip():
+        raise HTTPException(status_code=422, detail="Message body must not be empty.")
+
+    payload = WebhookSMSInput.model_validate({
+        "from": customer_phone,
+        "body": simulation.body.strip(),
+        "receivedAt": datetime.now(timezone.utc),
+        "isSimulation": True,
+    })
+    try:
+        result = process_inbound_sms(
+            payload,
+            background_tasks,
+            db,
+            simulation.sms_account_key,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Admin SMS simulation failed")
+        # This endpoint is admin-only. Return actionable exception detail while
+        # stripping common credential-bearing URL components and long tokens.
+        safe_detail = re.sub(r"(?i)(api[_-]?key|token|password|secret)=([^&\s]+)", r"\1=[redacted]", str(exc))
+        safe_detail = re.sub(r"\b[A-Za-z0-9_-]{40,}\b", "[redacted]", safe_detail)
+        raise HTTPException(
+            status_code=500,
+            detail=f"SMS simulation failed: {safe_detail or type(exc).__name__}",
+        ) from exc
+
+    return {
+        **result,
+        "customer_phone": customer_phone,
+        "sms_account_key": simulation.sms_account_key,
+        "provider_sends": 0,
+    }
 
 
 @app.get("/api/threads")

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 5190",
     "build": "tsc -b && vite build",
+    "test": "node --test test/*.test.mjs",
     "watch": "vite build --watch --emptyOutDir false",
     "preview": "vite preview"
   },

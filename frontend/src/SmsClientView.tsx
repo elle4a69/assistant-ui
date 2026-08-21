@@ -23,13 +23,15 @@ function canonicalPhone(phone: string) {
 }
 
 export default function SmsClientView() {
-  const [customerPhone, setCustomerPhone] = useState('');
+  const [customerPhone, setCustomerPhone] = useState('+61');
   const [activePhone, setActivePhone] = useState<string | null>(null);
+  const [smsAccountKey, setSmsAccountKey] = useState<'primary' | 'secondary'>('primary');
   const [threads, setThreads] = useState<ThreadListItem[]>([]);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [composerText, setComposerText] = useState('');
   const [loading, setLoading] = useState(false);
+  const [simulationError, setSimulationError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const threadListRequestRef = useRef(0);
   const threadMessagesRequestRef = useRef(0);
@@ -46,7 +48,10 @@ export default function SmsClientView() {
       
       if (activePhone) {
         const activeCanonicalPhone = canonicalPhone(activePhone);
-        const matched = list.find(t => canonicalPhone(t.customerPhone) === activeCanonicalPhone);
+        const matched = list.find(t =>
+          t.smsAccountKey === smsAccountKey
+          && canonicalPhone(t.customerPhone) === activeCanonicalPhone
+        );
         if (matched) {
           setActivePhone(matched.customerPhone);
           setThreadId(matched.id);
@@ -55,7 +60,7 @@ export default function SmsClientView() {
     } catch (err) {
       console.error('Failed to poll threads list:', err);
     }
-  }, [activePhone]);
+  }, [activePhone, smsAccountKey]);
 
   // Poll messages for current thread
   const fetchThreadMessages = useCallback(async () => {
@@ -113,10 +118,15 @@ export default function SmsClientView() {
   const handleStartChat = (phone: string) => {
     if (!phone.trim()) return;
     const formatted = phone.trim();
+    setSimulationError(null);
+    setCustomerPhone(formatted);
     setActivePhone(formatted);
     // Find if thread already exists
     const formattedCanonicalPhone = canonicalPhone(formatted);
-    const matched = threads.find(t => canonicalPhone(t.customerPhone) === formattedCanonicalPhone);
+    const matched = threads.find(t =>
+      t.smsAccountKey === smsAccountKey
+      && canonicalPhone(t.customerPhone) === formattedCanonicalPhone
+    );
     if (matched) {
       setActivePhone(matched.customerPhone);
       setThreadId(matched.id);
@@ -132,15 +142,19 @@ export default function SmsClientView() {
 
     setLoading(true);
     try {
-      await sendCustomerSms(activePhone, composerText.trim());
+      const result = await sendCustomerSms(activePhone, composerText.trim(), smsAccountKey);
+      setActivePhone(result.customer_phone);
+      setCustomerPhone(result.customer_phone);
+      setThreadId(result.thread_id);
       setComposerText('');
+      setSimulationError(null);
       // Force refresh threads and messages
       await fetchThreadsAndSync();
       if (threadId) {
         await fetchThreadMessages();
       }
     } catch (err) {
-      alert('Failed to send SMS');
+      setSimulationError(err instanceof Error ? err.message : 'SMS simulation failed.');
     } finally {
       setLoading(false);
     }
@@ -150,14 +164,18 @@ export default function SmsClientView() {
     if (!activePhone || loading) return;
     setLoading(true);
     try {
-      await sendCustomerSms(activePhone, text);
+      const result = await sendCustomerSms(activePhone, text, smsAccountKey);
+      setActivePhone(result.customer_phone);
+      setCustomerPhone(result.customer_phone);
+      setThreadId(result.thread_id);
+      setSimulationError(null);
       // Force refresh threads and messages
       await fetchThreadsAndSync();
       if (threadId) {
         await fetchThreadMessages();
       }
     } catch (err) {
-      alert('Failed to send quick SMS');
+      setSimulationError(err instanceof Error ? err.message : 'SMS simulation failed.');
     } finally {
       setLoading(false);
     }
@@ -178,6 +196,26 @@ export default function SmsClientView() {
             {/* Phone selection form */}
             <div className="flex flex-col gap-3">
               <div>
+                <label className="block text-xs font-semibold text-slate-500 mb-1" htmlFor="simulator-account">
+                  SMS Line
+                </label>
+                <select
+                  id="simulator-account"
+                  value={smsAccountKey}
+                  onChange={(e) => {
+                    setSmsAccountKey(e.target.value as 'primary' | 'secondary');
+                    setActivePhone(null);
+                    setThreadId(null);
+                    setMessages([]);
+                    setSimulationError(null);
+                  }}
+                  className="w-full text-sm bg-slate-50 border border-slate-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                >
+                  <option value="primary">Tori (primary)</option>
+                  <option value="secondary">Anonymous (secondary)</option>
+                </select>
+              </div>
+              <div>
                 <label className="block text-xs font-semibold text-slate-500 mb-1">
                   Select Existing Customer
                 </label>
@@ -187,7 +225,7 @@ export default function SmsClientView() {
                   className="w-full text-sm bg-slate-50 border border-slate-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 >
                   <option value="">-- Choose Existing --</option>
-                  {threads.map((t) => (
+                  {threads.filter((t) => t.smsAccountKey === smsAccountKey).map((t) => (
                     <option key={t.id} value={t.customerPhone}>
                       {t.customerPhone} ({t.status})
                     </option>
@@ -202,12 +240,12 @@ export default function SmsClientView() {
 
               <div>
                 <label className="block text-xs font-semibold text-slate-500 mb-1">
-                  Enter Custom Phone Number
+                  Customer Phone Number
                 </label>
                 <div className="flex gap-2">
                   <input
                     type="text"
-                    placeholder="e.g. +19998887777"
+                    placeholder="e.g. 0412 345 678"
                     value={customerPhone}
                     onChange={(e) => setCustomerPhone(e.target.value)}
                     className="flex-1 text-sm bg-slate-50 border border-slate-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
@@ -215,7 +253,6 @@ export default function SmsClientView() {
                   <button
                     onClick={() => {
                       handleStartChat(customerPhone);
-                      setCustomerPhone('');
                     }}
                     className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-3 rounded-lg font-medium transition-colors flex items-center gap-1 cursor-pointer border border-transparent"
                   >
@@ -223,6 +260,11 @@ export default function SmsClientView() {
                   </button>
                 </div>
               </div>
+              {simulationError && (
+                <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                  {simulationError}
+                </div>
+              )}
             </div>
           </div>
 
@@ -267,7 +309,9 @@ export default function SmsClientView() {
                 </div>
                 <div className="flex flex-col">
                   <span className="text-xs font-bold truncate max-w-[140px]">{activePhone}</span>
-                  <span className="text-[9px] text-emerald-400 font-medium">Online</span>
+                  <span className="text-[9px] text-emerald-400 font-medium">
+                    {smsAccountKey === 'primary' ? 'Tori' : 'Anonymous'} · internal simulation
+                  </span>
                 </div>
               </div>
 

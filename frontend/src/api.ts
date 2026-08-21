@@ -447,20 +447,29 @@ export async function toggleAutoresponder(threadId: string, enabled: boolean): P
   return response.json();
 }
 
-export async function sendCustomerSms(fromPhone: string, body: string): Promise<{ status: string; thread_id: string }> {
-  const response = await apiFetch(`${API_BASE}/webhooks/sms`, {
+export async function sendCustomerSms(
+  customerPhone: string,
+  body: string,
+  smsAccountKey: 'primary' | 'secondary',
+): Promise<{ status: string; thread_id: string; customer_phone: string; sms_account_key: 'primary' | 'secondary'; provider_sends: 0 }> {
+  const response = await apiFetch(`${API_BASE}/api/admin/sms-simulator`, {
     method: 'POST',
+    credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      from: fromPhone,
-      to: "+15557654321",
+      customer_phone: customerPhone,
       body,
-      receivedAt: new Date().toISOString(),
-      isSimulation: true,
+      sms_account_key: smsAccountKey,
     }),
   });
   if (!response.ok) {
-    throw new Error(`Failed to send customer SMS webhook: ${response.statusText}`);
+    const payload = await response.json().catch(() => null);
+    const detail = typeof payload?.detail === 'string'
+      ? payload.detail
+      : Array.isArray(payload?.detail)
+        ? payload.detail.map((item: { msg?: string }) => item.msg).filter(Boolean).join('; ')
+        : '';
+    throw new Error(detail || `SMS simulation failed (${response.status}).`);
   }
   return response.json();
 }
