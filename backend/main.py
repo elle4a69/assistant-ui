@@ -1897,8 +1897,9 @@ def classify_knowledge_entries(entries: List[Dict[str, Any]]) -> Dict[str, Dict[
         "Use shared only for durable facts safe for either SMS line. Use primary or secondary only "
         "when the record explicitly identifies that line. Mark availability, times, appointment "
         "options, booking states, one-off customer facts, personal information, and uncertainty as "
-        "retrieval_enabled false. Service-specific facts are false because services and availability "
-        "come from the live booking system. Never invent a scope or facts."
+        "retrieval_enabled false. Durable service-specific information is valuable and may be "
+        "retrieval_enabled true. Never treat stored service knowledge as availability; availability "
+        "always comes from the live booking system. Never invent a scope or facts."
     )
     try:
         response = openai_client.responses.create(

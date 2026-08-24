@@ -134,6 +134,10 @@ def test_ai_knowledge_classifier_tags_generic_entries_and_quarantines_availabili
                         "id": "availability", "scope": "shared",
                         "category": "availability_or_booking_state", "retrieval_enabled": True,
                     },
+                    {
+                        "id": "service", "scope": "shared",
+                        "category": "service_specific", "retrieval_enabled": True,
+                    },
                 ]}),
             })()
 
@@ -145,9 +149,12 @@ def test_ai_knowledge_classifier_tags_generic_entries_and_quarantines_availabili
     result = main.classify_knowledge_entries([
         {"id": "generic", "type": "manual_guidance", "text": "Be welcoming."},
         {"id": "availability", "type": "information_request_resolution", "text": "Free at 3pm."},
+        {"id": "service", "type": "information_request_resolution", "text": "Service details."},
     ])
 
     assert result["generic"]["scope"] == "shared"
     assert result["generic"]["retrieval_enabled"] is True
     assert result["availability"]["category"] == "availability_or_booking_state"
     assert result["availability"]["retrieval_enabled"] is False
+    assert result["service"]["category"] == "service_specific"
+    assert result["service"]["retrieval_enabled"] is True
