@@ -319,7 +319,7 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
     setError(null);
     try {
       const [bookingsData, whData] = await Promise.all([
-        listBookings(),
+        listBookings({ includePast: true }),
         getWorkingHours().catch(() => [])
       ]);
       bookingsData.sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime());

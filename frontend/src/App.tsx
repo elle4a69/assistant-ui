@@ -9,7 +9,7 @@ import BootcampView from './BootcampView'
 import ArrivalClientView from './ArrivalClientView'
 import ArrivalProviderView from './ArrivalProviderView'
 import { getAdminAuthStatus, listArrivalSessions, listBookings, listThreads, loginAdmin, logoutAdmin, type ArrivalSession, type CalendarBooking } from './api'
-import { mergeArrivalAlertQueue, playBookingAlarm, processArrivalSessionSnapshot, processArrivalThreadSnapshot, processBookingSnapshot, stopIncomingAlarm, unlockIncomingAlarmAudio } from './incomingMessageAlarm'
+import { mergeArrivalAlertQueue, playBookingAlarm, processArrivalSessionSnapshot, processArrivalThreadSnapshot, processBookingSnapshot, rememberDismissedBooking, stopIncomingAlarm, unlockIncomingAlarmAudio } from './incomingMessageAlarm'
 import { UserCheck, Smartphone, Settings, Calendar, MessagesSquare, CalendarCheck, Bot, DoorOpen, LogOut, LockKeyhole, BellRing, SquareTerminal } from 'lucide-react'
 
 const AgentConsole = lazy(() => import('./AgentConsole'))
@@ -174,6 +174,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
 
   const dismissBookingAlert = () => {
     stopIncomingAlarm();
+    if (newBookingAlert) rememberDismissedBooking(newBookingAlert);
     setNewBookingAlert(null);
   };
 

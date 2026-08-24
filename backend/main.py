@@ -3425,9 +3425,14 @@ def toggle_autoresponder(thread_id: str, payload: AutoresponderInput, db: Sessio
 
 
 @app.get("/api/calendar/bookings")
-def get_bookings(db: Session = Depends(get_db)):
+def get_bookings(
+    db: Session = Depends(get_db),
+    include_past: bool = Query(False, alias="includePast"),
+):
     from zoneinfo import ZoneInfo
     tz_hobart = ZoneInfo("Australia/Hobart")
+    now_utc = datetime.now(timezone.utc)
+    now_hobart = now_utc.astimezone(tz_hobart).replace(tzinfo=None)
 
     def format_booking_dt(dt: datetime) -> str:
         """Return an ISO timestamp with the real Hobart UTC offset."""
@@ -3440,9 +3445,16 @@ def get_bookings(db: Session = Depends(get_db)):
     if calendar_service.service:
         try:
             calendar_id = os.getenv("CALENDAR_ID", "primary")
-            events_result = calendar_service.service.events().list(
-                calendarId=calendar_id, orderBy='startTime', singleEvents=True
-            ).execute()
+            list_arguments: Dict[str, Any] = {
+                "calendarId": calendar_id,
+                "orderBy": "startTime",
+                "singleEvents": True,
+            }
+            if not include_past:
+                # The default feed drives the live booking alert poller. Do not
+                # send historical events to old or current PWA clients.
+                list_arguments["timeMin"] = now_utc.isoformat().replace("+00:00", "Z")
+            events_result = calendar_service.service.events().list(**list_arguments).execute()
             events = events_result.get('items', [])
             for e in events:
                 start_raw = e["start"].get("dateTime", e["start"].get("date"))
@@ -3452,6 +3464,11 @@ def get_bookings(db: Session = Depends(get_db)):
                 b_start = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
                 b_end = datetime.fromisoformat(end_raw.replace("Z", "+00:00"))
                 
+                if b_end.tzinfo is None:
+                    b_end = b_end.replace(tzinfo=tz_hobart)
+                if not include_past and b_end.astimezone(timezone.utc) <= now_utc:
+                    continue
+
                 # Convert to Hobart local time; the response formatter restores the explicit offset.
                 b_start_local = b_start.astimezone(tz_hobart).replace(tzinfo=None)
                 b_end_local = b_end.astimezone(tz_hobart).replace(tzinfo=None)
@@ -3472,7 +3489,10 @@ def get_bookings(db: Session = Depends(get_db)):
         except Exception as ex:
             print(f"Error listing Google Calendar events: {ex}")
             
-    db_events = db.query(CalendarEvent).order_by(CalendarEvent.start_time.asc()).all()
+    db_events_query = db.query(CalendarEvent)
+    if not include_past:
+        db_events_query = db_events_query.filter(CalendarEvent.end_time > now_hobart)
+    db_events = db_events_query.order_by(CalendarEvent.start_time.asc()).all()
     for de in db_events:
         # de.start_time and de.end_time are naive local Hobart times in database.
         # Return them with an explicit Hobart offset so browsers preserve the booked time.

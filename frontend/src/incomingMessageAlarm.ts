@@ -257,6 +257,16 @@ export function processBookingSnapshot(bookings: CalendarBooking[]): CalendarBoo
   return newlyCreated;
 }
 
+export function rememberDismissedBooking(booking: CalendarBooking) {
+  const previous = readSeenBookings() || { ids: [], fingerprints: [] };
+  const ids = new Set(previous.ids);
+  const fingerprints = new Set(previous.fingerprints);
+  const id = String(booking.id || '').trim();
+  if (id) ids.add(id);
+  fingerprints.add(bookingFingerprint(booking));
+  writeSeenBookings({ ids: Array.from(ids), fingerprints: Array.from(fingerprints) });
+}
+
 function readPreviousSnapshot(): Record<string, string> | null {
   try {
     const raw = localStorage.getItem(THREAD_SNAPSHOT_KEY);

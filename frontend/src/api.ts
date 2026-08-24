@@ -490,8 +490,9 @@ export async function sendCustomerSms(
   return response.json();
 }
 
-export async function listBookings(): Promise<CalendarBooking[]> {
-  const response = await apiFetch(`${API_BASE}/api/calendar/bookings`);
+export async function listBookings(options: { includePast?: boolean } = {}): Promise<CalendarBooking[]> {
+  const query = options.includePast ? '?includePast=true' : '';
+  const response = await apiFetch(`${API_BASE}/api/calendar/bookings${query}`);
   if (!response.ok) {
     throw new Error(`Failed to list calendar bookings: ${response.statusText}`);
   }

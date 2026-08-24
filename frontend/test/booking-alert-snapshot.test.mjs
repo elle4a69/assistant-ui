@@ -5,6 +5,8 @@ import ts from 'typescript';
 
 const sourceUrl = new URL('../src/incomingMessageAlarm.ts', import.meta.url);
 const source = await readFile(sourceUrl, 'utf8');
+const apiSource = await readFile(new URL('../src/api.ts', import.meta.url), 'utf8');
+const bookingsViewSource = await readFile(new URL('../src/BookingsView.tsx', import.meta.url), 'utf8');
 const transpiled = ts.transpileModule(source, {
   compilerOptions: {
     module: ts.ModuleKind.ESNext,
@@ -94,4 +96,21 @@ test('an existing booking edit keeps the original booking identity acknowledged'
   } finally {
     Date.now = originalNow;
   }
+});
+
+test('dismissing a booking explicitly persists its identity and fingerprint', async () => {
+  const alarm = await loadAlarmModule();
+  const dismissed = booking('dismissed-id', '2026-08-28T03:00:00Z');
+
+  alarm.rememberDismissedBooking(dismissed);
+  assert.deepEqual(alarm.processBookingSnapshot([dismissed]), []);
+  assert.deepEqual(
+    alarm.processBookingSnapshot([booking('mirrored-dismissed-id', '2026-08-28T03:00:00Z')]),
+    [],
+  );
+});
+
+test('live alert polling excludes history while the bookings page opts into it', () => {
+  assert.match(apiSource, /options\.includePast \? '\?includePast=true' : ''/);
+  assert.match(bookingsViewSource, /listBookings\(\{ includePast: true \}\)/);
 });
