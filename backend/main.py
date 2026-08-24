@@ -1356,6 +1356,10 @@ def init_db():
 
 init_db()
 
+# Kept near the loader because the loader needs to recognise learned records
+# during module startup, before the learning helpers are defined below.
+LEARNED_INFORMATION_FILENAME = "learned_information.jsonl"
+
 def load_knowledge_base():
     global KNOWLEDGE_CHUNKS
     KNOWLEDGE_CHUNKS = []
@@ -1410,10 +1414,16 @@ def load_knowledge_base():
                                 if not text_val:
                                     text_val = " ".join(str(val) for val in obj.values() if isinstance(val, (str, int, float)))
                                 if text_val:
+                                    # Learned JSONL entries are fail-closed until the
+                                    # classifier has assigned their permanent scope.
+                                    is_learned_entry = filename == LEARNED_INFORMATION_FILENAME
                                     KNOWLEDGE_CHUNKS.append({
                                         "source": filename,
                                         "type": "text",
-                                        "text": text_val.strip()
+                                        "text": text_val.strip(),
+                                        "scope": str(obj.get("scope", "internal" if is_learned_entry else "shared")),
+                                        "category": str(obj.get("category", "internal_or_uncertain")),
+                                        "retrieval_enabled": bool(obj.get("retrieval_enabled", not is_learned_entry)),
                                     })
                         except Exception as line_e:
                             print(f"Error parsing jsonl line: {line_e}")
@@ -1424,24 +1434,38 @@ def load_knowledge_base():
 
 load_knowledge_base()
 
-def retrieve_knowledge_chunks(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+def retrieve_knowledge_chunks(
+    query: str,
+    limit: int = 5,
+    account_key: str = "primary",
+) -> List[Dict[str, Any]]:
     if not KNOWLEDGE_CHUNKS:
+        return []
+
+    allowed_scopes = {"shared", account_key}
+    eligible_chunks = [
+        chunk for chunk in KNOWLEDGE_CHUNKS
+        if chunk.get("type", "text") == "text"
+        and chunk.get("retrieval_enabled", True)
+        and chunk.get("scope", "internal") in allowed_scopes
+    ]
+    if not eligible_chunks:
         return []
         
     query_words = [w.strip().lower() for w in query.split() if len(w.strip()) > 1]
     if not query_words:
-        return KNOWLEDGE_CHUNKS[:limit]
+        return eligible_chunks[:limit]
         
     scored_chunks = []
-    for chunk in KNOWLEDGE_CHUNKS:
+    for chunk in eligible_chunks:
         text_lower = chunk["text"].lower()
         score = sum(1 for word in query_words if word in text_lower)
         scored_chunks.append((score, chunk))
     scored_chunks.sort(key=lambda x: x[0], reverse=True)
     return [chunk for score, chunk in scored_chunks[:limit]]
 
-def search_knowledge(query: str, limit: int = 5) -> str:
-    results = retrieve_knowledge_chunks(query, limit)
+def search_knowledge(query: str, limit: int = 5, account_key: str = "primary") -> str:
+    results = retrieve_knowledge_chunks(query, limit, account_key)
     text_results = [r for r in results if r.get("type", "text") == "text"]
     
     if not text_results:
@@ -1459,8 +1483,6 @@ def get_live_services_context(account_key: str = "primary") -> str:
     This intentionally avoids a cache: saving Settings should affect the very next
     conversation without a restart or a separate knowledge-base upload.
     """
-    if account_key != "primary":
-        return ""
     services_path = os.path.join(DATA_DIR, "services.json")
     if not os.path.exists(services_path):
         return ""
@@ -1687,10 +1709,8 @@ def get_live_business_variables_context() -> str:
 
 def build_business_context(query: str, limit: int = 3, account_key: str = "primary") -> str:
     """Combine optional uploaded knowledge with authoritative live Settings."""
-    if account_key != "primary":
-        return "No relevant business records found."
     output_parts = []
-    matched_chunks = retrieve_knowledge_chunks(query, limit=limit)
+    matched_chunks = retrieve_knowledge_chunks(query, limit=limit, account_key=account_key)
     for result in matched_chunks:
         if result.get("type", "text") == "text":
             output_parts.append(f"[Source: {result['source']}]\n{result['text']}")
@@ -1705,7 +1725,6 @@ def build_business_context(query: str, limit: int = 3, account_key: str = "prima
     return "\n\n".join(output_parts) or "No relevant business records found."
 
 
-LEARNED_INFORMATION_FILENAME = "learned_information.jsonl"
 LEARNED_INFORMATION_LOCK = threading.Lock()
 
 
@@ -1797,6 +1816,7 @@ def save_learned_information(
         "text": knowledge_summary.strip(),
         "updated_at": datetime.utcnow().isoformat() + "Z",
     }
+    entry.update(classify_knowledge_entries([entry]).get(entry["id"], _quarantined_knowledge_classification()))
     _upsert_learned_information_entry(entry)
     return LEARNED_INFORMATION_FILENAME
 
@@ -1829,6 +1849,126 @@ def _upsert_learned_information_entry(entry: Dict[str, Any]) -> None:
             handle.write("\n".join(retained_lines) + "\n")
         os.replace(temp_path, filepath)
     load_knowledge_base()
+
+
+KNOWLEDGE_CLASSIFICATION_VERSION = 1
+KNOWLEDGE_SCOPES = {"shared", "primary", "secondary", "internal"}
+KNOWLEDGE_CATEGORIES = {
+    "generic",
+    "service_specific",
+    "availability_or_booking_state",
+    "customer_specific",
+    "internal_or_uncertain",
+}
+
+
+def _quarantined_knowledge_classification() -> Dict[str, Any]:
+    """Safe fallback: retain an entry but never expose an uncertain one."""
+    return {
+        "scope": "internal",
+        "category": "internal_or_uncertain",
+        "retrieval_enabled": False,
+        "classification_version": KNOWLEDGE_CLASSIFICATION_VERSION,
+    }
+
+
+def classify_knowledge_entries(entries: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Use the configured AI to permanently scope learned records in bounded batches."""
+    fallback = {
+        str(entry.get("id")): _quarantined_knowledge_classification()
+        for entry in entries if str(entry.get("id", "")).strip()
+    }
+    if not fallback or not openai_client:
+        return fallback
+
+    safe_records = [{
+        "id": entry_id,
+        "type": str(entry.get("type", "")),
+        "text": str(entry.get("text", ""))[:2500],
+        "topic": str(entry.get("topic", ""))[:500],
+        "applies_when": str(entry.get("applies_when", ""))[:1000],
+    } for entry in entries if (entry_id := str(entry.get("id", "")).strip())]
+    instructions = (
+        "Classify durable customer-service knowledge records. Return only JSON with a "
+        "classifications array. Each item must contain id, scope, category and retrieval_enabled. "
+        "scope is one of shared, primary, secondary, internal. category is one of generic, "
+        "service_specific, availability_or_booking_state, customer_specific, internal_or_uncertain. "
+        "Use shared only for durable facts safe for either SMS line. Use primary or secondary only "
+        "when the record explicitly identifies that line. Mark availability, times, appointment "
+        "options, booking states, one-off customer facts, personal information, and uncertainty as "
+        "retrieval_enabled false. Service-specific facts are false because services and availability "
+        "come from the live booking system. Never invent a scope or facts."
+    )
+    try:
+        response = openai_client.responses.create(
+            model="gpt-4.1-mini",
+            instructions=instructions,
+            input=json.dumps({"records": safe_records}, ensure_ascii=False),
+            store=False,
+        )
+        classifications = _parse_json_object(response.output_text or "").get("classifications", [])
+    except Exception as exc:
+        print(f"Knowledge classification failed; entries remain quarantined: {exc}")
+        return fallback
+
+    for item in classifications if isinstance(classifications, list) else []:
+        if not isinstance(item, dict):
+            continue
+        entry_id = str(item.get("id", "")).strip()
+        scope = str(item.get("scope", "")).strip()
+        category = str(item.get("category", "")).strip()
+        if entry_id not in fallback or scope not in KNOWLEDGE_SCOPES or category not in KNOWLEDGE_CATEGORIES:
+            continue
+        retrieval_enabled = bool(item.get("retrieval_enabled", False))
+        if category in {"availability_or_booking_state", "customer_specific", "internal_or_uncertain"}:
+            retrieval_enabled = False
+        fallback[entry_id] = {
+            "scope": scope,
+            "category": category,
+            "retrieval_enabled": retrieval_enabled,
+            "classification_version": KNOWLEDGE_CLASSIFICATION_VERSION,
+        }
+    return fallback
+
+
+def classify_all_learned_information() -> Dict[str, int]:
+    """Classify every unclassified learned JSONL entry and atomically save its tags."""
+    filepath = os.path.join(KNOWLEDGE_DIR, LEARNED_INFORMATION_FILENAME)
+    if not os.path.exists(filepath):
+        return {"classified": 0, "quarantined": 0, "total": 0}
+    with LEARNED_INFORMATION_LOCK:
+        records: List[Dict[str, Any]] = []
+        retained_lines: List[str] = []
+        with open(filepath, "r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.rstrip("\n")
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    retained_lines.append(line)
+                    continue
+                if isinstance(item, dict) and str(item.get("id", "")).strip():
+                    records.append(item)
+                else:
+                    retained_lines.append(line)
+
+        pending = [record for record in records if record.get("classification_version") != KNOWLEDGE_CLASSIFICATION_VERSION]
+        classifications: Dict[str, Dict[str, Any]] = {}
+        for offset in range(0, len(pending), 10):
+            classifications.update(classify_knowledge_entries(pending[offset:offset + 10]))
+        for record in records:
+            classification = classifications.get(str(record.get("id")))
+            if classification:
+                record.update(classification)
+                record["classified_at"] = datetime.utcnow().isoformat() + "Z"
+            retained_lines.append(json.dumps(record, ensure_ascii=False))
+        temp_path = f"{filepath}.{uuid.uuid4().hex}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(retained_lines) + "\n")
+        os.replace(temp_path, filepath)
+    load_knowledge_base()
+    classified = sum(1 for item in classifications.values() if item.get("retrieval_enabled"))
+    return {"classified": classified, "quarantined": len(classifications) - classified, "total": len(records)}
 
 
 def generate_manual_learning(topic: str, owner_guidance: str) -> Dict[str, str]:
@@ -1912,6 +2052,7 @@ def save_manual_learning(
         "created_at": now,
         "updated_at": now,
     }
+    entry.update(classify_knowledge_entries([entry]).get(entry["id"], _quarantined_knowledge_classification()))
     _upsert_learned_information_entry(entry)
     return entry
 
@@ -10808,6 +10949,13 @@ def create_manual_learning(payload: ManualLearningInput):
         "filename": LEARNED_INFORMATION_FILENAME,
         "entry": entry,
     }
+
+
+@app.post("/api/settings/learnings/classify")
+def classify_learned_information():
+    if not openai_client:
+        raise HTTPException(status_code=503, detail="The AI classifier is unavailable.")
+    return {"status": "success", **classify_all_learned_information()}
 
 
 @app.get("/api/settings/knowledge-files")

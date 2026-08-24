@@ -41,15 +41,16 @@ def test_catalogue_context_exposes_only_customer_visible_details(tmp_path, monke
     assert "Duration: 75 minutes" not in context
 
 
-def test_secondary_account_cannot_receive_primary_prompt_knowledge_services_or_state(tmp_path, monkeypatch):
+def test_secondary_account_receives_shared_services_but_not_primary_knowledge_or_state(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
     write_services(tmp_path)
     monkeypatch.setattr(main, "KNOWLEDGE_CHUNKS", [{
         "source": "primary-only.txt", "type": "text", "text": "Tori-only knowledge",
+        "scope": "primary", "retrieval_enabled": True,
     }])
 
-    assert main.get_live_services_context("secondary") == ""
-    assert main.build_business_context("Tori", account_key="secondary") == "No relevant business records found."
+    assert "Scalp Care" in main.get_live_services_context("secondary")
+    assert "Tori-only knowledge" not in main.build_business_context("Tori", account_key="secondary")
 
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
@@ -113,8 +114,40 @@ def test_secondary_account_cannot_receive_primary_prompt_knowledge_services_or_s
     messages = db.query(Message).filter(Message.thread_id == thread.id).order_by(Message.at).all()
     assert [message.text for message in messages] == ["Hello Anonymous", "Hello from Anonymous."]
     assert "Tori-only knowledge" not in str(calls[0]["input"])
-    assert "Scalp Care" not in str(calls[0]["input"])
-    assert "Relaxation Session" not in str(calls[0]["input"])
+    assert "Scalp Care" in str(calls[0]["input"])
+    assert "Relaxation Session" in str(calls[0]["input"])
     assert "Tori" not in calls[0]["instructions"]
     assert "Anonymous" in calls[0]["instructions"]
     db.close()
+
+
+def test_ai_knowledge_classifier_tags_generic_entries_and_quarantines_availability(monkeypatch):
+    class FakeResponses:
+        def create(self, **_kwargs):
+            return type("Response", (), {
+                "output_text": json.dumps({"classifications": [
+                    {
+                        "id": "generic", "scope": "shared", "category": "generic",
+                        "retrieval_enabled": True,
+                    },
+                    {
+                        "id": "availability", "scope": "shared",
+                        "category": "availability_or_booking_state", "retrieval_enabled": True,
+                    },
+                ]}),
+            })()
+
+    monkeypatch.setattr(
+        main,
+        "openai_client",
+        type("Client", (), {"responses": FakeResponses()})(),
+    )
+    result = main.classify_knowledge_entries([
+        {"id": "generic", "type": "manual_guidance", "text": "Be welcoming."},
+        {"id": "availability", "type": "information_request_resolution", "text": "Free at 3pm."},
+    ])
+
+    assert result["generic"]["scope"] == "shared"
+    assert result["generic"]["retrieval_enabled"] is True
+    assert result["availability"]["category"] == "availability_or_booking_state"
+    assert result["availability"]["retrieval_enabled"] is False

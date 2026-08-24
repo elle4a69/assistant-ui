@@ -11,12 +11,15 @@ from main import Base, Message, SettingsUpdateInput, Thread, ThreadEvent, find_o
 
 class FakeLearningResponses:
     def __init__(self, output_text):
-        self.output_text = output_text
+        self.output_text = list(output_text) if isinstance(output_text, list) else output_text
         self.calls = []
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
-        return type("LearningResponse", (), {"output_text": self.output_text})()
+        output_text = self.output_text.pop(0) if isinstance(self.output_text, list) else self.output_text
+        if callable(output_text):
+            output_text = output_text(kwargs)
+        return type("LearningResponse", (), {"output_text": output_text})()
 
 
 class FakeLearningClient:
@@ -131,12 +134,18 @@ def test_clear_pending_drafts_removes_all_drafts_and_updates_threads():
 
 
 def test_manual_learning_is_ai_structured_saved_and_reindexed(monkeypatch, tmp_path):
-    client = FakeLearningClient(json.dumps({
-        "topic": "Customer changes a requested booking time",
-        "applies_when": "A customer asks to move a booking that belongs to them.",
-        "instruction": "Check the customer's existing booking before offering replacement times.",
-        "example_reply": "I can check whether that new time is available for you.",
-    }))
+    client = FakeLearningClient([
+        json.dumps({
+            "topic": "Customer changes a requested booking time",
+            "applies_when": "A customer asks to move a booking that belongs to them.",
+            "instruction": "Check the customer's existing booking before offering replacement times.",
+            "example_reply": "I can check whether that new time is available for you.",
+        }),
+        lambda kwargs: json.dumps({"classifications": [{
+            "id": json.loads(kwargs["input"])["records"][0]["id"],
+            "scope": "shared", "category": "generic", "retrieval_enabled": True,
+        }]}),
+    ])
     monkeypatch.setattr(main, "openai_client", client)
     monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
     monkeypatch.setattr(main, "KNOWLEDGE_CHUNKS", [])
