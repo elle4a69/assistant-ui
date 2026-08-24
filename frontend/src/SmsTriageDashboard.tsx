@@ -7,11 +7,13 @@ import {
   addThreadNote,
   escalateThread,
   resolveThread,
+  listArrivalSessions,
   listBookings,
   getFreeBusy,
   approveDraft,
   discardDraft,
   respondToInformationRequest,
+  acknowledgeThreadArrival,
   deleteBooking,
   ThreadListItem,
   ThreadDetail,
@@ -36,9 +38,11 @@ import {
   CalendarCheck,
   ArrowLeft,
   Trash2,
-  X
+  X,
+  DoorOpen
 } from 'lucide-react';
 import { formatMessageTimestamp } from './messageTimestamp';
+import { dismissArrivalPushNotification, stopIncomingAlarm } from './incomingMessageAlarm';
 
 const CURRENT_AGENT_ID = 'agent-1';
 
@@ -84,6 +88,8 @@ function SmsAssistantThread({
               else if (e.type === 'auto-reply-sent') label = `🤖 Tori sent auto-reply`;
               else if (e.type === 'escalation') label = `⚠️ Escalated by ${e.agentId || ''}`;
               else if (e.type === 'resolution') label = `✅ Resolved by ${e.agentId || ''}`;
+              else if (e.type === 'customer-arrived') label = '🚪 Client arrived';
+              else if (e.type === 'customer-arrival-acknowledged') label = '✓ Arrival acknowledged';
 
               return (
                 <div key={`ev-${e.id || idx}`} className="self-center my-1 max-w-[85%] bg-slate-200/90 text-slate-600 text-[10px] font-semibold px-2.5 py-1 rounded-full border border-slate-300 flex items-center gap-1.5 shadow-2xs">
@@ -285,6 +291,8 @@ export default function SmsTriageDashboard() {
   const threadListRequestRef = useRef(0);
   const threadDetailRequestRef = useRef(0);
   const selectedThreadIdRef = useRef(selectedThreadId);
+  const acknowledgedArrivalsRef = useRef(new Set<string>());
+  const arrivalOpenIntentRef = useRef<{ threadId: string; sessionId: string } | null>(null);
   selectedThreadIdRef.current = selectedThreadId;
 
   // Tab switcher
@@ -312,6 +320,30 @@ export default function SmsTriageDashboard() {
     }
   }, [searchQuery, statusFilter, priorityFilter, showUnreadOnly]);
 
+  const acknowledgeArrival = useCallback(async (threadId: string, sessionId: string) => {
+    if (acknowledgedArrivalsRef.current.has(sessionId)) return;
+    acknowledgedArrivalsRef.current.add(sessionId);
+    try {
+      await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()));
+      await acknowledgeThreadArrival(threadId, sessionId);
+      const sessions = await listArrivalSessions().catch(() => null);
+      const remainingCount = sessions?.filter(item => (
+        item.status === 'active' && !item.acknowledgedAt
+      )).length;
+      if (remainingCount === 0) stopIncomingAlarm();
+      await dismissArrivalPushNotification(sessionId, remainingCount);
+      setSelectedThread(current => current?.id === threadId ? {
+        ...current,
+        pendingArrivalSessionId: null,
+        pendingArrivalEventId: null,
+        pendingArrivalAt: null,
+      } : current);
+      await fetchThreadsList();
+    } catch {
+      acknowledgedArrivalsRef.current.delete(sessionId);
+    }
+  }, [fetchThreadsList]);
+
   // Fetch single thread detail
   const fetchThreadDetail = useCallback(async (id: string, isSilent = false) => {
     const requestId = ++threadDetailRequestRef.current;
@@ -320,12 +352,25 @@ export default function SmsTriageDashboard() {
       const detail = await getThread(id);
       if (requestId !== threadDetailRequestRef.current || selectedThreadIdRef.current !== id) return;
       setSelectedThread(detail);
+      const openIntent = arrivalOpenIntentRef.current;
+      const arrivalSessionId = openIntent?.threadId === id
+        && openIntent.sessionId === detail.pendingArrivalSessionId
+        ? openIntent.sessionId
+        : null;
+      if (
+        arrivalSessionId
+        && document.visibilityState === 'visible'
+        && document.hasFocus()
+      ) {
+        arrivalOpenIntentRef.current = null;
+        await acknowledgeArrival(id, arrivalSessionId);
+      }
     } catch (err) {
       console.error(`Failed to load thread ${id} details:`, err);
     } finally {
       if (!isSilent && requestId === threadDetailRequestRef.current) setLoadingDetail(false);
     }
-  }, []);
+  }, [acknowledgeArrival]);
 
   // Fetch calendar bookings and slots
   const fetchCalendarData = useCallback(async () => {
@@ -396,8 +441,11 @@ export default function SmsTriageDashboard() {
   }, [dashboardTab, fetchCalendarData]);
 
   // Handlers
-  const handleSelectThread = (id: string) => {
-    setSelectedThreadId(id);
+  const handleSelectThread = (thread: ThreadListItem) => {
+    arrivalOpenIntentRef.current = thread.pendingArrivalSessionId
+      ? { threadId: thread.id, sessionId: thread.pendingArrivalSessionId }
+      : null;
+    setSelectedThreadId(thread.id);
   };
 
   const handleTakeOver = async () => {
@@ -655,9 +703,13 @@ export default function SmsTriageDashboard() {
             threads.map((t) => (
               <div
                 key={t.id}
-                onClick={() => handleSelectThread(t.id)}
+                onClick={() => handleSelectThread(t)}
                 className={`p-3.5 cursor-pointer transition-colors flex flex-col gap-2 hover:bg-slate-50 ${
-                  selectedThreadId === t.id ? 'bg-indigo-50/60 border-l-4 border-indigo-600 pl-2.5' : ''
+                  t.pendingArrivalSessionId
+                    ? 'bg-emerald-50 border-l-4 border-emerald-500 pl-2.5 motion-safe:animate-pulse'
+                    : selectedThreadId === t.id
+                      ? 'bg-indigo-50/60 border-l-4 border-indigo-600 pl-2.5'
+                      : ''
                 }`}
               >
                 <div className="flex justify-between items-center">
@@ -673,6 +725,11 @@ export default function SmsTriageDashboard() {
                   <span className="inline-flex rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-indigo-700">
                     {t.smsAccountKey === 'secondary' ? 'SMS line 2' : 'SMS line 1'}
                   </span>
+                  {t.pendingArrivalSessionId && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-600 px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-white shadow-sm">
+                      <DoorOpen className="h-3 w-3" /> Arrived
+                    </span>
+                  )}
                   {(t.lastMessageRole === 'draft' || t.status === 'needs-review') && (
                     <span
                       title={t.lastMessageRole === 'draft' ? 'Unsent AI draft waiting for approval' : 'This conversation needs a human answer'}

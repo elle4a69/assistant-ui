@@ -4,7 +4,6 @@ const ENABLED_KEY = 'assistant-ui-incoming-alarm-enabled';
 const VOLUME_KEY = 'assistant-ui-incoming-alarm-volume';
 const THREAD_SNAPSHOT_KEY = 'assistant-ui-customer-arrival-alarm-snapshot';
 const ARRIVAL_SESSION_SNAPSHOT_KEY = 'assistant-ui-arrival-session-alarm-snapshot';
-const ARRIVAL_SOUND_ENABLED_KEY = 'assistant-ui-arrival-session-sound-enabled';
 const BOOKING_SEEN_KEY = 'assistant-ui-booking-alarm-seen-v2';
 const MAX_SEEN_BOOKINGS = 5000;
 
@@ -48,11 +47,11 @@ export async function unlockIncomingAlarmAudio() {
 }
 
 export function getArrivalSoundEnabled(): boolean {
-  return localStorage.getItem(ARRIVAL_SOUND_ENABLED_KEY) !== 'false';
+  return getIncomingAlarmSettings().enabled;
 }
 
 export function setArrivalSoundEnabled(enabled: boolean) {
-  localStorage.setItem(ARRIVAL_SOUND_ENABLED_KEY, String(enabled));
+  setIncomingAlarmEnabled(enabled);
 }
 
 export function stopIncomingAlarm() {
@@ -157,6 +156,20 @@ export async function playBookingAlarm(durationMs = 30000) {
   window.setTimeout(() => {
     if (activeSirens.includes(alarm)) activeSirens = [];
   }, durationMs + 200);
+}
+
+export async function dismissArrivalPushNotification(sessionId: string, remainingCount?: number) {
+  if (!('serviceWorker' in navigator)) return;
+  try {
+    const registration = await navigator.serviceWorker.ready;
+    registration.active?.postMessage({
+      type: 'arrival-acknowledged',
+      sessionId,
+      remainingCount: typeof remainingCount === 'number' ? remainingCount : null,
+    });
+  } catch {
+    // The server acknowledgement remains authoritative if browser cleanup fails.
+  }
 }
 
 interface SeenBookings {
@@ -265,6 +278,7 @@ export function processArrivalThreadSnapshot(threads: ThreadListItem[]) {
 
   const hasNewCustomerArrival = threads.some((thread) => (
     Boolean(thread.lastArrivalEventId)
+    && !thread.lastArrivalSessionId
     && previous[thread.id] !== snapshot[thread.id]
   ));
   if (!hasNewCustomerArrival || !getIncomingAlarmSettings().enabled) return;
@@ -276,8 +290,14 @@ export function processArrivalThreadSnapshot(threads: ThreadListItem[]) {
 
 export function processArrivalSessionSnapshot(sessions: ArrivalSession[]): ArrivalSession[] {
   const snapshot: Record<string, string> = {};
-  sessions.forEach((session) => {
-    snapshot[session.id] = session.activatedAt || '';
+  const pending = sessions.filter((session) => (
+    session.status === 'active'
+    && Boolean(session.threadId)
+    && Boolean(session.activatedAt)
+    && !session.acknowledgedAt
+  ));
+  pending.forEach((session) => {
+    snapshot[session.id] = session.lastAlertAt || session.activatedAt || '';
   });
 
   let previous: Record<string, string> | null = null;
@@ -288,18 +308,41 @@ export function processArrivalSessionSnapshot(sessions: ArrivalSession[]): Arriv
     previous = null;
   }
   localStorage.setItem(ARRIVAL_SESSION_SNAPSHOT_KEY, JSON.stringify(snapshot));
-  if (!previous) return [];
-
-  const newlyActivated = sessions.filter((session) => (
-    Boolean(session.activatedAt)
-    && previous?.[session.id] !== session.activatedAt
+  const dueAlerts = pending.filter((session) => (
+    Boolean(snapshot[session.id])
+    && previous?.[session.id] !== snapshot[session.id]
   ));
-  if (newlyActivated.length === 0) return [];
+  if (dueAlerts.length === 0) return [];
 
   if (getArrivalSoundEnabled()) {
     void playAirRaidSiren().catch((error) => {
       console.warn('Arrival notification sound was blocked by the browser:', error);
     });
   }
-  return newlyActivated;
+  return dueAlerts.sort((left, right) => (
+    Date.parse(right.lastAlertAt || right.activatedAt || '')
+    - Date.parse(left.lastAlertAt || left.activatedAt || '')
+  ));
+}
+
+export function mergeArrivalAlertQueue(
+  current: ArrivalSession[],
+  sessions: ArrivalSession[],
+  dueArrivals: ArrivalSession[],
+): ArrivalSession[] {
+  const pendingById = new Map(sessions.filter(session => (
+    session.status === 'active' && !session.acknowledgedAt
+  )).map(session => [session.id, session]));
+  const next = current.flatMap(session => {
+    const refreshed = pendingById.get(session.id);
+    return refreshed ? [refreshed] : [];
+  });
+  const queuedIds = new Set(next.map(session => session.id));
+  dueArrivals.forEach(session => {
+    if (!queuedIds.has(session.id)) {
+      next.push(session);
+      queuedIds.add(session.id);
+    }
+  });
+  return next;
 }

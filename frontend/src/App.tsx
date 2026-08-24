@@ -9,7 +9,7 @@ import BootcampView from './BootcampView'
 import ArrivalClientView from './ArrivalClientView'
 import ArrivalProviderView from './ArrivalProviderView'
 import { getAdminAuthStatus, listArrivalSessions, listBookings, listThreads, loginAdmin, logoutAdmin, type ArrivalSession, type CalendarBooking } from './api'
-import { playBookingAlarm, processArrivalSessionSnapshot, processArrivalThreadSnapshot, processBookingSnapshot, stopIncomingAlarm, unlockIncomingAlarmAudio } from './incomingMessageAlarm'
+import { mergeArrivalAlertQueue, playBookingAlarm, processArrivalSessionSnapshot, processArrivalThreadSnapshot, processBookingSnapshot, stopIncomingAlarm, unlockIncomingAlarmAudio } from './incomingMessageAlarm'
 import { UserCheck, Smartphone, Settings, Calendar, MessagesSquare, CalendarCheck, Bot, DoorOpen, LogOut, LockKeyhole, BellRing } from 'lucide-react'
 
 class BootcampErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
@@ -45,7 +45,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
 
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(getThreadIdFromUrl());
   const [newBookingAlert, setNewBookingAlert] = useState<CalendarBooking | null>(null);
-  const [customerArrivalAlert, setCustomerArrivalAlert] = useState<ArrivalSession | null>(null);
+  const [customerArrivalAlerts, setCustomerArrivalAlerts] = useState<ArrivalSession[]>([]);
 
   const [view, setView] = useState<'agent' | 'customer' | 'settings' | 'booking' | 'bookings' | 'chat' | 'bootcamp' | 'arrival' | 'arrivals'>(
     initialPath === '/arrival' ? 'arrival'
@@ -92,42 +92,50 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
     window.addEventListener('pointerdown', unlockAudio, { once: true });
     window.addEventListener('keydown', unlockAudio, { once: true });
 
+    const pollOnce = async () => {
+      try {
+        const [threads, arrivalSessions, bookings] = await Promise.all([
+          listThreads(),
+          listArrivalSessions(),
+          listBookings(),
+        ]);
+        processArrivalThreadSnapshot(threads);
+        const dueArrivals = processArrivalSessionSnapshot(arrivalSessions);
+        setCustomerArrivalAlerts(current => (
+          mergeArrivalAlertQueue(current, arrivalSessions, dueArrivals)
+        ));
+        const newBookings = processBookingSnapshot(bookings);
+        if (newBookings.length > 0) {
+          const newestBooking = [...newBookings].sort(
+            (left, right) => new Date(right.startTime).getTime() - new Date(left.startTime).getTime(),
+          )[0];
+          setNewBookingAlert(newestBooking);
+          void playBookingAlarm().catch((error) => {
+            console.warn('New booking sound was blocked by the browser:', error);
+          });
+        }
+      } catch (error) {
+        console.warn('Customer arrival alarm check failed:', error);
+      }
+    };
+
     const pollForIncomingMessages = async () => {
       while (active) {
-        try {
-          const [threads, arrivalSessions, bookings] = await Promise.all([
-            listThreads(),
-            listArrivalSessions(),
-            listBookings(),
-          ]);
-          processArrivalThreadSnapshot(threads);
-          const newArrivals = processArrivalSessionSnapshot(arrivalSessions);
-          if (newArrivals.length > 0) {
-            setCustomerArrivalAlert(newArrivals[0]);
-          }
-          const newBookings = processBookingSnapshot(bookings);
-          if (newBookings.length > 0) {
-            const newestBooking = [...newBookings].sort(
-              (left, right) => new Date(right.startTime).getTime() - new Date(left.startTime).getTime(),
-            )[0];
-            setNewBookingAlert(newestBooking);
-            void playBookingAlarm().catch((error) => {
-              console.warn('New booking sound was blocked by the browser:', error);
-            });
-          }
-        } catch (error) {
-          console.warn('Customer arrival alarm check failed:', error);
+        const locks = navigator.locks;
+        if (locks) {
+          await locks.request(
+            'assistant-ui-incoming-alarm-watcher',
+            { mode: 'exclusive', ifAvailable: true },
+            async lock => { if (lock) await pollOnce(); },
+          );
+        } else {
+          await pollOnce();
         }
         await new Promise((resolve) => window.setTimeout(resolve, 6000));
       }
     };
 
-    const locks = navigator.locks;
-    if (locks) {
-      void locks.request('assistant-ui-incoming-alarm-watcher', { mode: 'exclusive' }, pollForIncomingMessages);
-    } else {
-      void pollForIncomingMessages();
-    }
+    void pollForIncomingMessages();
 
     return () => {
       active = false;
@@ -170,14 +178,30 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
     navigateTo('bookings', '/bookings');
   };
 
+  const customerArrivalAlert = customerArrivalAlerts[0] || null;
+
   const dismissArrivalAlert = () => {
-    stopIncomingAlarm();
-    setCustomerArrivalAlert(null);
+    setCustomerArrivalAlerts(current => {
+      const remaining = current.slice(1);
+      if (remaining.length === 0) stopIncomingAlarm();
+      return remaining;
+    });
   };
 
   const openArrival = () => {
-    dismissArrivalAlert();
-    navigateTo('arrivals', '/arrivals');
+    const arrival = customerArrivalAlert;
+    setCustomerArrivalAlerts(current => current.filter(item => item.id !== arrival?.id));
+    if (!arrival?.threadId) {
+      navigateTo('arrivals', '/arrivals');
+      return;
+    }
+    setSelectedThreadId(arrival.threadId);
+    setView('chat');
+    window.history.pushState(
+      null,
+      '',
+      `/chat?thread=${encodeURIComponent(arrival.threadId)}&arrival=${encodeURIComponent(arrival.id)}`,
+    );
   };
 
   return (
@@ -364,11 +388,12 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
             <div className="space-y-2 px-6 py-5 text-slate-800">
               <p className="text-lg font-black">{customerArrivalAlert.booking.summary || 'Customer booking'}</p>
               {customerArrivalAlert.booking.customerPhone && <p className="text-sm text-slate-500">{customerArrivalAlert.booking.customerPhone}</p>}
+              <p className="text-xs font-black uppercase tracking-wide text-indigo-600">{customerArrivalAlert.smsAccountKey === 'secondary' ? 'Anonymous · Line 2' : 'Tori · Line 1'}</p>
               <p className="text-sm font-bold text-emerald-700">The customer has activated their arrival link.</p>
             </div>
             <div className="grid grid-cols-2 gap-3 px-5 pb-5">
               <button type="button" onClick={dismissArrivalAlert} className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-black text-slate-600">Dismiss</button>
-              <button type="button" onClick={openArrival} className="rounded-xl bg-emerald-600 px-4 py-3 text-sm font-black text-white">Open arrivals</button>
+              <button type="button" onClick={openArrival} className="rounded-xl bg-emerald-600 px-4 py-3 text-sm font-black text-white">Open conversation</button>
             </div>
           </div>
         </div>

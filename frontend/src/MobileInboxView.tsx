@@ -4,6 +4,7 @@ import {
   CalendarPlus,
   Check,
   CheckCheck,
+  DoorOpen,
   MessageCircle,
   RefreshCw,
   Search,
@@ -14,6 +15,7 @@ import {
 import {
   getSettings,
   getThread,
+  listArrivalSessions,
   listThreads,
   sendThreadReply,
   toggleAutoresponder,
@@ -22,11 +24,13 @@ import {
   approveDraft,
   discardDraft,
   respondToInformationRequest,
+  acknowledgeThreadArrival,
   Message,
   ThreadDetail,
   ThreadListItem,
 } from './api'
 import { formatMessageTimestamp } from './messageTimestamp'
+import { dismissArrivalPushNotification, stopIncomingAlarm } from './incomingMessageAlarm'
 
 const POLL_THREADS_MS = 5000
 const POLL_MESSAGES_MS = 3000
@@ -83,6 +87,8 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const selectedIdRef = useRef(selectedId)
   const threadsRequestRef = useRef(0)
   const threadRequestRef = useRef(0)
+  const acknowledgedArrivalsRef = useRef(new Set<string>())
+  const arrivalOpenIntentRef = useRef<{ threadId: string; sessionId: string } | null>(null)
   selectedIdRef.current = selectedId
   const loadThreads = useCallback(async () => {
     const requestId = ++threadsRequestRef.current
@@ -98,6 +104,38 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     }
   }, [])
 
+  const clearArrivalUrl = useCallback(() => {
+    const url = new URL(window.location.href)
+    if (!url.searchParams.has('arrival')) return
+    url.searchParams.delete('arrival')
+    window.history.replaceState(null, '', `${url.pathname}${url.search}`)
+  }, [])
+
+  const acknowledgeArrival = useCallback(async (threadId: string, sessionId: string) => {
+    if (acknowledgedArrivalsRef.current.has(sessionId)) return
+    acknowledgedArrivalsRef.current.add(sessionId)
+    try {
+      await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()))
+      await acknowledgeThreadArrival(threadId, sessionId)
+      const sessions = await listArrivalSessions().catch(() => null)
+      const remainingCount = sessions?.filter(item => (
+        item.status === 'active' && !item.acknowledgedAt
+      )).length
+      if (remainingCount === 0) stopIncomingAlarm()
+      await dismissArrivalPushNotification(sessionId, remainingCount)
+      setThread(current => current?.id === threadId ? {
+        ...current,
+        pendingArrivalSessionId: null,
+        pendingArrivalEventId: null,
+        pendingArrivalAt: null,
+      } : current)
+      clearArrivalUrl()
+      await loadThreads()
+    } catch {
+      acknowledgedArrivalsRef.current.delete(sessionId)
+    }
+  }, [clearArrivalUrl, loadThreads])
+
   const loadThread = useCallback(async () => {
     if (!selectedId) return
     const requestId = ++threadRequestRef.current
@@ -105,7 +143,26 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
       const detail = await getThread(selectedId)
       if (requestId !== threadRequestRef.current || selectedIdRef.current !== selectedId) return
       setThread(detail)
-      
+
+      const requestedArrival = new URLSearchParams(window.location.search).get('arrival')
+      const requestedArrivalMatches = Boolean(
+        requestedArrival && requestedArrival === detail.pendingArrivalSessionId
+      )
+      if (requestedArrival && !requestedArrivalMatches) clearArrivalUrl()
+      const openIntent = arrivalOpenIntentRef.current
+      const intendedArrival = openIntent?.threadId === selectedId
+        && openIntent.sessionId === detail.pendingArrivalSessionId
+        ? openIntent.sessionId
+        : null
+      const arrivalSessionId = requestedArrivalMatches ? requestedArrival : intendedArrival
+      if (
+        arrivalSessionId
+        && document.visibilityState === 'visible'
+        && document.hasFocus()
+      ) {
+        arrivalOpenIntentRef.current = null
+        await acknowledgeArrival(selectedId, arrivalSessionId)
+      }
       setError('')
     } catch {
       setThread(null)
@@ -113,7 +170,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
       setError('That conversation is no longer available')
       await loadThreads()
     }
-  }, [selectedId, loadThreads])
+  }, [acknowledgeArrival, clearArrivalUrl, selectedId, loadThreads])
 
   useEffect(() => {
     let active = true
@@ -174,7 +231,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [thread?.messages.length])
+  }, [thread?.events.length, thread?.messages.length])
 
   const filteredThreads = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -185,12 +242,24 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     )
   }, [threads, query])
 
-  const orderedMessages = useMemo(() => {
-    return [...(thread?.messages ?? [])].sort((left, right) => {
+  const orderedTimeline = useMemo(() => {
+    const items: Array<
+      | { kind: 'message'; id: string; at: string; message: Message }
+      | { kind: 'arrival'; id: string; at: string; event: ThreadDetail['events'][number] }
+    > = []
+    for (const message of thread?.messages ?? []) {
+      items.push({ kind: 'message', id: message.id, at: message.at, message })
+    }
+    for (const event of thread?.events ?? []) {
+      if (event.type === 'customer-arrived') {
+        items.push({ kind: 'arrival', id: event.id, at: event.at, event })
+      }
+    }
+    return items.sort((left, right) => {
       const timeDifference = new Date(left.at).getTime() - new Date(right.at).getTime()
       return timeDifference || left.id.localeCompare(right.id)
     })
-  }, [thread?.messages])
+  }, [thread?.events, thread?.messages])
 
   const pendingInformationRequest = useMemo(() => {
     if (thread?.state !== 'needs-review') return null
@@ -493,8 +562,17 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                   <button
                     key={item.id}
                     type="button"
-                    onClick={() => setSelectedId(item.id)}
-                    className={`flex w-full items-center border-b border-slate-100 px-4 py-3 text-left active:bg-slate-50 ${showAvatars ? 'gap-3' : 'gap-0'}`}
+                    onClick={() => {
+                      arrivalOpenIntentRef.current = item.pendingArrivalSessionId
+                        ? { threadId: item.id, sessionId: item.pendingArrivalSessionId }
+                        : null
+                      setSelectedId(item.id)
+                    }}
+                    className={`flex w-full items-center border-b px-4 py-3 text-left active:bg-slate-50 ${showAvatars ? 'gap-3' : 'gap-0'} ${
+                      item.pendingArrivalSessionId
+                        ? 'border-emerald-300 bg-emerald-50 motion-safe:animate-pulse'
+                        : 'border-slate-100'
+                    }`}
                   >
                     {showAvatars && (
                       <div className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 text-sm font-bold text-white">
@@ -507,6 +585,11 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                         <span className="shrink-0 rounded-full border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wide text-indigo-700">
                           {item.smsAccountKey === 'secondary' ? 'Line 2' : 'Line 1'}
                         </span>
+                        {item.pendingArrivalSessionId && (
+                          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-600 px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-white shadow-sm">
+                            <DoorOpen className="h-3 w-3" /> Arrived
+                          </span>
+                        )}
                         {(item.lastMessageRole === 'draft' || item.status === 'needs-review') && (
                           <span
                             title={item.lastMessageRole === 'draft' ? 'Unsent AI draft waiting for approval' : 'This conversation needs a human answer'}
@@ -548,7 +631,29 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
           >
             <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-4">
               <div className="mx-auto flex max-w-xl flex-col gap-2">
-                {orderedMessages.map((message: Message) => {
+                {orderedTimeline.map(item => {
+                  if (item.kind === 'arrival') {
+                    const isPending = item.event.id === thread?.pendingArrivalEventId
+                      && Boolean(thread.pendingArrivalSessionId)
+                    return (
+                      <div key={item.id} className="my-2 flex items-center justify-center">
+                        <button
+                          type="button"
+                          disabled={!isPending}
+                          onClick={() => {
+                            if (thread?.pendingArrivalSessionId) {
+                              void acknowledgeArrival(thread.id, thread.pendingArrivalSessionId)
+                            }
+                          }}
+                          className={`inline-flex items-center gap-2 rounded-full border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-black text-emerald-800 shadow-sm ${isPending ? 'motion-safe:animate-pulse' : 'cursor-default'}`}
+                        >
+                          <DoorOpen className="h-4 w-4" />
+                          <span>Client arrived at {formatMessageTimestamp(item.at)}{isPending ? ' · Tap to acknowledge' : ''}</span>
+                        </button>
+                      </div>
+                    )
+                  }
+                  const message = item.message
                   const incoming = message.role === 'customer'
                   const isDraft = message.role === 'draft'
                   return (

@@ -77,6 +77,10 @@ export interface ThreadListItem {
   lastMessageRole: Message['role'] | null;
   lastArrivalAt: string | null;
   lastArrivalEventId: string | null;
+  lastArrivalSessionId: string | null;
+  pendingArrivalSessionId: string | null;
+  pendingArrivalEventId: string | null;
+  pendingArrivalAt: string | null;
   unreadCount: number;
   priority: string;
   status: string;
@@ -123,12 +127,17 @@ export interface ThreadDetail {
   notes: Note[];
   events: ThreadEvent[];
   autoReplyEnabled: boolean;
+  pendingArrivalSessionId: string | null;
+  pendingArrivalEventId: string | null;
+  pendingArrivalAt: string | null;
 }
 
 export interface CalendarBooking {
   id: string;
   customerPhone: string;
   summary: string;
+  smsAccountKey?: 'primary' | 'secondary' | null;
+  threadId?: string | null;
   startTime: string;
   endTime: string;
   status?: 'scheduled' | 'completed' | 'no_show' | 'cancelled';
@@ -292,9 +301,16 @@ export interface ArrivalMessage {
 export interface ArrivalSession {
   id: string;
   bookingId: string;
+  threadId: string | null;
+  smsAccountKey: 'primary' | 'secondary' | null;
+  arrivalEventId: string | null;
   status: 'invited' | 'active' | 'closed' | 'expired';
   expiresAt: string;
   activatedAt: string | null;
+  acknowledgedAt: string | null;
+  lastAlertAt: string | null;
+  nextAlertAt: string | null;
+  alertCount: number;
   closedAt: string | null;
   lastActivityAt: string;
   booking: {
@@ -534,13 +550,19 @@ export interface KnowledgeFile {
   sizeBytes: number;
 }
 
-export async function createArrivalInvite(booking: CalendarBooking): Promise<{ session: ArrivalSession; link: string }> {
+export async function createArrivalInvite(
+  booking: CalendarBooking,
+  smsAccountKey: 'primary' | 'secondary',
+  threadId?: string,
+): Promise<{ session: ArrivalSession; link: string }> {
   const response = await apiFetch(`${API_BASE}/api/arrival/admin/bookings/${encodeURIComponent(booking.id)}/invite`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       summary: booking.summary,
       customerPhone: booking.customerPhone || null,
+      smsAccountKey,
+      threadId: threadId || null,
       startTime: booking.startTime,
       endTime: booking.endTime,
     }),
@@ -556,12 +578,35 @@ export async function createArrivalInvite(booking: CalendarBooking): Promise<{ s
   return result;
 }
 
-export async function activateArrival(inviteToken: string): Promise<{ clientToken: string; session: ArrivalSession }> {
+export async function activateArrival(inviteToken: string): Promise<{ alreadyActivated: boolean; clientToken: string; session: ArrivalSession }> {
   const response = await apiFetch(`${API_BASE}/api/arrival/activate`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inviteToken }),
   });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'This arrival link is not valid.');
   return response.json();
+}
+
+export async function getArrivalInviteStatus(inviteToken: string): Promise<{
+  active: boolean;
+  clientToken: string | null;
+  session: ArrivalSession | null;
+}> {
+  const response = await apiFetch(`${API_BASE}/api/arrival/status`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inviteToken }),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'This arrival link is not valid.');
+  return response.json();
+}
+
+export async function acknowledgeThreadArrival(threadId: string, sessionId: string): Promise<void> {
+  const response = await apiFetch(
+    `${API_BASE}/api/threads/${encodeURIComponent(threadId)}/arrivals/${encodeURIComponent(sessionId)}/acknowledge`,
+    { method: 'POST' },
+  );
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || 'Could not acknowledge the customer arrival.');
+  }
 }
 
 export async function getClientArrivalSession(sessionId: string, token: string): Promise<ArrivalSession> {

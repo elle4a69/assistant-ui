@@ -28,7 +28,7 @@ export default function ArrivalProviderView() {
     try {
       const next = await listArrivalSessions();
       setSessions(next);
-      setSelectedId(current => current || next.find(item => item.status === 'active')?.id || next[0]?.id || null);
+      setSelectedId(current => current || next.find(item => item.status === 'active' && !item.acknowledgedAt)?.id || next[0]?.id || null);
       setError('');
     } catch {
       setError('Could not refresh arrival chats.');
@@ -41,7 +41,6 @@ export default function ArrivalProviderView() {
   }, [selectedId]);
 
   useEffect(() => {
-    if ('clearAppBadge' in navigator) void (navigator as Navigator & { clearAppBadge: () => Promise<void> }).clearAppBadge().catch(() => undefined);
     void refresh();
     const timer = window.setInterval(() => void refresh(), 2000);
     return () => window.clearInterval(timer);
@@ -53,7 +52,9 @@ export default function ArrivalProviderView() {
     return () => window.clearInterval(timer);
   }, [refreshSelected]);
 
-  const activeCount = useMemo(() => sessions.filter(item => item.status === 'active').length, [sessions]);
+  const activeCount = useMemo(() => sessions.filter(item => (
+    item.status === 'active' && !item.acknowledgedAt
+  )).length, [sessions]);
 
   const send = async (event: FormEvent) => {
     event.preventDefault();
@@ -106,7 +107,7 @@ export default function ArrivalProviderView() {
           {sessions.length === 0 && <div className="p-10 text-center text-sm text-slate-400"><MapPin className="mx-auto mb-3 h-9 w-9 text-slate-200" />No arrival links yet.<br />Create one from Bookings.</div>}
           {sessions.map(item => (
             <button key={item.id} onClick={() => setSelectedId(item.id)} className={`w-full border-b border-slate-100 p-4 text-left hover:bg-slate-50 ${selectedId === item.id ? 'bg-indigo-50' : ''}`}>
-              <div className="flex items-center justify-between gap-2"><span className="truncate text-sm font-black">{item.booking.summary}</span><span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${item.status === 'active' ? 'bg-emerald-100 text-emerald-700' : item.status === 'invited' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{item.status === 'active' ? 'ARRIVED' : item.status.toUpperCase()}</span></div>
+              <div className="flex items-center justify-between gap-2"><span className="truncate text-sm font-black">{item.booking.summary}</span><span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${item.status === 'active' && !item.acknowledgedAt ? 'bg-emerald-100 text-emerald-700' : item.status === 'invited' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{item.status === 'active' ? (item.acknowledgedAt ? 'SEEN' : 'ARRIVED') : item.status.toUpperCase()}</span></div>
               <p className="mt-1 truncate text-xs text-slate-500">{item.booking.customerPhone || 'No phone'} · {timeLabel(item.booking.startTime)}</p>
               <p className="mt-1 text-[11px] text-slate-400">Updated {timeLabel(item.lastActivityAt)}</p>
             </button>

@@ -3,7 +3,17 @@ from datetime import datetime, timedelta
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from main import Base, Message, Thread, canonical_phone_number, find_thread_by_phone, get_thread_detail, get_threads
+from main import (
+    ArrivalSession,
+    Base,
+    CalendarEvent,
+    Message,
+    Thread,
+    canonical_phone_number,
+    find_thread_by_phone,
+    get_thread_detail,
+    get_threads,
+)
 
 
 def test_australian_mobile_formats_share_one_canonical_value():
@@ -67,6 +77,18 @@ def test_thread_lookup_prefers_established_conversation_over_confirmation_duplic
             at=now,
         ),
     ])
+    db.add(CalendarEvent(
+        id="deduplicated-booking", summary="Booking", customer_phone="+61412345678",
+        sms_account_key="primary", thread_id=confirmation_only.id,
+        start_time=now, end_time=now + timedelta(hours=1), status="scheduled", notes="",
+    ))
+    db.add(ArrivalSession(
+        id="deduplicated-arrival", booking_id="deduplicated-booking",
+        thread_id=confirmation_only.id, sms_account_key="primary",
+        invite_token_hash="deduplicated-invite", status="active",
+        expires_at=now + timedelta(hours=2), activated_at=now,
+        created_at=now, last_activity_at=now,
+    ))
     db.commit()
 
     matched = find_thread_by_phone(db, "+61 412 345 678")
@@ -80,6 +102,8 @@ def test_thread_lookup_prefers_established_conversation_over_confirmation_duplic
         "Your booking is confirmed.",
     }
     assert db.query(Thread).count() == 1
+    assert db.query(ArrivalSession).filter(ArrivalSession.id == "deduplicated-arrival").one().thread_id == conversation.id
+    assert db.query(CalendarEvent).filter(CalendarEvent.id == "deduplicated-booking").one().thread_id == conversation.id
     db.close()
 
 

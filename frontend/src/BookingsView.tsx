@@ -7,6 +7,7 @@ import {
   getWorkingHours,
   createArrivalInvite,
   CalendarBooking,
+  ThreadListItem,
   WorkingHourEntry
 } from './api';
 import {
@@ -58,6 +59,21 @@ function canonicalPhone(phone: string) {
     digits = `61${digits}`;
   }
   return digits;
+}
+
+function selectSmsAccount(
+  booking: CalendarBooking,
+  phoneMatches: ThreadListItem[],
+): 'primary' | 'secondary' | null {
+  if (booking.smsAccountKey) return booking.smsAccountKey;
+  const uniqueAccounts = [...new Set(phoneMatches.map(thread => thread.smsAccountKey))];
+  if (uniqueAccounts.length === 1) return uniqueAccounts[0];
+  const answer = window.prompt(
+    'Choose the SMS line for this older booking: enter 1 for Tori or 2 for Anonymous.',
+  )?.trim();
+  if (answer === '1') return 'primary';
+  if (answer === '2') return 'secondary';
+  return null;
 }
 
 function formatLocalDateISO(date: Date): string {
@@ -428,7 +444,21 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
     try {
       const targetPhone = canonicalPhone(booking.customerPhone);
       const threads = await listThreads();
-      const match = threads.find(t => canonicalPhone(t.customerPhone) === targetPhone);
+      const phoneMatches = threads.filter(t => canonicalPhone(t.customerPhone) === targetPhone);
+      const storedThread = phoneMatches.find(thread => (
+        thread.id === booking.threadId
+        && (!booking.smsAccountKey || thread.smsAccountKey === booking.smsAccountKey)
+      ));
+      if (storedThread) {
+        onOpenThread(storedThread.id);
+        return;
+      }
+      const account = selectSmsAccount(booking, phoneMatches);
+      if (!account) {
+        setError('Choose Tori or Anonymous to open the correct conversation.');
+        return;
+      }
+      const match = phoneMatches.find(thread => thread.smsAccountKey === account);
       if (!match) {
         setError(`No SMS conversation for ${booking.customerPhone}.`);
         return;
@@ -446,8 +476,24 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
     setGeneratingArrivalId(booking.id);
     setError(null);
     try {
-      const result = await createArrivalInvite(booking);
-      setArrivalLink({ booking, link: result.link });
+      const targetPhone = canonicalPhone(booking.customerPhone || '');
+      const threads = await listThreads();
+      const phoneMatches = threads.filter(thread => canonicalPhone(thread.customerPhone) === targetPhone);
+      const storedThread = phoneMatches.find(thread => (
+        thread.id === booking.threadId
+        && (!booking.smsAccountKey || thread.smsAccountKey === booking.smsAccountKey)
+      ));
+      const account = storedThread?.smsAccountKey || selectSmsAccount(booking, phoneMatches);
+      if (!account) throw new Error('Choose Tori or Anonymous to create the link on the correct SMS line.');
+      const thread = storedThread || phoneMatches.find(item => item.smsAccountKey === account);
+      const result = await createArrivalInvite(booking, account, thread?.id);
+      const boundBooking = {
+        ...booking,
+        smsAccountKey: result.session.smsAccountKey,
+        threadId: result.session.threadId,
+      };
+      setBookings(current => current.map(item => item.id === booking.id ? boundBooking : item));
+      setArrivalLink({ booking: boundBooking, link: result.link });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create the arrival link.');
     } finally {
@@ -902,10 +948,10 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-xs">
           <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
-              <div><h3 className="text-base font-black text-slate-900">Single-use arrival link</h3><p className="mt-1 text-xs text-slate-500">{arrivalLink.booking.summary}</p></div>
+                <div><h3 className="text-base font-black text-slate-900">Customer arrival link</h3><p className="mt-1 text-xs text-slate-500">{arrivalLink.booking.summary}</p></div>
               <button onClick={() => setArrivalLink(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100"><X className="h-5 w-5" /></button>
             </div>
-            <p className="mt-4 text-sm leading-6 text-slate-600">Send this link to the customer. Pressing “I’ve arrived” consumes it permanently and opens their private chat.</p>
+              <p className="mt-4 text-sm leading-6 text-slate-600">Send this link to the customer. They can reopen it safely; only the first press of “I’ve arrived” creates the staff alert.</p>
             <div className="mt-4 break-all rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">{arrivalLink.link}</div>
             <button onClick={() => void copyArrivalLink()} className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-3 text-sm font-black text-white"><Copy className="h-4 w-4" /> Copy link</button>
             <p className="mt-3 text-center text-[11px] text-slate-400">Creating another link for this booking immediately disables this one.</p>

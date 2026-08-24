@@ -3,6 +3,7 @@ import { CheckCircle2, Clock3, Loader2, MapPin, Send, Volume2, VolumeX } from 'l
 import {
   activateArrival,
   ArrivalSession,
+  getArrivalInviteStatus,
   getClientArrivalSession,
   sendClientArrivalMessage,
 } from './api';
@@ -17,6 +18,7 @@ function fragmentInvite(): string {
 
 export default function ArrivalClientView() {
   const [session, setSession] = useState<ArrivalSession | null>(null);
+  const [checkingInvite, setCheckingInvite] = useState(Boolean(fragmentInvite()));
   const [activating, setActivating] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
@@ -45,10 +47,37 @@ export default function ArrivalClientView() {
   }, [credentials]);
 
   useEffect(() => {
+    if (!invite) {
+      setCheckingInvite(false);
+      return;
+    }
+    window.sessionStorage.removeItem(SESSION_ID_KEY);
+    window.sessionStorage.removeItem(SESSION_TOKEN_KEY);
+    setSession(null);
+    let mounted = true;
+    void getArrivalInviteStatus(invite)
+      .then(result => {
+        if (!mounted || !result.active || !result.session || !result.clientToken) return;
+        window.sessionStorage.setItem(SESSION_ID_KEY, result.session.id);
+        window.sessionStorage.setItem(SESSION_TOKEN_KEY, result.clientToken);
+        window.history.replaceState(null, '', '/arrival');
+        setSession(result.session);
+      })
+      .catch(err => {
+        if (mounted) setError(err instanceof Error ? err.message : 'This arrival link is not valid.');
+      })
+      .finally(() => {
+        if (mounted) setCheckingInvite(false);
+      });
+    return () => { mounted = false; };
+  }, [invite]);
+
+  useEffect(() => {
+    if (checkingInvite) return;
     void refresh();
     const timer = window.setInterval(() => void refresh(), 1500);
     return () => window.clearInterval(timer);
-  }, [refresh]);
+  }, [checkingInvite, refresh]);
 
   useEffect(() => {
     if (!session?.messages) return;
@@ -105,16 +134,16 @@ export default function ArrivalClientView() {
             <MapPin className="h-8 w-8" />
           </div>
           <h1 className="text-2xl font-black">Welcome</h1>
-          <p className="mt-2 text-sm leading-6 text-slate-400">Press the button only when you have arrived. It works once and then opens your private chat.</p>
+          <p className="mt-2 text-sm leading-6 text-slate-400">Press the button when you have arrived. You can safely reopen this link later without creating another alert.</p>
           {error && <p className="mt-5 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">{error}</p>}
           <button
             type="button"
             onClick={activate}
-            disabled={!invite || activating}
+            disabled={!invite || activating || checkingInvite}
             className="mt-7 flex min-h-28 w-full items-center justify-center gap-3 rounded-3xl bg-emerald-500 px-6 text-2xl font-black text-slate-950 shadow-lg shadow-emerald-950/40 transition active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
           >
-            {activating ? <Loader2 className="h-8 w-8 animate-spin" /> : <CheckCircle2 className="h-8 w-8" />}
-            {activating ? 'Checking in…' : "I’ve arrived"}
+            {activating || checkingInvite ? <Loader2 className="h-8 w-8 animate-spin" /> : <CheckCircle2 className="h-8 w-8" />}
+            {activating ? 'Checking in…' : checkingInvite ? 'Checking link…' : "I’ve arrived"}
           </button>
           {!invite && !error && <p className="mt-4 text-xs text-slate-500">Open the private link supplied with your booking.</p>}
         </section>

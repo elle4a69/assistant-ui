@@ -33,7 +33,8 @@ client = TestClient(app)
 def test_services_and_manual_bookings(monkeypatch):
     try:
         sent_messages = []
-        monkeypatch.setattr(main.calendar_service, "create_booking", lambda **kwargs: "test-booking-id")
+        booking_ids = iter(("test-booking-id-primary", "test-booking-id-secondary"))
+        monkeypatch.setattr(main.calendar_service, "create_booking", lambda **kwargs: next(booking_ids))
         monkeypatch.setattr(
             main.mobilemessage_service,
             "send_sms",

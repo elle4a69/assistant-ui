@@ -38,7 +38,7 @@ from booking_tools import (
 )
 from sqlalchemy import (
     create_engine, Column, String, Integer, DateTime, ForeignKey, Text, event, Boolean, func,
-    UniqueConstraint,
+    UniqueConstraint, or_,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from sqlalchemy.exc import IntegrityError
@@ -956,6 +956,26 @@ def find_thread_by_phone(db: Session, phone: str, sms_account_key: str = "primar
             )
             for child in duplicate_children:
                 child.thread = primary
+        db.query(ArrivalSession).filter(
+            ArrivalSession.thread_id == duplicate.id,
+            or_(
+                ArrivalSession.sms_account_key.is_(None),
+                ArrivalSession.sms_account_key == primary.sms_account_key,
+            ),
+        ).update({
+            ArrivalSession.thread_id: primary.id,
+            ArrivalSession.sms_account_key: primary.sms_account_key,
+        }, synchronize_session=False)
+        db.query(CalendarEvent).filter(
+            CalendarEvent.thread_id == duplicate.id,
+            or_(
+                CalendarEvent.sms_account_key.is_(None),
+                CalendarEvent.sms_account_key == primary.sms_account_key,
+            ),
+        ).update({
+            CalendarEvent.thread_id: primary.id,
+            CalendarEvent.sms_account_key: primary.sms_account_key,
+        }, synchronize_session=False)
         db.delete(duplicate)
 
     # Remove duplicate canonical values before assigning the survivor's value.
@@ -970,6 +990,8 @@ class CalendarEvent(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     summary = Column(String, nullable=False)
     customer_phone = Column(String, nullable=True)
+    sms_account_key = Column(String, nullable=True, index=True)
+    thread_id = Column(String, nullable=True, index=True)
     start_time = Column(DateTime, nullable=False)
     end_time = Column(DateTime, nullable=False)
     status = Column(String, default="scheduled", nullable=False)
@@ -978,16 +1000,23 @@ class CalendarEvent(Base):
 
 
 class ArrivalSession(Base):
-    """Single-use customer arrival invitation and its private chat session."""
+    """Reusable customer arrival link with an idempotent check-in action."""
     __tablename__ = "arrival_sessions"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     booking_id = Column(String, nullable=False, index=True)
+    thread_id = Column(String, ForeignKey("threads.id", ondelete="SET NULL"), nullable=True, index=True)
+    sms_account_key = Column(String, nullable=True, index=True)
     invite_token_hash = Column(String, nullable=False, unique=True, index=True)
     client_token_hash = Column(String, nullable=True, unique=True, index=True)
+    arrival_event_id = Column(String, nullable=True, unique=True, index=True)
     status = Column(String, nullable=False, default="invited", index=True)
     expires_at = Column(DateTime, nullable=False, index=True)
     activated_at = Column(DateTime, nullable=True)
+    acknowledged_at = Column(DateTime, nullable=True, index=True)
+    last_alert_at = Column(DateTime, nullable=True)
+    next_alert_at = Column(DateTime, nullable=True, index=True)
+    alert_count = Column(Integer, nullable=False, default=0)
     closed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     last_activity_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
@@ -1067,6 +1096,17 @@ def init_db():
                 conn.exec_driver_sql("ALTER TABLE calendar_events ADD COLUMN status VARCHAR DEFAULT 'scheduled'")
             if "notes" not in col_names:
                 conn.exec_driver_sql("ALTER TABLE calendar_events ADD COLUMN notes TEXT")
+            if "sms_account_key" not in col_names:
+                conn.exec_driver_sql("ALTER TABLE calendar_events ADD COLUMN sms_account_key VARCHAR")
+            if "thread_id" not in col_names:
+                conn.exec_driver_sql("ALTER TABLE calendar_events ADD COLUMN thread_id VARCHAR")
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_calendar_events_sms_account_key "
+                "ON calendar_events (sms_account_key)"
+            )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_calendar_events_thread_id ON calendar_events (thread_id)"
+            )
             conn.commit()
         except Exception as e:
             print(f"Auto-migration info: {e}")
@@ -1147,6 +1187,47 @@ def init_db():
             conn.commit()
         except Exception as e:
             print(f"Thread auto-migration info: {e}")
+            raise
+
+        try:
+            arrival_columns = {
+                row[1] for row in conn.exec_driver_sql("PRAGMA table_info(arrival_sessions)").fetchall()
+            }
+            additive_columns = {
+                "thread_id": "VARCHAR",
+                "sms_account_key": "VARCHAR",
+                "arrival_event_id": "VARCHAR",
+                "acknowledged_at": "DATETIME",
+                "last_alert_at": "DATETIME",
+                "next_alert_at": "DATETIME",
+                "alert_count": "INTEGER NOT NULL DEFAULT 0",
+            }
+            for column_name, column_type in additive_columns.items():
+                if column_name not in arrival_columns:
+                    conn.exec_driver_sql(
+                        f'ALTER TABLE arrival_sessions ADD COLUMN "{column_name}" {column_type}'
+                    )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_arrival_sessions_thread_id ON arrival_sessions (thread_id)"
+            )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_arrival_sessions_sms_account_key ON arrival_sessions (sms_account_key)"
+            )
+            conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_arrival_sessions_arrival_event_id "
+                "ON arrival_sessions (arrival_event_id)"
+            )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_arrival_sessions_acknowledged_at "
+                "ON arrival_sessions (acknowledged_at)"
+            )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_arrival_sessions_next_alert_at "
+                "ON arrival_sessions (next_alert_at)"
+            )
+            conn.commit()
+        except Exception as e:
+            print(f"Arrival-session auto-migration info: {e}")
             raise
 
     # Seed sample initial bookings & threads if empty
@@ -2362,6 +2443,8 @@ class ManualLearningInput(BaseModel):
 class ArrivalInviteInput(BaseModel):
     summary: str = Field(min_length=1, max_length=300)
     customerPhone: Optional[str] = Field(default=None, max_length=50)
+    smsAccountKey: Optional[Literal["primary", "secondary"]] = None
+    threadId: Optional[str] = Field(default=None, max_length=100)
     startTime: datetime
     endTime: datetime
 
@@ -2843,6 +2926,8 @@ def confirm_conversational_booking(
         booking_id=str(booking_id),
         summary=booking_summary,
         customer_phone=thread.customer_phone,
+        sms_account_key=thread.sms_account_key,
+        thread_id=thread.id,
         start_time=start,
         end_time=end,
     )
@@ -3153,6 +3238,8 @@ def get_bookings(db: Session = Depends(get_db)):
                     "id": e.get("id"),
                     "customerPhone": customer_phone,
                     "summary": e.get("summary"),
+                    "smsAccountKey": None,
+                    "threadId": None,
                     "startTime": format_booking_dt(b_start_local),
                     "endTime": format_booking_dt(b_end_local),
                     "status": "scheduled",
@@ -3166,11 +3253,21 @@ def get_bookings(db: Session = Depends(get_db)):
         # de.start_time and de.end_time are naive local Hobart times in database.
         # Return them with an explicit Hobart offset so browsers preserve the booked time.
         de_start_str = format_booking_dt(de.start_time)
-        if not any(r["startTime"] == de_start_str and r["customerPhone"] == de.customer_phone for r in results):
+        existing_result = next((
+            result for result in results
+            if result["id"] == de.id
+            or (result["startTime"] == de_start_str and result["customerPhone"] == de.customer_phone)
+        ), None)
+        if existing_result:
+            existing_result["smsAccountKey"] = de.sms_account_key
+            existing_result["threadId"] = de.thread_id
+        else:
             results.append({
                 "id": de.id,
                 "customerPhone": de.customer_phone,
                 "summary": de.summary,
+                "smsAccountKey": de.sms_account_key,
+                "threadId": de.thread_id,
                 "startTime": de_start_str,
                 "endTime": format_booking_dt(de.end_time),
                 "status": getattr(de, "status", "scheduled") or "scheduled",
@@ -3263,6 +3360,8 @@ def update_booking_endpoint(booking_id: str, payload: UpdateBookingInput, db: Se
         "id": booking.id,
         "customerPhone": booking.customer_phone,
         "summary": booking.summary,
+        "smsAccountKey": booking.sms_account_key,
+        "threadId": booking.thread_id,
         "startTime": format_booking_dt(booking.start_time),
         "endTime": format_booking_dt(booking.end_time),
         "status": getattr(booking, "status", "scheduled") or "scheduled",
@@ -4387,9 +4486,16 @@ def _arrival_payload(db: Session, session: ArrivalSession, include_messages: boo
     payload: Dict[str, Any] = {
         "id": session.id,
         "bookingId": session.booking_id,
+        "threadId": session.thread_id,
+        "smsAccountKey": session.sms_account_key,
+        "arrivalEventId": session.arrival_event_id,
         "status": session.status,
         "expiresAt": session.expires_at.isoformat() + "Z",
         "activatedAt": session.activated_at.isoformat() + "Z" if session.activated_at else None,
+        "acknowledgedAt": session.acknowledged_at.isoformat() + "Z" if session.acknowledged_at else None,
+        "lastAlertAt": session.last_alert_at.isoformat() + "Z" if session.last_alert_at else None,
+        "nextAlertAt": session.next_alert_at.isoformat() + "Z" if session.next_alert_at else None,
+        "alertCount": session.alert_count or 0,
         "closedAt": session.closed_at.isoformat() + "Z" if session.closed_at else None,
         "lastActivityAt": session.last_activity_at.isoformat() + "Z",
         "booking": {
@@ -4411,7 +4517,10 @@ def _require_arrival_client(request: Request, db: Session, session_id: str) -> A
         raise HTTPException(status_code=401, detail="Arrival session token required.")
     session = db.query(ArrivalSession).filter(
         ArrivalSession.id == session_id,
-        ArrivalSession.client_token_hash == _hash_arrival_token(token),
+        or_(
+            ArrivalSession.client_token_hash == _hash_arrival_token(token),
+            ArrivalSession.invite_token_hash == _hash_arrival_token(token),
+        ),
     ).first()
     if not session:
         raise HTTPException(status_code=401, detail="This arrival session is not valid.")
@@ -4448,12 +4557,57 @@ def _base62_encode(value: int) -> str:
 
 
 def _new_arrival_short_code() -> str:
-    # 96 random bits keeps the public single-use credential unguessable while
+    # 96 random bits keeps the private booking credential unguessable while
     # producing a substantially shorter, SMS-friendly base-62 code.
     while True:
         code = _base62_encode(secrets.randbits(96) or 1)
         if len(code) >= 16:
             return code
+
+
+def _arrival_thread_for_invite(
+    db: Session,
+    *,
+    customer_phone: Optional[str],
+    sms_account_key: str,
+    thread_id: Optional[str],
+    start_time: datetime,
+) -> Thread:
+    """Resolve one exact account-scoped conversation without crossing SMS lines."""
+    if sms_account_key not in FIRST_CONTACT_ACCOUNT_KEYS:
+        raise ValueError("A valid SMS account is required for an arrival link.")
+
+    normalized_destination = mobilemessage_service.normalize_sms_destination(customer_phone or "")
+    if not normalized_destination:
+        raise ValueError("A valid customer phone number is required for an arrival link.")
+    canonical_phone = canonical_phone_number(normalized_destination)
+    if thread_id:
+        thread = db.query(Thread).filter(Thread.id == thread_id).first()
+        if not thread or thread.sms_account_key != sms_account_key:
+            raise ValueError("The selected conversation does not belong to that SMS account.")
+        if canonical_phone and canonical_phone_number(thread.customer_phone) != canonical_phone:
+            raise ValueError("The selected conversation does not belong to that customer.")
+        return thread
+
+    thread = find_thread_by_phone(db, canonical_phone, sms_account_key)
+    if thread:
+        return thread
+
+    now = datetime.utcnow()
+    thread = Thread(
+        id=str(uuid.uuid4()),
+        customer_phone=canonical_phone,
+        sms_account_key=sms_account_key,
+        state="resolved",
+        priority="medium",
+        sla_due_at=start_time.replace(tzinfo=None) + timedelta(hours=24),
+        unread_count=0,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(thread)
+    db.flush()
+    return thread
 
 
 def _issue_arrival_invite(
@@ -4462,26 +4616,42 @@ def _issue_arrival_invite(
     booking_id: str,
     summary: str,
     customer_phone: Optional[str],
+    sms_account_key: str,
+    thread_id: Optional[str] = None,
     start_time: datetime,
     end_time: datetime,
 ) -> tuple[ArrivalSession, str]:
-    """Create one invitation while revoking every older link for the booking."""
+    """Create one account-bound invitation while revoking older booking links."""
     now = datetime.utcnow()
     local_start = start_time.replace(tzinfo=None)
     local_end = end_time.replace(tzinfo=None)
     if local_end <= local_start:
         raise ValueError("Booking end time must be after its start time.")
 
+    thread = _arrival_thread_for_invite(
+        db,
+        customer_phone=customer_phone,
+        sms_account_key=sms_account_key,
+        thread_id=thread_id,
+        start_time=local_start,
+    )
     booking = _arrival_booking(db, booking_id)
     if not booking:
         booking = CalendarEvent(
             id=booking_id, summary=summary, customer_phone=customer_phone,
+            sms_account_key=sms_account_key, thread_id=thread.id,
             start_time=local_start, end_time=local_end, status="scheduled", notes="",
         )
         db.add(booking)
     else:
+        if booking.sms_account_key and booking.sms_account_key != sms_account_key:
+            raise ValueError("This booking is already tied to another SMS line.")
+        if booking.thread_id and booking.thread_id != thread.id:
+            raise ValueError("This booking is already tied to another SMS conversation.")
         booking.summary = summary
         booking.customer_phone = customer_phone
+        booking.sms_account_key = sms_account_key
+        booking.thread_id = thread.id
         booking.start_time = local_start
         booking.end_time = local_end
 
@@ -4491,6 +4661,7 @@ def _issue_arrival_invite(
     ).all():
         old_session.status = "closed"
         old_session.closed_at = now
+        old_session.next_alert_at = None
         old_session.last_activity_at = now
 
     invite_token = _new_arrival_short_code()
@@ -4500,12 +4671,100 @@ def _issue_arrival_invite(
     )
     session = ArrivalSession(
         id=str(uuid.uuid4()), booking_id=booking_id,
+        thread_id=thread.id,
+        sms_account_key=sms_account_key,
         invite_token_hash=_hash_arrival_token(invite_token), status="invited",
         expires_at=expires_at, created_at=now, last_activity_at=now,
     )
     db.add(session)
     db.flush()
     return session, invite_token
+
+
+def _bind_legacy_arrival_session(db: Session, session: ArrivalSession) -> bool:
+    """Bind historical links only when their account-scoped thread is unambiguous."""
+    booking = _arrival_booking(db, session.booking_id)
+    canonical_phone = canonical_phone_number(booking.customer_phone if booking else "")
+
+    if session.thread_id:
+        thread = db.query(Thread).filter(Thread.id == session.thread_id).first()
+        if not thread:
+            return False
+        if session.sms_account_key and thread.sms_account_key != session.sms_account_key:
+            return False
+        if canonical_phone and canonical_phone_number(thread.customer_phone) != canonical_phone:
+            return False
+        session.sms_account_key = thread.sms_account_key
+        return True
+
+    if not canonical_phone:
+        return False
+    matches = [
+        thread
+        for thread in db.query(Thread).all()
+        if canonical_phone_number(thread.customer_phone) == canonical_phone
+        and (not session.sms_account_key or thread.sms_account_key == session.sms_account_key)
+    ]
+    if len(matches) != 1:
+        return False
+    session.thread_id = matches[0].id
+    session.sms_account_key = matches[0].sms_account_key
+    return True
+
+
+def _record_arrival_link_thread_event(
+    db: Session,
+    session: ArrivalSession,
+    at: datetime,
+) -> ThreadEvent:
+    """Create the one normal-conversation event associated with a link check-in."""
+    thread = db.query(Thread).filter(
+        Thread.id == session.thread_id,
+        Thread.sms_account_key == session.sms_account_key,
+    ).first()
+    if not thread:
+        raise ValueError("The arrival link is not bound to its SMS conversation.")
+
+    if session.arrival_event_id:
+        existing = db.query(ThreadEvent).filter(
+            ThreadEvent.id == session.arrival_event_id,
+            ThreadEvent.thread_id == thread.id,
+            ThreadEvent.type == "customer-arrived",
+        ).first()
+        if existing:
+            return existing
+
+    arrival_event = ThreadEvent(
+        id=str(uuid.uuid4()),
+        thread_id=thread.id,
+        type="customer-arrived",
+        agent_id=None,
+        meta=json.dumps({
+            "arrival_session_id": session.id,
+            "booking_id": session.booking_id,
+            "detection_method": "arrival-link",
+        }),
+        at=at,
+    )
+    db.add(arrival_event)
+    db.flush()
+    session.arrival_event_id = arrival_event.id
+    thread.updated_at = at
+    return arrival_event
+
+
+def _prepare_active_arrival_session(db: Session, session: ArrivalSession, now: datetime) -> bool:
+    """Safely attach pre-migration active sessions to the normal conversation alert flow."""
+    if session.status != "active" or not session.activated_at or session.expires_at <= now:
+        return False
+    if not _bind_legacy_arrival_session(db, session):
+        return False
+    if not session.arrival_event_id:
+        _record_arrival_link_thread_event(db, session, session.activated_at)
+    if session.acknowledged_at is None and session.next_alert_at is None:
+        session.next_alert_at = now
+    session.last_activity_at = max(session.last_activity_at or now, session.activated_at)
+    return True
 
 
 _vapid_key_lock = threading.Lock()
@@ -4587,7 +4846,7 @@ def _push_configured() -> bool:
     )
 
 
-def send_arrival_push_notifications(session_id: str) -> None:
+def send_arrival_push_notifications(session_id: str, clear: bool = False) -> None:
     """Best-effort delivery: an alert failure must never undo an arrival."""
     if not _push_configured() or webpush is None:
         return
@@ -4596,20 +4855,47 @@ def send_arrival_push_notifications(session_id: str) -> None:
         session = db.query(ArrivalSession).filter(ArrivalSession.id == session_id).first()
         if not session:
             return
-        booking = _arrival_booking(db, session.booking_id)
-        summary = booking.summary if booking else "A customer"
-        payload = json.dumps({
-            "type": "customer-arrival",
-            "title": "Customer has arrived",
-            "body": f"{summary} is waiting. Tap to open the arrival chat.",
-            "url": f"/arrivals?session={session.id}",
-            "tag": f"arrival-{session.id}",
-            "sessionId": session.id,
-        })
+        if clear:
+            remaining_count = db.query(ArrivalSession).filter(
+                ArrivalSession.status == "active",
+                ArrivalSession.acknowledged_at.is_(None),
+                ArrivalSession.expires_at > datetime.utcnow(),
+            ).count()
+            payload = json.dumps({
+                "type": "customer-arrival-cleared",
+                "tag": f"arrival-{session.id}",
+                "sessionId": session.id,
+                "remainingCount": remaining_count,
+            })
+        else:
+            if (
+                session.status != "active"
+                or session.acknowledged_at is not None
+                or session.expires_at <= datetime.utcnow()
+            ):
+                return
+            destination = (
+                f"/chat?thread={session.thread_id}&arrival={session.id}"
+                if session.thread_id
+                else f"/arrivals?session={session.id}"
+            )
+            payload = json.dumps({
+                "type": "customer-arrival",
+                "title": "Customer has arrived",
+                "body": "A customer is waiting. Tap to open the conversation.",
+                "url": destination,
+                "tag": f"arrival-{session.id}",
+                "sessionId": session.id,
+                "threadId": session.thread_id,
+            })
         private_key = _vapid_private_key()
         vapid_contact = os.getenv("VAPID_CONTACT", "mailto:admin@assistant-ui-hub.fly.dev")
         now = datetime.utcnow()
         for subscription in db.query(PushSubscription).filter(PushSubscription.active.is_(True)).all():
+            if not clear:
+                db.refresh(session)
+                if session.acknowledged_at is not None or session.status != "active":
+                    break
             try:
                 webpush(
                     subscription_info={
@@ -4633,8 +4919,6 @@ def send_arrival_push_notifications(session_id: str) -> None:
                     subscription.active = False
                 else:
                     subscription.failure_count = (subscription.failure_count or 0) + 1
-                    if subscription.failure_count >= 5:
-                        subscription.active = False
                 subscription.updated_at = now
                 logger.warning("Web Push delivery failed (status=%s)", status_code or "unknown")
         db.commit()
@@ -4643,6 +4927,110 @@ def send_arrival_push_notifications(session_id: str) -> None:
         logger.exception("Arrival Web Push dispatch failed")
     finally:
         db.close()
+
+
+def send_arrival_clear_notifications(session_id: str) -> None:
+    send_arrival_push_notifications(session_id, clear=True)
+
+
+ARRIVAL_ALERT_INTERVAL_SECONDS = 60
+ARRIVAL_ALERT_LEASE_SECONDS = 300
+
+
+def process_due_arrival_alerts() -> int:
+    """Claim and dispatch each due reminder once across concurrent workers."""
+    now = datetime.utcnow()
+    db = SessionLocal()
+    dispatched = 0
+    try:
+        db.query(ArrivalSession).filter(
+            ArrivalSession.status == "active",
+            ArrivalSession.expires_at <= now,
+        ).update({
+            ArrivalSession.status: "expired",
+            ArrivalSession.next_alert_at: None,
+        }, synchronize_session=False)
+        db.commit()
+
+        legacy_active_sessions = db.query(ArrivalSession).filter(
+            ArrivalSession.status == "active",
+            ArrivalSession.activated_at.isnot(None),
+            ArrivalSession.acknowledged_at.is_(None),
+            ArrivalSession.expires_at > now,
+            or_(
+                ArrivalSession.thread_id.is_(None),
+                ArrivalSession.sms_account_key.is_(None),
+                ArrivalSession.arrival_event_id.is_(None),
+                ArrivalSession.next_alert_at.is_(None),
+            ),
+        ).all()
+        for legacy_session in legacy_active_sessions:
+            _prepare_active_arrival_session(db, legacy_session, now)
+        db.commit()
+
+        due_ids = [
+            row.id
+            for row in db.query(ArrivalSession.id).join(
+                Thread, Thread.id == ArrivalSession.thread_id,
+            ).filter(
+                ArrivalSession.status == "active",
+                ArrivalSession.acknowledged_at.is_(None),
+                ArrivalSession.next_alert_at.isnot(None),
+                ArrivalSession.next_alert_at <= now,
+                ArrivalSession.expires_at > now,
+                ArrivalSession.sms_account_key == Thread.sms_account_key,
+            ).order_by(ArrivalSession.next_alert_at.asc()).limit(100).all()
+        ]
+        for session_id in due_ids:
+            claim_time = datetime.utcnow()
+            lease_until = claim_time + timedelta(seconds=ARRIVAL_ALERT_LEASE_SECONDS)
+            claimed = db.query(ArrivalSession).filter(
+                ArrivalSession.id == session_id,
+                ArrivalSession.status == "active",
+                ArrivalSession.acknowledged_at.is_(None),
+                ArrivalSession.next_alert_at.isnot(None),
+                ArrivalSession.next_alert_at <= claim_time,
+                ArrivalSession.expires_at > claim_time,
+            ).update({
+                ArrivalSession.next_alert_at: lease_until,
+            }, synchronize_session=False)
+            db.commit()
+            if claimed != 1:
+                continue
+            send_arrival_push_notifications(session_id)
+            completed_at = datetime.utcnow()
+            db.query(ArrivalSession).filter(
+                ArrivalSession.id == session_id,
+                ArrivalSession.status == "active",
+                ArrivalSession.acknowledged_at.is_(None),
+                ArrivalSession.next_alert_at == lease_until,
+                ArrivalSession.expires_at > completed_at,
+            ).update({
+                ArrivalSession.last_alert_at: completed_at,
+                ArrivalSession.next_alert_at: completed_at + timedelta(seconds=ARRIVAL_ALERT_INTERVAL_SECONDS),
+                ArrivalSession.alert_count: ArrivalSession.alert_count + 1,
+                ArrivalSession.last_activity_at: completed_at,
+            }, synchronize_session=False)
+            db.commit()
+            dispatched += 1
+        return dispatched
+    except Exception:
+        db.rollback()
+        logger.exception("Repeated customer-arrival alert failed")
+        return dispatched
+    finally:
+        db.close()
+
+
+async def arrival_alert_worker() -> None:
+    while True:
+        await asyncio.to_thread(process_due_arrival_alerts)
+        await asyncio.sleep(5)
+
+
+@app.on_event("startup")
+async def start_arrival_alert_worker():
+    asyncio.create_task(arrival_alert_worker())
 
 
 @app.get("/api/push/config")
@@ -4703,18 +5091,63 @@ def create_arrival_invite(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    """Issue one invitation and revoke any previous invitation/session for the booking."""
+    """Issue one account-bound invitation and revoke older links for the booking."""
+    booking = _arrival_booking(db, booking_id)
+    sms_account_key = payload.smsAccountKey
+    thread_id = payload.threadId
+
+    if booking and booking.sms_account_key:
+        if sms_account_key and sms_account_key != booking.sms_account_key:
+            raise HTTPException(status_code=422, detail="This booking belongs to another SMS line.")
+        sms_account_key = booking.sms_account_key
+    if booking and booking.thread_id:
+        if thread_id and thread_id != booking.thread_id:
+            raise HTTPException(status_code=422, detail="This booking belongs to another SMS conversation.")
+        thread_id = booking.thread_id
+
+    if thread_id:
+        selected_thread = db.query(Thread).filter(Thread.id == thread_id).first()
+        if not selected_thread:
+            if booking and booking.thread_id == thread_id:
+                booking.thread_id = None
+                thread_id = None
+            else:
+                raise HTTPException(status_code=422, detail="The selected SMS conversation no longer exists.")
+    if thread_id:
+        selected_thread = db.query(Thread).filter(Thread.id == thread_id).one()
+        if sms_account_key and selected_thread.sms_account_key != sms_account_key:
+            raise HTTPException(status_code=422, detail="The selected conversation belongs to another SMS line.")
+        sms_account_key = selected_thread.sms_account_key
+
+    if not sms_account_key:
+        canonical_phone = canonical_phone_number(payload.customerPhone or "")
+        matching_accounts = {
+            thread.sms_account_key
+            for thread in db.query(Thread).all()
+            if canonical_phone
+            and canonical_phone_number(thread.customer_phone) == canonical_phone
+        }
+        if len(matching_accounts) == 1:
+            sms_account_key = next(iter(matching_accounts))
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail="Select the Tori or Anonymous SMS conversation before creating this arrival link.",
+            )
+
     try:
         session, invite_token = _issue_arrival_invite(
             db,
             booking_id=booking_id,
             summary=payload.summary,
             customer_phone=payload.customerPhone,
+            sms_account_key=sms_account_key,
+            thread_id=thread_id,
             start_time=payload.startTime,
             end_time=payload.endTime,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail="Booking end time must be after its start time.")
+        raise HTTPException(status_code=422, detail=str(exc))
     db.commit()
     link = _arrival_public_link(invite_token, str(request.base_url))
     return {"session": _arrival_payload(db, session), "link": link}
@@ -4726,14 +5159,36 @@ def activate_arrival(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    """Atomically consume an invitation. A token can never trigger arrival twice."""
+    """Record arrival once while allowing the original link to be reopened."""
     now = datetime.utcnow()
     invite_hash = _hash_arrival_token(payload.inviteToken)
     candidate = db.query(ArrivalSession).filter(ArrivalSession.invite_token_hash == invite_hash).first()
     if not candidate or candidate.expires_at <= now:
         raise HTTPException(status_code=410, detail="This arrival link has expired or is no longer valid.")
 
-    client_token = secrets.token_urlsafe(32)
+    if candidate.status == "active" and candidate.activated_at:
+        if not _prepare_active_arrival_session(db, candidate, now):
+            db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="This older arrival link is not safely tied to an SMS conversation. Please issue a new link.",
+            )
+        db.commit()
+        return {
+            "alreadyActivated": True,
+            "clientToken": payload.inviteToken,
+            "session": _arrival_payload(db, candidate),
+        }
+    if candidate.status != "invited":
+        raise HTTPException(status_code=410, detail="This arrival link is closed or no longer valid.")
+    if not _bind_legacy_arrival_session(db, candidate):
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This older arrival link is not safely tied to an SMS conversation. Please issue a new link.",
+        )
+
+    next_alert_at = now + timedelta(seconds=60)
     updated = db.query(ArrivalSession).filter(
         ArrivalSession.id == candidate.id,
         ArrivalSession.status == "invited",
@@ -4742,12 +5197,25 @@ def activate_arrival(
         ArrivalSession.status: "active",
         ArrivalSession.activated_at: now,
         ArrivalSession.last_activity_at: now,
-        ArrivalSession.client_token_hash: _hash_arrival_token(client_token),
+        ArrivalSession.client_token_hash: invite_hash,
+        ArrivalSession.acknowledged_at: None,
+        ArrivalSession.last_alert_at: now,
+        ArrivalSession.next_alert_at: next_alert_at,
+        ArrivalSession.alert_count: 1,
     }, synchronize_session=False)
     if updated != 1:
         db.rollback()
-        raise HTTPException(status_code=410, detail="This arrival link has already been used.")
+        current = db.query(ArrivalSession).filter(ArrivalSession.id == candidate.id).first()
+        if current and current.status == "active" and current.activated_at and current.expires_at > now:
+            return {
+                "alreadyActivated": True,
+                "clientToken": payload.inviteToken,
+                "session": _arrival_payload(db, current),
+            }
+        raise HTTPException(status_code=410, detail="This arrival link is closed or no longer valid.")
 
+    session = db.query(ArrivalSession).filter(ArrivalSession.id == candidate.id).one()
+    _record_arrival_link_thread_event(db, session, now)
     db.add(ArrivalChatMessage(
         id=str(uuid.uuid4()), session_id=candidate.id, sender="system",
         text="Customer has arrived.", created_at=now,
@@ -4755,7 +5223,33 @@ def activate_arrival(
     db.commit()
     session = db.query(ArrivalSession).filter(ArrivalSession.id == candidate.id).one()
     background_tasks.add_task(send_arrival_push_notifications, session.id)
-    return {"clientToken": client_token, "session": _arrival_payload(db, session)}
+    return {
+        "alreadyActivated": False,
+        "clientToken": payload.inviteToken,
+        "session": _arrival_payload(db, session),
+    }
+
+
+@app.post("/api/arrival/status")
+def get_arrival_invite_status(payload: ArrivalActivateInput, db: Session = Depends(get_db)):
+    """Let a reopened private link restore its existing check-in without activating it."""
+    now = datetime.utcnow()
+    session = db.query(ArrivalSession).filter(
+        ArrivalSession.invite_token_hash == _hash_arrival_token(payload.inviteToken),
+    ).first()
+    if not session or session.expires_at <= now or session.status in {"closed", "expired"}:
+        raise HTTPException(status_code=410, detail="This arrival link has expired or is no longer valid.")
+    if session.status == "active":
+        if not _prepare_active_arrival_session(db, session, now):
+            db.rollback()
+            raise HTTPException(status_code=409, detail="Please request a new arrival link.")
+        db.commit()
+        return {
+            "active": True,
+            "clientToken": payload.inviteToken,
+            "session": _arrival_payload(db, session),
+        }
+    return {"active": False, "clientToken": None, "session": None}
 
 
 @app.get("/api/arrival/client/{session_id}")
@@ -4784,7 +5278,10 @@ def list_arrival_sessions(db: Session = Depends(get_db)):
     db.query(ArrivalSession).filter(
         ArrivalSession.expires_at <= now,
         ArrivalSession.status.in_(["invited", "active"]),
-    ).update({ArrivalSession.status: "expired"}, synchronize_session=False)
+    ).update({
+        ArrivalSession.status: "expired",
+        ArrivalSession.next_alert_at: None,
+    }, synchronize_session=False)
     db.commit()
     sessions = db.query(ArrivalSession).order_by(ArrivalSession.last_activity_at.desc()).limit(100).all()
     return [_arrival_payload(db, session, include_messages=False) for session in sessions]
@@ -4822,6 +5319,7 @@ def close_arrival_session(session_id: str, db: Session = Depends(get_db)):
     if session.status not in {"closed", "expired"}:
         session.status = "closed"
         session.closed_at = datetime.utcnow()
+        session.next_alert_at = None
         session.last_activity_at = session.closed_at
         db.commit()
     return _arrival_payload(db, session)
@@ -5290,9 +5788,11 @@ def get_threads(
         
     threads = query.all()
     thread_ids = [thread.id for thread in threads]
+    now = datetime.utcnow()
 
     latest_messages = {}
     latest_arrivals = {}
+    latest_pending_arrivals = {}
     if thread_ids:
         ranked_messages = db.query(
             Message.thread_id.label("thread_id"),
@@ -5312,32 +5812,49 @@ def get_threads(
             ).all()
         }
 
-        ranked_arrivals = db.query(
+        arrival_rows = db.query(
             ThreadEvent.thread_id.label("thread_id"),
             ThreadEvent.id.label("id"),
             ThreadEvent.at.label("at"),
-            func.row_number().over(
-                partition_by=ThreadEvent.thread_id,
-                order_by=(ThreadEvent.at.desc(), ThreadEvent.id.desc()),
-            ).label("row_number"),
+            ArrivalSession.id.label("session_id"),
+            ArrivalSession.arrival_event_id.label("arrival_event_id"),
+            ArrivalSession.sms_account_key.label("sms_account_key"),
+            ArrivalSession.status.label("session_status"),
+            ArrivalSession.activated_at.label("activated_at"),
+            ArrivalSession.acknowledged_at.label("acknowledged_at"),
+            ArrivalSession.expires_at.label("expires_at"),
+        ).outerjoin(
+            ArrivalSession, ArrivalSession.arrival_event_id == ThreadEvent.id,
         ).filter(
             ThreadEvent.thread_id.in_(thread_ids),
             ThreadEvent.type == "customer-arrived",
-        ).subquery()
-        latest_arrivals = {
-            row.thread_id: row
-            for row in db.query(ranked_arrivals).filter(
-                ranked_arrivals.c.row_number == 1
-            ).all()
-        }
+        ).order_by(ThreadEvent.at.desc(), ThreadEvent.id.desc()).all()
+        thread_accounts = {thread.id: thread.sms_account_key for thread in threads}
+        for row in arrival_rows:
+            latest_arrivals.setdefault(row.thread_id, row)
+            if (
+                row.thread_id not in latest_pending_arrivals
+                and row.session_id
+                and row.sms_account_key == thread_accounts.get(row.thread_id)
+                and row.session_status == "active"
+                and row.acknowledged_at is None
+                and row.activated_at is not None
+                and row.expires_at > now
+            ):
+                latest_pending_arrivals[row.thread_id] = row
 
     ordered_results = []
     
     for t in threads:
         last_msg = latest_messages.get(t.id)
-        last_activity_at = last_msg.at if last_msg else t.created_at
-        last_message_at = format_dt(last_activity_at)
+        message_activity_at = last_msg.at if last_msg else t.created_at
+        last_message_at = format_dt(message_activity_at)
         last_arrival_event = latest_arrivals.get(t.id)
+        pending_arrival = latest_pending_arrivals.get(t.id)
+        last_activity_at = max(
+            message_activity_at,
+            pending_arrival.activated_at if pending_arrival else message_activity_at,
+        )
         
         assigned_agent_name = f"Agent {t.assigned_agent_id}" if t.assigned_agent_id else None
         
@@ -5350,6 +5867,10 @@ def get_threads(
             "lastMessageRole": last_msg.role if last_msg else None,
             "lastArrivalAt": format_dt(last_arrival_event.at) if last_arrival_event else None,
             "lastArrivalEventId": last_arrival_event.id if last_arrival_event else None,
+            "lastArrivalSessionId": last_arrival_event.session_id if last_arrival_event else None,
+            "pendingArrivalSessionId": pending_arrival.session_id if pending_arrival else None,
+            "pendingArrivalEventId": pending_arrival.arrival_event_id if pending_arrival else None,
+            "pendingArrivalAt": format_dt(pending_arrival.activated_at) if pending_arrival else None,
             "unreadCount": t.unread_count,
             "priority": t.priority,
             "status": t.state,
@@ -5363,7 +5884,7 @@ def get_threads(
         }
         ordered_results.append((
             last_activity_at,
-            last_msg.id if last_msg else "",
+            pending_arrival.session_id if pending_arrival else (last_msg.id if last_msg else ""),
             t.id,
             result,
         ))
@@ -5489,6 +6010,15 @@ def get_thread_detail(thread_id: str, db: Session = Depends(get_db)):
             "at": format_dt(e.at),
             "meta": meta_parsed
         })
+
+    pending_arrival = db.query(ArrivalSession).filter(
+        ArrivalSession.thread_id == thread.id,
+        ArrivalSession.sms_account_key == thread.sms_account_key,
+        ArrivalSession.status == "active",
+        ArrivalSession.acknowledged_at.is_(None),
+        ArrivalSession.activated_at.isnot(None),
+        ArrivalSession.expires_at > now,
+    ).order_by(ArrivalSession.activated_at.desc(), ArrivalSession.id.desc()).first()
         
     return {
         "id": thread.id,
@@ -5497,6 +6027,9 @@ def get_thread_detail(thread_id: str, db: Session = Depends(get_db)):
         "state": thread.state,
         "assignedAgent": assigned_agent,
         "autoReplyEnabled": thread.auto_reply_enabled,
+        "pendingArrivalSessionId": pending_arrival.id if pending_arrival else None,
+        "pendingArrivalEventId": pending_arrival.arrival_event_id if pending_arrival else None,
+        "pendingArrivalAt": format_dt(pending_arrival.activated_at) if pending_arrival else None,
         "sla": {
             "dueAt": format_dt(thread.sla_due_at),
             "level": thread.priority,
@@ -5505,6 +6038,81 @@ def get_thread_detail(thread_id: str, db: Session = Depends(get_db)):
         "messages": messages_list,
         "notes": notes_list,
         "events": events_list
+    }
+
+
+@app.post("/api/threads/{thread_id}/arrivals/{session_id}/acknowledge")
+def acknowledge_thread_arrival(
+    thread_id: str,
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Stop one arrival alert only when its exact account-scoped conversation is opened."""
+    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    session = db.query(ArrivalSession).filter(ArrivalSession.id == session_id).first()
+    if (
+        not session
+        or session.thread_id != thread.id
+        or session.sms_account_key != thread.sms_account_key
+    ):
+        raise HTTPException(status_code=404, detail="Arrival alert not found for this conversation.")
+
+    now = datetime.utcnow()
+    if (
+        session.status != "active"
+        or session.activated_at is None
+        or session.arrival_event_id is None
+        or session.expires_at <= now
+    ):
+        raise HTTPException(status_code=409, detail="This customer has not activated that arrival link.")
+
+    if session.acknowledged_at is None:
+        acknowledged_at = now
+        updated = db.query(ArrivalSession).filter(
+            ArrivalSession.id == session.id,
+            ArrivalSession.thread_id == thread.id,
+            ArrivalSession.sms_account_key == thread.sms_account_key,
+            ArrivalSession.status == "active",
+            ArrivalSession.activated_at.isnot(None),
+            ArrivalSession.arrival_event_id.isnot(None),
+            ArrivalSession.acknowledged_at.is_(None),
+            ArrivalSession.expires_at > acknowledged_at,
+        ).update({
+            ArrivalSession.acknowledged_at: acknowledged_at,
+            ArrivalSession.next_alert_at: None,
+            ArrivalSession.last_activity_at: acknowledged_at,
+        }, synchronize_session=False)
+        if updated != 1:
+            db.rollback()
+            session = db.query(ArrivalSession).filter(ArrivalSession.id == session_id).one()
+            if session.acknowledged_at is not None:
+                return {
+                    "status": "acknowledged",
+                    "sessionId": session.id,
+                    "acknowledgedAt": session.acknowledged_at.isoformat() + "Z",
+                }
+            raise HTTPException(status_code=409, detail="This arrival alert could not be acknowledged.")
+        db.add(ThreadEvent(
+            id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"customer-arrival-acknowledged:{session.id}")),
+            thread_id=thread.id,
+            type="customer-arrival-acknowledged",
+            agent_id="user",
+            meta=json.dumps({
+                "arrival_session_id": session.id,
+                "arrival_event_id": session.arrival_event_id,
+            }),
+            at=acknowledged_at,
+        ))
+        db.commit()
+        session = db.query(ArrivalSession).filter(ArrivalSession.id == session_id).one()
+        background_tasks.add_task(send_arrival_clear_notifications, session.id)
+    return {
+        "status": "acknowledged",
+        "sessionId": session.id,
+        "acknowledgedAt": session.acknowledged_at.isoformat() + "Z" if session.acknowledged_at else None,
     }
 
 
@@ -8779,8 +9387,15 @@ def save_booking_reminder_settings(payload: BookingReminderInput):
         json.dump(payload.model_dump(), handle, indent=2)
     return {"status": "success"}
 
-def _booking_reminder_parts(summary: str) -> tuple[str, str, str, str]:
-    provider_key = "anonymous" if re.search(r"\(Anonymous\)\s*$", summary or "", re.IGNORECASE) else "tori"
+def _booking_reminder_parts(
+    summary: str,
+    sms_account_key: Optional[str] = None,
+) -> tuple[str, str, str, str]:
+    if sms_account_key in FIRST_CONTACT_ACCOUNT_KEYS:
+        provider_key = "anonymous" if sms_account_key == "secondary" else "tori"
+    else:
+        # Compatibility only for historical bookings created before account metadata existed.
+        provider_key = "anonymous" if re.search(r"\(Anonymous\)\s*$", summary or "", re.IGNORECASE) else "tori"
     provider = BOOKING_PROVIDERS[provider_key]
     cleaned = re.sub(r"\s*\((?:Tori|Anonymous)\)\s*$", "", summary or "", flags=re.IGNORECASE)
     if " - " in cleaned:
@@ -8824,7 +9439,10 @@ def process_due_booking_reminders() -> None:
             for booking in due_bookings:
                 if booking.id in sent:
                     continue
-                name, service, provider_name, account_key = _booking_reminder_parts(booking.summary)
+                name, service, provider_name, account_key = _booking_reminder_parts(
+                    booking.summary,
+                    booking.sms_account_key,
+                )
                 formatted_time = booking.start_time.strftime("%A, %b %d at %I:%M %p")
                 variables = {
                     **get_business_variable_values(),
@@ -8932,6 +9550,7 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
             booking_id=str(booking_id),
             summary=summary,
             customer_phone=customer_phone,
+            sms_account_key=sms_account_key,
             start_time=start_dt,
             end_time=end_dt,
         )
