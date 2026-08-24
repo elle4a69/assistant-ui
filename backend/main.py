@@ -873,7 +873,7 @@ class Thread(Base):
     sla_due_at = Column(DateTime, nullable=False)
     unread_count = Column(Integer, default=0, nullable=False)
     auto_reply_enabled = Column(Boolean, default=True, nullable=False)
-    pending_slots = Column(Text, nullable=True) # JSON list of slots presented
+    pending_slots = Column(Text, nullable=True) # Legacy field; availability options are never retained.
     pending_booking = Column(Text, nullable=True)  # JSON proposal awaiting explicit customer confirmation
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -1234,7 +1234,14 @@ def init_db():
                     raw.close()
             elif "pending_booking" not in thread_columns:
                 conn.exec_driver_sql("ALTER TABLE threads ADD COLUMN pending_booking TEXT")
+            # Availability is authoritative only at the time it is read from the
+            # calendar. Older releases retained offered times, which could become stale.
+            cleared_pending_slots = conn.exec_driver_sql(
+                "UPDATE threads SET pending_slots = NULL WHERE pending_slots IS NOT NULL"
+            ).rowcount
             conn.commit()
+            if cleared_pending_slots:
+                print(f"[Calendar Authority] Cleared {cleared_pending_slots} legacy pending-slot cache entries.")
         except Exception as e:
             print(f"Thread auto-migration info: {e}")
             raise
@@ -3685,6 +3692,37 @@ def booking_proposal_has_live_evidence(
     return False
 
 
+AVAILABILITY_REQUEST_RE = re.compile(
+    r"\b(?:available|availability|free|opening|openings|slot|slots|"
+    r"appointment|appointments|book|booking|schedule|reschedule|"
+    r"today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+    re.IGNORECASE,
+)
+AVAILABILITY_CLAIM_RE = re.compile(
+    r"\b(?:available|availability|free|opening|openings|slot|slots|"
+    r"fully\s+booked|booked\s+out|can\s+(?:do|book)|"
+    r"can(?:not|'t)\s+(?:do|book))\b",
+    re.IGNORECASE,
+)
+
+
+def is_booking_or_availability_turn(message: str) -> bool:
+    """Identify turns that must use live calendar evidence only."""
+    return bool(AVAILABILITY_REQUEST_RE.search(message or ""))
+
+
+def has_availability_claim(reply: str) -> bool:
+    """Return whether customer-facing wording makes an availability assertion."""
+    return bool(AVAILABILITY_CLAIM_RE.search(reply or ""))
+
+
+def validate_calendar_only_reply(reply: str, *, live_lookup_succeeded: bool) -> Optional[str]:
+    """Reject availability statements that are not backed by this turn's calendar call."""
+    if has_availability_claim(reply) and not live_lookup_succeeded:
+        return "AI stated availability without a fresh live calendar lookup"
+    return None
+
+
 def requested_duration_minutes(messages: List[Any], current_body: str) -> Optional[int]:
     """Return the customer's most recently stated booking duration."""
     texts = [
@@ -3710,6 +3748,7 @@ def validate_availability_claim(
     tool_slots: List[Dict[str, Any]],
     requested_duration: Optional[int],
     now_local: datetime,
+    live_calendar_lookup_succeeded: bool = False,
 ) -> Optional[str]:
     """Reject exact-time claims that disagree with exact-duration booking evidence."""
     normalized_reply = reply.casefold().replace("’", "'").replace("�", "'")
@@ -3748,6 +3787,8 @@ def validate_availability_claim(
 
     if negative and matching_slots:
         return "AI said a provider-validated exact-duration slot was unavailable"
+    if negative and not matching_slots and not live_calendar_lookup_succeeded:
+        return "AI stated an exact time was unavailable without matching live calendar evidence"
     if not negative and not matching_slots:
         return "AI claimed an exact time without matching exact-duration provider evidence"
     return None
@@ -3809,33 +3850,31 @@ def run_sms_reply_logic(
         thread.pending_booking = None
     pending_booking_at_turn_start = bool(thread.pending_booking)
     booking_proposal_candidate: Optional[str] = None
-    availability_tool_slots: List[Dict[str, Any]] = []
-    if thread.pending_slots:
-        try:
-            prior_verified_slots = json.loads(thread.pending_slots)
-            if isinstance(prior_verified_slots, list):
-                availability_tool_slots.extend(
-                    slot for slot in prior_verified_slots
-                    if isinstance(slot, dict)
-                    and slot.get("service_id")
-                    and slot.get("start")
-                    and slot.get("end")
-                )
-        except (TypeError, json.JSONDecodeError):
-            thread.pending_slots = None
-    
-    # Step 1: Read only the knowledge and Settings catalogue allowed for this account.
-    retrieved_context = (
-        build_business_context(effective_body)
-        if thread.sms_account_key == "primary"
-        else build_business_context(
-            effective_body,
-            account_key=thread.sms_account_key,
-        )
+    booking_or_availability_turn = (
+        is_booking_or_availability_turn(effective_body)
+        or clean_body in ("1", "2", "3")
     )
+    availability_tool_slots: List[Dict[str, Any]] = []
+    live_calendar_lookup_succeeded = False
+    # Historic offered times are not evidence for a later customer message.
+    thread.pending_slots = None
+
+    # Step 1: Read only the knowledge and Settings catalogue allowed for this account.
+    if booking_or_availability_turn:
+        retrieved_context = (
+            "No stored knowledge is supplied for booking availability. "
+            "Use the live booking discovery tools for services and times."
+        )
+    else:
+        retrieved_context = (
+            build_business_context(effective_body)
+            if thread.sms_account_key == "primary"
+            else build_business_context(effective_body, account_key=thread.sms_account_key)
+        )
     
     now_local = current_business_time()
     reply_at_naive = datetime.utcnow()
+    requested_duration = requested_duration_minutes(history_msgs, effective_body)
     
     # Step 2: Supply customer-owned booking context, but never inject generic
     # 30-minute openings. Exact availability comes only from the booking tools,
@@ -3876,20 +3915,6 @@ def run_sms_reply_logic(
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             thread.pending_booking = None
-    if clean_body in ("1", "2", "3") and thread.pending_slots:
-        try:
-            prior_slots = json.loads(thread.pending_slots)
-            selected_index = int(clean_body) - 1
-            selected_slot = prior_slots[selected_index]
-            slots_str += (
-                "\nCustomer selection from the previously presented options: "
-                f"Option {clean_body}, {selected_slot['start']} to {selected_slot['end']}. "
-                "This selects a time only; collect any missing name and service, then use "
-                "propose_booking and obtain explicit confirmation before booking."
-            )
-        except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-            thread.pending_slots = None
-
     # Step 3 & 4: Load prompts templates
     system_prompt_path = os.path.join(PROMPTS_DIR, "system_prompt.txt")
     user_prompt_path = os.path.join(PROMPTS_DIR, "user_prompt.txt")
@@ -3994,12 +4019,21 @@ def run_sms_reply_logic(
                 },
             ]
             
-            examples = get_style_examples(effective_body)
+            examples = [] if booking_or_availability_turn else get_style_examples(effective_body)
             instructions = build_model_instructions(
                 system_prompt_rendered,
                 examples,
-                STYLE_PROFILE_STORE.get_applied(),
+                None if booking_or_availability_turn else STYLE_PROFILE_STORE.get_applied(),
             )
+            if booking_or_availability_turn:
+                instructions += (
+                    "\n\nHard calendar authority: for this turn, no stored knowledge, conversation "
+                    "history, previous options, prompt text, examples, or model memory is evidence of "
+                    "availability. Call the live booking discovery tools in this turn before stating or "
+                    "implying that any time is available or unavailable. Do not ask the customer to select "
+                    "an old numbered option. If a live result cannot support a direct answer, output exactly "
+                    "[[HANDOFF: live calendar result required]]."
+                )
             instructions += (
                 "\n\nSafety rule: never send a holding response such as 'I'll get back to you', "
                 "'I can't check that right now', 'just a sec', or similar. If the supplied facts "
@@ -4031,7 +4065,6 @@ def run_sms_reply_logic(
                 )
             outbound_instruction_reference = instructions
 
-            requested_duration = requested_duration_minutes(history_msgs, effective_body)
             input_history = build_model_input(
                 history_msgs,
                 current_history_text=body,
@@ -4121,10 +4154,16 @@ def run_sms_reply_logic(
                         except (TypeError, json.JSONDecodeError):
                             args = {}
                         tool_result = get_booking_tool_suite().execute(tool_call.name, args)
+                        if (
+                            tool_call.name in {
+                                "get_times_today", "get_times_tomorrow", "get_next_available",
+                            }
+                            and tool_result.get("status") == "ok"
+                        ):
+                            live_calendar_lookup_succeeded = True
                         verified_slots = booking_slots_from_tool_result(tool_result)
                         if verified_slots:
                             availability_tool_slots.extend(verified_slots)
-                            thread.pending_slots = json.dumps(verified_slots)
                             slots_presented = True
                     elif tool_call.name == "propose_booking":
                         try:
@@ -4210,22 +4249,33 @@ def run_sms_reply_logic(
                     store=False
                 )
 
-            availability_error = None if requested_booking_confirmed else validate_availability_claim(
-                assistant_reply or "",
-                availability_tool_slots,
-                requested_duration,
-                now_local,
-            )
-            if availability_error:
-                print(f"[AI Availability Rejected] {availability_error} on thread {thread_id}.")
-                assistant_reply = None
-                rejected_reply_reason = availability_error
-                
         except SupersededCustomerTurn:
             assistant_reply = None
         except Exception as e:
             print(f"OpenAI error: {e}. No reply was created or sent.")
             assistant_reply = None
+
+    if assistant_reply:
+        availability_error = unsafe_ai_reply_reason(
+            assistant_reply,
+            requested_booking_confirmed=requested_booking_confirmed or booking_confirmed,
+            internal_instructions=outbound_instruction_reference,
+        ) or validate_calendar_only_reply(
+            assistant_reply,
+            live_lookup_succeeded=live_calendar_lookup_succeeded,
+        )
+        if not availability_error and not requested_booking_confirmed:
+            availability_error = validate_availability_claim(
+                assistant_reply,
+                availability_tool_slots,
+                requested_duration,
+                now_local,
+                live_calendar_lookup_succeeded,
+            )
+        if availability_error:
+            print(f"[AI Availability Rejected] {availability_error} on thread {thread_id}.")
+            assistant_reply = None
+            rejected_reply_reason = availability_error
             
     # A newer fragment may arrive while the model is working. The newer job owns
     # the combined reply; this result must not create a draft, failure, or SMS.
@@ -4386,12 +4436,7 @@ def run_sms_reply_logic(
             text=assistant_reply,
             at=reply_at_naive
         )
-        meta_dict = {}
-        if thread.pending_slots:
-            try:
-                meta_dict["presentedSlots"] = json.loads(thread.pending_slots)
-            except Exception:
-                pass
+        meta_dict = {"calendar_lookup": "fresh"} if live_calendar_lookup_succeeded else {}
         if booking_confirmed:
             meta_dict["bookingConfirmed"] = True
             

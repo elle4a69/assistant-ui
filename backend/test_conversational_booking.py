@@ -298,11 +298,17 @@ def test_live_reply_flow_proposes_then_confirms_on_the_next_customer_turn(tmp_pa
     start = (current_business_time() + timedelta(days=2)).replace(
         hour=14, minute=0, second=0, microsecond=0,
     )
-    thread.pending_slots = json.dumps([{
-        "service_id": "service",
-        "start": start.isoformat(),
-        "end": (start + timedelta(minutes=30)).isoformat(),
-    }])
+    class LiveSlotSuite:
+        def execute(self, tool_name, arguments):
+            assert tool_name == "get_times_today"
+            assert arguments == {"service_id": "service"}
+            return {"status": "ok", "service_id": "service", "slots": [{
+                "service_id": "service",
+                "start_time": start.isoformat(),
+                "end_time": (start + timedelta(minutes=30)).isoformat(),
+            }]}
+
+    monkeypatch.setattr(main, "get_booking_tool_suite", lambda: LiveSlotSuite())
     first_customer = Message(
         id="proposal-message",
         thread_id=thread.id,
@@ -314,6 +320,9 @@ def test_live_reply_flow_proposes_then_confirms_on_the_next_customer_turn(tmp_pa
     db.add(first_customer)
     db.commit()
     proposal_client = SequenceClient([
+        FakeResponse(output=[FakeFunctionCall(
+            "get_times_today", {"service_id": "service"}, "availability-call",
+        )]),
         FakeResponse(output=[FakeFunctionCall(
             "propose_booking",
             {
@@ -578,11 +587,17 @@ def test_simulator_retains_proposal_while_training_mode_creates_a_draft(tmp_path
     )
     db = make_db()
     thread = add_thread(db)
-    thread.pending_slots = json.dumps([{
-        "service_id": "service",
-        "start": start.isoformat(),
-        "end": (start + timedelta(minutes=30)).isoformat(),
-    }])
+    class LiveSlotSuite:
+        def execute(self, tool_name, arguments):
+            assert tool_name == "get_times_today"
+            assert arguments == {"service_id": "service"}
+            return {"status": "ok", "service_id": "service", "slots": [{
+                "service_id": "service",
+                "start_time": start.isoformat(),
+                "end_time": (start + timedelta(minutes=30)).isoformat(),
+            }]}
+
+    monkeypatch.setattr(main, "get_booking_tool_suite", lambda: LiveSlotSuite())
     customer = Message(
         id="simulator-proposal-message",
         thread_id=thread.id,
@@ -594,6 +609,9 @@ def test_simulator_retains_proposal_while_training_mode_creates_a_draft(tmp_path
     db.add(customer)
     db.commit()
     client = SequenceClient([
+        FakeResponse(output=[FakeFunctionCall(
+            "get_times_today", {"service_id": "service"}, "availability-call",
+        )]),
         FakeResponse(output=[FakeFunctionCall(
             "propose_booking",
             {
@@ -753,5 +771,55 @@ def test_assistant_uses_two_stage_booking_tools_and_no_form_link():
     }
     assert '"name": "create_booking_form_link"' not in source
     assert "pending_booking_at_turn_start" in source
-    assert 'clean_body in ("1", "2", "3") and thread.pending_slots:' in source
+    assert "Hard calendar authority" in source
+    assert "thread.pending_slots = None" in source
+    assert "pending_slots = json.dumps(verified_slots)" not in source
     assert 'assistant_reply = f"All booked for' not in source
+
+
+def test_stored_availability_is_discarded_and_cannot_be_sent_without_live_lookup(monkeypatch):
+    db = make_db()
+    thread = add_thread(db)
+    thread.pending_slots = json.dumps([{
+        "service_id": "old-service",
+        "start": "2026-01-01T15:00:00+11:00",
+        "end": "2026-01-01T15:30:00+11:00",
+    }])
+    customer = Message(
+        id="stale-availability-message",
+        thread_id=thread.id,
+        role="customer",
+        text="Are you free at 3pm?",
+        provider_message_id="stale-availability-provider",
+        at=main.datetime.utcnow(),
+    )
+    db.add(customer)
+    db.commit()
+    monkeypatch.setattr(main, "build_business_context", lambda _query: (_ for _ in ()).throw(
+        AssertionError("availability turns must not retrieve stored knowledge"),
+    ))
+    monkeypatch.setattr(main, "openai_client", SequenceClient([
+        FakeResponse(output_text="I am available at 3pm."),
+    ]))
+
+    assert run_sms_reply_logic(
+        db, thread.id, customer.text, customer.provider_message_id, customer.at,
+        dispatch_sms=False,
+    ) == (False, False)
+
+    db.refresh(thread)
+    assert thread.pending_slots is None
+    assert thread.state == "needs-review"
+    assert db.query(Message).filter(Message.role.in_(["system", "draft"])).count() == 0
+    failure = db.query(main.ThreadEvent).filter(main.ThreadEvent.type == "ai-reply-failed").one()
+    assert "fresh live calendar lookup" in json.loads(failure.meta)["reason"]
+    db.close()
+
+
+def test_calendar_only_validator_requires_a_fresh_lookup():
+    assert main.validate_calendar_only_reply(
+        "I have an opening at 3pm.", live_lookup_succeeded=False,
+    ) == "AI stated availability without a fresh live calendar lookup"
+    assert main.validate_calendar_only_reply(
+        "I have an opening at 3pm.", live_lookup_succeeded=True,
+    ) is None

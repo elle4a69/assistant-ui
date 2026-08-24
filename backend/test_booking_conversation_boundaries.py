@@ -109,7 +109,7 @@ def test_secondary_account_cannot_receive_primary_prompt_knowledge_services_or_s
     ) == (False, False)
     db.refresh(thread)
     assert thread.state == "auto-reply"
-    assert thread.pending_slots == '[{"secondary": true}]'
+    assert thread.pending_slots is None
     messages = db.query(Message).filter(Message.thread_id == thread.id).order_by(Message.at).all()
     assert [message.text for message in messages] == ["Hello Anonymous", "Hello from Anonymous."]
     assert "Tori-only knowledge" not in str(calls[0]["input"])
