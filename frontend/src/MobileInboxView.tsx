@@ -307,7 +307,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     try {
       // Keep memory bounded by processing one model request at a time, while
       // continuing through the full queue instead of silently stopping at ten.
-      const safetyLimit = 250
+      const safetyLimit = 50
       let remaining = 0
       let reachedSafetyLimit = false
       for (let processed = 0; processed < safetyLimit; processed += 1) {
