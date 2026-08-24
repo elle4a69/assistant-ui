@@ -1869,6 +1869,7 @@ def _quarantined_knowledge_classification() -> Dict[str, Any]:
         "category": "internal_or_uncertain",
         "retrieval_enabled": False,
         "classification_version": KNOWLEDGE_CLASSIFICATION_VERSION,
+        "classification_status": "quarantined",
     }
 
 
@@ -1901,7 +1902,9 @@ def classify_knowledge_entries(entries: List[Dict[str, Any]]) -> Dict[str, Dict[
     )
     try:
         response = openai_client.responses.create(
-            model="gpt-4.1-mini",
+            # Use the same configured responder model rather than assuming a
+            # separate low-cost model is available in every deployment.
+            model="gpt-5.6-terra",
             instructions=instructions,
             input=json.dumps({"records": safe_records}, ensure_ascii=False),
             store=False,
@@ -1927,6 +1930,7 @@ def classify_knowledge_entries(entries: List[Dict[str, Any]]) -> Dict[str, Dict[
             "category": category,
             "retrieval_enabled": retrieval_enabled,
             "classification_version": KNOWLEDGE_CLASSIFICATION_VERSION,
+            "classification_status": "classified",
         }
     return fallback
 
@@ -1952,7 +1956,11 @@ def classify_all_learned_information() -> Dict[str, int]:
                 else:
                     retained_lines.append(line)
 
-        pending = [record for record in records if record.get("classification_version") != KNOWLEDGE_CLASSIFICATION_VERSION]
+        pending = [
+            record for record in records
+            if record.get("classification_version") != KNOWLEDGE_CLASSIFICATION_VERSION
+            or record.get("classification_status") != "classified"
+        ]
         classifications: Dict[str, Dict[str, Any]] = {}
         for offset in range(0, len(pending), 10):
             classifications.update(classify_knowledge_entries(pending[offset:offset + 10]))
