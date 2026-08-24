@@ -4,6 +4,8 @@ import base64
 import hmac
 import threading
 import asyncio
+import concurrent.futures
+import contextlib
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TMP_DIR = os.path.join(BASE_DIR, "tmp")
 os.environ["SQLITE_TMPDIR"] = TMP_DIR
@@ -17,7 +19,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any, Literal
 
-from fastapi import FastAPI, Depends, HTTPException, Query, status, UploadFile, File, BackgroundTasks, Request, Response
+from fastapi import FastAPI, Depends, HTTPException, Query, status, UploadFile, File, BackgroundTasks, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
@@ -28,6 +30,16 @@ from operations_github_service import (
     OperationsGitHubClient,
     OperationsGitHubError,
     redact_sensitive_text,
+)
+from agent_console import (
+    AgentConsoleError,
+    AgentStep,
+    build_agent_system_prompt,
+    compact_tool_catalog,
+    parse_agent_arguments,
+    read_workspace_file,
+    sanitize_console_text,
+    write_workspace_file,
 )
 from anon_content import router as anon_content_router
 from booking_tools import (
@@ -42,6 +54,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.pool import NullPool
 
 try:
     from pywebpush import WebPushException, webpush
@@ -82,6 +95,7 @@ import hashlib
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
+from urllib.parse import urlparse
 
 from bootcamp import (
     DEFAULT_STYLE_PROFILE,
@@ -1093,6 +1107,42 @@ class OperationsMemory(Base):
     active = Column(Boolean, nullable=False, default=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class OperationsAgentRun(Base):
+    """One authenticated, bounded autonomous Operations Console run."""
+    __tablename__ = "operations_agent_runs"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    request_id = Column(String, nullable=False, unique=True, index=True)
+    actor = Column(String, nullable=False)
+    objective = Column(Text, nullable=False)
+    status = Column(String, nullable=False, default="starting", index=True)
+    step_count = Column(Integer, nullable=False, default=0)
+    max_steps = Column(Integer, nullable=False, default=15)
+    cancel_requested = Column(Boolean, nullable=False, default=False)
+    final_summary = Column(Text, nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+
+class OperationsAgentEvent(Base):
+    """Ordered, replayable and redacted output from an Operations Console run."""
+    __tablename__ = "operations_agent_events"
+    __table_args__ = (
+        UniqueConstraint("run_id", "sequence", name="uq_operations_agent_event_sequence"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id = Column(String, ForeignKey("operations_agent_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    sequence = Column(Integer, nullable=False)
+    event_type = Column(String, nullable=False)
+    message = Column(Text, nullable=False, default="")
+    step = Column(Integer, nullable=True)
+    meta = Column(Text, nullable=False, default="{}")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 def init_db():
     Base.metadata.create_all(bind=engine)
@@ -8011,30 +8061,55 @@ def _operations_read_code_file(path: str, start_line: Any, end_line: Any) -> Dic
         return {"status": "rejected", "reason": str(exc)}
 
 
+@contextlib.contextmanager
+def _operations_code_task_guard(timeout_seconds: Optional[float] = None):
+    if timeout_seconds is None:
+        acquired = _operations_code_task_lock.acquire()
+    else:
+        acquired = _operations_code_task_lock.acquire(timeout=max(0.0, float(timeout_seconds)))
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            _operations_code_task_lock.release()
+
+
 def _operations_start_coding_task(
     db: Session,
     title: str,
     instructions: str,
     acceptance_test: str,
+    *,
+    lock_timeout_seconds: Optional[float] = None,
+    origin_run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     if not operations_code_access_available():
         return {"status": "unavailable", "reason": "The GitHub-hosted coding runner is not available."}
-    title = title.strip()[:160]
-    instructions = instructions.strip()[:6000]
-    acceptance_test = acceptance_test.strip()[:1000]
+    raw_title = str(title or "")
+    raw_instructions = str(instructions or "")
+    raw_acceptance_test = str(acceptance_test or "")
+    if "\n" in raw_title or "\r" in raw_title or "\x00" in raw_title + raw_instructions + raw_acceptance_test:
+        return {"status": "rejected", "reason": "The coding task contains invalid control characters."}
+    title = raw_title.strip()[:160]
+    instructions = raw_instructions.strip()[:6000]
+    acceptance_test = raw_acceptance_test.strip()[:1000]
     if len(title) < 3 or len(instructions) < 20 or len(acceptance_test) < 5:
         return {"status": "rejected", "reason": "The coding task needs a title, instructions and acceptance test."}
     combined = "\n".join((title, instructions, acceptance_test))
-    if OPERATIONS_CODE_SECRET_RE.search(combined):
-        return {"status": "rejected", "reason": "Remove secret values from the coding task before starting it."}
+    if OPERATIONS_CODE_SECRET_RE.search(combined) or OPERATIONS_MEMORY_PRIVATE_RE.search(combined):
+        return {
+            "status": "rejected",
+            "reason": "Remove or anonymize personal data and secret values before starting the coding task.",
+        }
 
-    with _operations_code_task_lock:
+    with _operations_code_task_guard(lock_timeout_seconds) as acquired:
+        if not acquired:
+            return {"status": "busy", "reason": "The coding-task queue is busy; try again shortly."}
         active = (
             db.query(OperationsAction)
             .filter(
                 OperationsAction.action_type == "coding_task",
                 OperationsAction.status.in_(OPERATIONS_CODE_ACTIVE_STATUSES),
-                OperationsAction.created_at >= datetime.utcnow() - timedelta(hours=2),
             )
             .order_by(OperationsAction.created_at.desc())
             .first()
@@ -8048,27 +8123,31 @@ def _operations_start_coding_task(
             }
         action_id = str(uuid.uuid4())
         branch = f"ops/task-{action_id}"
+        payload = {
+            "title": title,
+            "instructions": instructions,
+            "acceptance_test": acceptance_test,
+            "instructions_sha256": hashlib.sha256(instructions.encode("utf-8")).hexdigest(),
+            "stage": "awaiting_runner",
+            "branch": branch,
+            "queued_at": datetime.utcnow().isoformat() + "Z",
+        }
+        if origin_run_id:
+            payload["origin_agent_run_id"] = str(origin_run_id)
         action = OperationsAction(
             id=action_id,
             action_type="coding_task",
-            payload=json.dumps({
-                "title": title,
-                "instructions": instructions,
-                "acceptance_test": acceptance_test,
-                "instructions_sha256": hashlib.sha256(instructions.encode("utf-8")).hexdigest(),
-                "stage": "awaiting_runner",
-                "branch": branch,
-                "queued_at": datetime.utcnow().isoformat() + "Z",
-            }),
+            payload=json.dumps(payload),
             reason=f"Owner-authorised coding task: {title}",
             status="queued",
         )
         db.add(action)
         db.commit()
-        db.refresh(action)
     return {
         "status": "started",
-        "task_id": action.id,
+        # Use the pre-commit identifier.  A successful commit must never be
+        # reported as failed because of a post-commit refresh/read.
+        "task_id": action_id,
         "title": title,
         "isolation": "GitHub-hosted runner with a dedicated review branch",
         "deployment": "not authorised; this task cannot change main or deploy",
@@ -8736,6 +8815,1136 @@ def _operations_web_source_urls(response: Any) -> List[str]:
             if isinstance(url, str) and url.startswith(("https://", "http://")) and url not in urls:
                 urls.append(url)
     return urls[:8]
+
+
+# ---------------------------------------------------------------------------
+# Autonomous Operations Run Console
+# ---------------------------------------------------------------------------
+
+AGENT_CONSOLE_PROTOCOL_VERSION = 1
+AGENT_CONSOLE_ACTIVE_STATUSES = {"starting", "running"}
+AGENT_CONSOLE_TERMINAL_STATUSES = {
+    "completed", "cancelled", "failed", "step_limit", "interrupted",
+}
+# This is deliberately explicit. New Operations AI tools never become
+# autonomous merely because they were added to the wider assistant catalog.
+# Commands here are read-only except for one audited, idempotent queue action
+# that can create an isolated review-branch coding task. Runtime changes,
+# proposals, main-branch promotion and deployments are never autonomous.
+AGENT_CONSOLE_ALLOWED_TOOLS = frozenset({
+    "diagnose_message_handling",
+    "inspect_conversation",
+    "inspect_recent_failures",
+    "inspect_sms_accounts",
+    "inspect_system_status",
+    "recall_operational_memory",
+    "start_coding_task",
+})
+AGENT_RUNS_DIR = Path(PERSIST_DIR) / "agent-runs"
+AGENT_CONSOLE_HISTORY_LIMIT = 50
+AGENT_CONSOLE_HISTORY_DAYS = 30
+AGENT_CONSOLE_WORKSPACE_LIMIT_BYTES = 16 * 1024 * 1024
+AGENT_CONSOLE_ACTION_TIMEOUT_SECONDS = 30
+AGENT_CONSOLE_CODING_SUBMISSION_RESERVED_SECONDS = 7
+_agent_start_lock = threading.Lock()
+_agent_event_lock = threading.RLock()
+_agent_run_tasks: Dict[str, asyncio.Task] = {}
+_agent_model_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="agent-console-model",
+)
+_agent_action_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="agent-console-action",
+)
+
+
+class AgentConsoleBusyError(RuntimeError):
+    pass
+
+
+def agent_console_enabled() -> bool:
+    configured = os.getenv("OPS_AGENT_AUTONOMOUS_ENABLED", "true").strip().casefold()
+    return configured in {"1", "true", "yes", "on"} and bool(AUTH_PASSWORD) and openai_client is not None
+
+
+def agent_console_max_steps() -> int:
+    try:
+        configured = int(os.getenv("OPS_AGENT_MAX_STEPS", "15"))
+    except ValueError:
+        configured = 15
+    return max(1, min(15, configured))
+
+
+def agent_console_total_timeout_seconds() -> int:
+    try:
+        configured = int(os.getenv("OPS_AGENT_TOTAL_TIMEOUT_SECONDS", "600"))
+    except ValueError:
+        configured = 600
+    return max(60, min(900, configured))
+
+
+def _serialize_agent_run(run: OperationsAgentRun) -> Dict[str, Any]:
+    return {
+        "id": run.id,
+        "requestId": run.request_id,
+        "objective": run.objective,
+        "status": run.status,
+        "stepCount": run.step_count,
+        "maxSteps": run.max_steps,
+        "cancelRequested": bool(run.cancel_requested),
+        "finalSummary": run.final_summary,
+        "error": run.error,
+        "createdAt": run.created_at.isoformat() + "Z",
+        "updatedAt": run.updated_at.isoformat() + "Z",
+        "completedAt": run.completed_at.isoformat() + "Z" if run.completed_at else None,
+    }
+
+
+def _serialize_agent_event(event: OperationsAgentEvent) -> Dict[str, Any]:
+    try:
+        meta = json.loads(event.meta or "{}")
+        if not isinstance(meta, dict):
+            meta = {}
+    except (TypeError, json.JSONDecodeError):
+        meta = {}
+    frame: Dict[str, Any] = {
+        "type": event.event_type,
+        "runId": event.run_id,
+        "sequence": event.sequence,
+        "message": event.message,
+        "step": event.step,
+        "timestamp": event.created_at.isoformat() + "Z",
+    }
+    for key, value in meta.items():
+        if key not in frame:
+            frame[key] = value
+    return frame
+
+
+def _append_agent_event(
+    db: Session,
+    run: OperationsAgentRun,
+    event_type: str,
+    message: Any,
+    *,
+    step: Optional[int] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> OperationsAgentEvent:
+    """Append one ordered event. A single lock protects SQLite sequence claims."""
+
+    clean_message = sanitize_console_text(message, limit=12_000)
+    clean_meta_text = sanitize_console_text(
+        json.dumps(meta or {}, ensure_ascii=False, default=str),
+        limit=8_000,
+    )
+    try:
+        clean_meta = json.loads(clean_meta_text or "{}")
+        if not isinstance(clean_meta, dict):
+            clean_meta = {}
+    except json.JSONDecodeError:
+        clean_meta = {"truncated": True}
+    with _agent_event_lock:
+        last_sequence = db.query(func.max(OperationsAgentEvent.sequence)).filter(
+            OperationsAgentEvent.run_id == run.id
+        ).scalar() or 0
+        event_row = OperationsAgentEvent(
+            run_id=run.id,
+            sequence=int(last_sequence) + 1,
+            event_type=event_type,
+            message=clean_message,
+            step=step,
+            meta=json.dumps(clean_meta, ensure_ascii=False),
+        )
+        run.updated_at = datetime.utcnow()
+        db.add(event_row)
+        db.commit()
+    return event_row
+
+
+def _remove_agent_workspace(run_id: str) -> bool:
+    """Remove only a UUID-named console workspace beneath the configured root."""
+
+    try:
+        canonical_run_id = str(uuid.UUID(str(run_id)))
+    except (ValueError, TypeError, AttributeError):
+        return False
+    root = AGENT_RUNS_DIR.resolve(strict=False)
+    target = root / canonical_run_id
+    if target.parent != root or not target.exists():
+        return not target.exists()
+    if target.is_symlink():
+        target.unlink()
+    elif target.is_dir():
+        shutil.rmtree(target)
+    return not target.exists()
+
+
+def _agent_workspace_size(path: Path) -> int:
+    """Measure a workspace without following links."""
+
+    total = 0
+    if not path.exists() or path.is_symlink() or not path.is_dir():
+        return total
+    for current_root, directory_names, file_names in os.walk(path, followlinks=False):
+        current_path = Path(current_root)
+        directory_names[:] = [
+            name for name in directory_names if not (current_path / name).is_symlink()
+        ]
+        for name in file_names:
+            candidate = current_path / name
+            if candidate.is_symlink():
+                continue
+            with contextlib.suppress(OSError):
+                total += candidate.stat().st_size
+    return total
+
+
+def _prune_agent_console_history(db: Session) -> None:
+    """Bound audit rows and isolated scratch usage on the shared Fly volume."""
+
+    terminal_runs = (
+        db.query(OperationsAgentRun)
+        .filter(OperationsAgentRun.status.in_(AGENT_CONSOLE_TERMINAL_STATUSES))
+        .order_by(OperationsAgentRun.updated_at.desc(), OperationsAgentRun.id.desc())
+        .all()
+    )
+    cutoff = datetime.utcnow() - timedelta(days=AGENT_CONSOLE_HISTORY_DAYS)
+    terminal_records = [(run.id, run.updated_at) for run in terminal_runs]
+    expired_ids = {
+        run_id
+        for index, (run_id, updated_at) in enumerate(terminal_records)
+        if index >= AGENT_CONSOLE_HISTORY_LIMIT or updated_at < cutoff
+    }
+    retained_terminal_ids = [
+        run_id for run_id, _updated_at in terminal_records if run_id not in expired_ids
+    ]
+    if expired_ids:
+        db.query(OperationsAgentEvent).filter(
+            OperationsAgentEvent.run_id.in_(expired_ids)
+        ).delete(synchronize_session=False)
+        db.query(OperationsAgentRun).filter(
+            OperationsAgentRun.id.in_(expired_ids)
+        ).delete(synchronize_session=False)
+        db.commit()
+        for run_id in expired_ids:
+            with contextlib.suppress(OSError):
+                _remove_agent_workspace(run_id)
+
+    known_run_ids = {
+        str(item[0]) for item in db.query(OperationsAgentRun.id).all()
+    }
+    if AGENT_RUNS_DIR.exists():
+        for child in AGENT_RUNS_DIR.iterdir():
+            try:
+                child_run_id = str(uuid.UUID(child.name))
+            except (ValueError, TypeError, AttributeError):
+                continue
+            if child_run_id not in known_run_ids:
+                with contextlib.suppress(OSError):
+                    _remove_agent_workspace(child_run_id)
+
+    total_workspace_bytes = _agent_workspace_size(AGENT_RUNS_DIR)
+    for run_id in reversed(retained_terminal_ids):
+        if total_workspace_bytes <= AGENT_CONSOLE_WORKSPACE_LIMIT_BYTES:
+            break
+        workspace_size = _agent_workspace_size(AGENT_RUNS_DIR / run_id)
+        removed = False
+        with contextlib.suppress(OSError):
+            removed = _remove_agent_workspace(run_id)
+        if removed:
+            total_workspace_bytes -= workspace_size
+
+
+def _finish_agent_run(
+    run_id: str,
+    status_value: str,
+    message: Any,
+    *,
+    event_type: str,
+    summary: Optional[str] = None,
+    error: Optional[str] = None,
+) -> None:
+    db = SessionLocal()
+    try:
+        with _agent_event_lock:
+            run = db.query(OperationsAgentRun).filter(OperationsAgentRun.id == run_id).first()
+            if not run or run.status in AGENT_CONSOLE_TERMINAL_STATUSES:
+                return
+            run.status = status_value
+            run.completed_at = datetime.utcnow()
+            run.final_summary = sanitize_console_text(summary, limit=4_000) if summary else None
+            run.error = sanitize_console_text(error, limit=2_000) if error else None
+            _append_agent_event(
+                db,
+                run,
+                event_type,
+                message,
+                step=run.step_count or None,
+                meta={
+                    "status": status_value,
+                    "steps": run.step_count,
+                    "summary": run.final_summary,
+                },
+            )
+        _prune_agent_console_history(db)
+    finally:
+        db.close()
+
+
+def _interrupt_orphaned_agent_runs(db: Session) -> None:
+    active_runs = db.query(OperationsAgentRun).filter(
+        OperationsAgentRun.status.in_(AGENT_CONSOLE_ACTIVE_STATUSES)
+    ).all()
+    for run in active_runs:
+        if run.id in _agent_run_tasks:
+            continue
+        run.status = "interrupted"
+        run.error = "The web process restarted before this orchestration run finished."
+        run.completed_at = datetime.utcnow()
+        _append_agent_event(
+            db,
+            run,
+            "error",
+            run.error,
+            step=run.step_count or None,
+            meta={"status": "interrupted", "code": "server_restarted", "retryable": True},
+        )
+
+
+@app.on_event("startup")
+def recover_interrupted_agent_console_runs() -> None:
+    """Never leave a volatile orchestration marked as live after a process restart."""
+
+    db = SessionLocal()
+    try:
+        _interrupt_orphaned_agent_runs(db)
+        _prune_agent_console_history(db)
+    finally:
+        db.close()
+
+
+def _prune_agent_console_history_once() -> None:
+    db = SessionLocal()
+    try:
+        _prune_agent_console_history(db)
+    finally:
+        db.close()
+
+
+async def _agent_console_retention_worker() -> None:
+    while True:
+        await asyncio.sleep(3600)
+        await asyncio.to_thread(_prune_agent_console_history_once)
+
+
+@app.on_event("startup")
+async def start_agent_console_retention_worker() -> None:
+    asyncio.create_task(_agent_console_retention_worker())
+
+
+def _interrupt_agent_run_if_orphaned(run_id: str) -> None:
+    db = SessionLocal()
+    try:
+        run = db.query(OperationsAgentRun).filter(OperationsAgentRun.id == run_id).first()
+        if run and run.status in AGENT_CONSOLE_ACTIVE_STATUSES and run.id not in _agent_run_tasks:
+            run.status = "interrupted"
+            run.error = "The web process restarted before this orchestration run finished."
+            run.completed_at = datetime.utcnow()
+            _append_agent_event(
+                db,
+                run,
+                "error",
+                run.error,
+                step=run.step_count or None,
+                meta={"status": "interrupted", "code": "server_restarted", "retryable": True},
+            )
+    finally:
+        db.close()
+
+
+def _create_agent_run(request_id: str, objective: str) -> tuple[OperationsAgentRun, bool]:
+    try:
+        canonical_request_id = str(uuid.UUID(str(request_id or "")))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise AgentConsoleError("A valid request ID is required.") from exc
+    clean_objective = sanitize_console_text(objective, limit=8_000).strip()
+    if not clean_objective:
+        raise AgentConsoleError("An engineering objective is required.")
+
+    with _agent_start_lock:
+        db = SessionLocal()
+        try:
+            existing = db.query(OperationsAgentRun).filter(
+                OperationsAgentRun.request_id == canonical_request_id
+            ).first()
+            if existing:
+                db.expunge(existing)
+                return existing, False
+
+            _prune_agent_console_history(db)
+            active = db.query(OperationsAgentRun).filter(
+                OperationsAgentRun.status.in_(AGENT_CONSOLE_ACTIVE_STATUSES)
+            ).first()
+            if active:
+                raise AgentConsoleBusyError("Another Operations Console run is already active.")
+
+            run = OperationsAgentRun(
+                request_id=canonical_request_id,
+                actor=AUTH_USERNAME,
+                objective=clean_objective,
+                status="starting",
+                max_steps=agent_console_max_steps(),
+            )
+            db.add(run)
+            db.flush()
+            _append_agent_event(
+                db,
+                run,
+                "run_started",
+                "Objective accepted. The bounded operations run is starting.",
+                meta={"status": "starting", "maxSteps": run.max_steps},
+            )
+            db.refresh(run)
+            db.expunge(run)
+            return run, True
+        finally:
+            db.close()
+
+
+def _request_agent_cancel(run_id: str) -> bool:
+    db = SessionLocal()
+    try:
+        with _agent_event_lock:
+            run = db.query(OperationsAgentRun).filter(OperationsAgentRun.id == run_id).first()
+            if not run or run.status in AGENT_CONSOLE_TERMINAL_STATUSES:
+                return False
+            if run.cancel_requested:
+                return True
+            run.cancel_requested = True
+            _append_agent_event(
+                db,
+                run,
+                "status",
+                "Cancellation requested. The current bounded isolated step will finish or time out before the run stops.",
+                step=run.step_count or None,
+                meta={"status": "cancelling"},
+            )
+            return True
+    finally:
+        db.close()
+
+
+def _agent_run_cancel_requested(run_id: str) -> bool:
+    db = SessionLocal()
+    try:
+        run = db.query(OperationsAgentRun).filter(OperationsAgentRun.id == run_id).first()
+        return not run or bool(run.cancel_requested)
+    finally:
+        db.close()
+
+
+def _agent_run_execution_state(run_id: str) -> str:
+    db = SessionLocal()
+    try:
+        run = db.query(OperationsAgentRun).filter(OperationsAgentRun.id == run_id).first()
+        if not run:
+            return "missing"
+        if run.cancel_requested and run.status in AGENT_CONSOLE_ACTIVE_STATUSES:
+            return "cancelling"
+        return str(run.status)
+    finally:
+        db.close()
+
+
+async def _agent_stop_before_next_operation(run_id: str) -> bool:
+    """Cooperatively stop and never execute against a terminalised audit row."""
+
+    state = await asyncio.to_thread(_agent_run_execution_state, run_id)
+    if state == "cancelling":
+        await asyncio.to_thread(
+            _finish_agent_run,
+            run_id,
+            "cancelled",
+            "The Operations Console run was cancelled.",
+            event_type="cancelled",
+            summary="Cancelled by the owner.",
+        )
+        return True
+    return state not in AGENT_CONSOLE_ACTIVE_STATUSES
+
+
+def _agent_record_running(run_id: str) -> None:
+    db = SessionLocal()
+    try:
+        with _agent_event_lock:
+            run = db.query(OperationsAgentRun).filter(OperationsAgentRun.id == run_id).first()
+            if not run or run.status != "starting":
+                return
+            run.status = "running"
+            _append_agent_event(
+                db,
+                run,
+                "status",
+                "The autonomous operations loop is running.",
+                meta={"status": "running"},
+            )
+    finally:
+        db.close()
+
+
+def _agent_record_step(run_id: str, step_number: int, summary: str) -> None:
+    db = SessionLocal()
+    try:
+        with _agent_event_lock:
+            run = db.query(OperationsAgentRun).filter(OperationsAgentRun.id == run_id).first()
+            if not run or run.status not in AGENT_CONSOLE_ACTIVE_STATUSES:
+                return
+            run.status = "running"
+            run.step_count = step_number
+            _append_agent_event(
+                db,
+                run,
+                "status",
+                summary,
+                step=step_number,
+                meta={"status": "running", "maxSteps": run.max_steps},
+            )
+    finally:
+        db.close()
+
+
+def _agent_record_observation(
+    run_id: str,
+    step_number: int,
+    label: str,
+    observation: str,
+    stream: str,
+) -> None:
+    db = SessionLocal()
+    try:
+        with _agent_event_lock:
+            run = db.query(OperationsAgentRun).filter(OperationsAgentRun.id == run_id).first()
+            if not run or run.status not in AGENT_CONSOLE_ACTIVE_STATUSES:
+                return
+            digest = hashlib.sha256(observation.encode("utf-8")).hexdigest()
+            _append_agent_event(
+                db,
+                run,
+                "terminal",
+                f"$ {label}\n{observation}",
+                step=step_number,
+                meta={"stream": stream, "outputSha256": digest},
+            )
+    finally:
+        db.close()
+
+
+def _agent_public_action_label(action: str, arguments_text: str) -> str:
+    """Describe an action without exposing free-form payloads or file contents."""
+
+    try:
+        arguments = parse_agent_arguments(arguments_text)
+    except AgentConsoleError:
+        arguments = {}
+    if action == "run_terminal_command":
+        tool_name = str(arguments.get("tool") or "invalid virtual command")
+        if tool_name not in AGENT_CONSOLE_ALLOWED_TOOLS:
+            tool_name = "invalid virtual command"
+        label = f"ops {tool_name}"
+        return sanitize_console_text(label, limit=300).replace("\n", " ")
+    if action == "read_file":
+        scope = str(arguments.get("scope") or "repository")
+        path = str(arguments.get("path") or "invalid path")
+        label = f"read {scope}:{path}"
+        return sanitize_console_text(label, limit=300).replace("\n", " ")
+    if action == "write_file":
+        path = str(arguments.get("path") or "invalid path")
+        label = f"write isolated scratch:{path}"
+        return sanitize_console_text(label, limit=300).replace("\n", " ")
+    return sanitize_console_text(action.replace("_", " "), limit=300).replace("\n", " ")
+
+
+def _agent_virtual_tool_name(action: str, arguments_text: str) -> str:
+    if action != "run_terminal_command":
+        return ""
+    try:
+        arguments = parse_agent_arguments(arguments_text)
+    except AgentConsoleError:
+        return ""
+    return str(arguments.get("tool") or "").strip()
+
+
+async def _await_critical_agent_future(future: asyncio.Future) -> tuple[Any, bool]:
+    """Finish an audited queue submission even if process shutdown cancels its task."""
+
+    cancellation_received = False
+    while not future.done():
+        try:
+            await asyncio.shield(future)
+        except asyncio.CancelledError:
+            cancellation_received = True
+            current_task = asyncio.current_task()
+            if current_task is not None and hasattr(current_task, "uncancel"):
+                current_task.uncancel()
+    return future.result(), cancellation_received
+
+
+def _agent_record_action_started(run_id: str, step_number: int, label: str, action: str) -> None:
+    db = SessionLocal()
+    try:
+        with _agent_event_lock:
+            run = db.query(OperationsAgentRun).filter(OperationsAgentRun.id == run_id).first()
+            if not run or run.status not in AGENT_CONSOLE_ACTIVE_STATUSES:
+                return
+            _append_agent_event(
+                db,
+                run,
+                "status",
+                f"Action: {label}",
+                step=step_number,
+                meta={"status": "running", "action": action},
+            )
+    finally:
+        db.close()
+
+
+def _agent_model_step(messages: List[Dict[str, str]], timeout_seconds: float = 30) -> AgentStep:
+    client = openai_client
+    if not client:
+        raise RuntimeError("OpenAI is not configured.")
+    request_timeout = max(0.1, min(30.0, float(timeout_seconds)))
+    request_client = (
+        client.with_options(max_retries=0, timeout=request_timeout)
+        if callable(getattr(client, "with_options", None))
+        else client
+    )
+    response = request_client.beta.chat.completions.parse(
+        model=os.getenv("OPS_AGENT_AUTONOMOUS_MODEL", "gpt-4o-mini"),
+        messages=messages,
+        response_format=AgentStep,
+        max_completion_tokens=700,
+        safety_identifier=hashlib.sha256(f"operations-run:{AUTH_USERNAME}".encode("utf-8")).hexdigest(),
+        store=False,
+        timeout=request_timeout,
+    )
+    parsed = response.choices[0].message.parsed
+    if not parsed:
+        raise RuntimeError("The model did not return a structured operation.")
+    return parsed
+
+
+def _agent_execute_action(
+    run_id: str,
+    action: str,
+    arguments_text: str,
+    objective: str,
+) -> tuple[str, str, str]:
+    arguments = parse_agent_arguments(arguments_text)
+    workspace_root = AGENT_RUNS_DIR / run_id / "workspace"
+    if action == "read_file":
+        scope = str(arguments.get("scope") or "repository").strip().casefold()
+        path = str(arguments.get("path") or "")
+        if scope == "workspace":
+            result = read_workspace_file(workspace_root, path)
+            label = f"read scratch {path}"
+        elif scope == "repository":
+            result = _operations_read_code_file(
+                path,
+                arguments.get("start_line"),
+                arguments.get("end_line"),
+            )
+            label = f"read main:{path}"
+        else:
+            raise AgentConsoleError("File scope must be repository or workspace.")
+    elif action == "write_file":
+        path = str(arguments.get("path") or "")
+        result = write_workspace_file(
+            workspace_root,
+            path,
+            arguments.get("content", ""),
+            global_root=AGENT_RUNS_DIR,
+            max_global_bytes=AGENT_CONSOLE_WORKSPACE_LIMIT_BYTES,
+        )
+        label = f"write scratch {path}"
+    elif action == "run_terminal_command":
+        tool_name = str(arguments.get("tool") or "").strip()
+        tool_arguments = arguments.get("arguments", {})
+        if tool_name not in AGENT_CONSOLE_ALLOWED_TOOLS or not isinstance(tool_arguments, dict):
+            raise AgentConsoleError("Only an allowlisted virtual operations command may run.")
+        isolated_engine = None
+        begin_immediate = False
+        if tool_name == "start_coding_task":
+            # A queue submission is the console's sole mutating operation. Use
+            # an unpooled SQLite connection with a bounded lock wait so a
+            # timed-out submission cannot poison or occupy the application's
+            # shared connection pool. BEGIN IMMEDIATE makes that lock wait the
+            # only potentially blocking database phase.
+            probe = SessionLocal()
+            try:
+                bind = probe.get_bind()
+            finally:
+                probe.close()
+            database_name = getattr(getattr(bind, "url", None), "database", None)
+            if getattr(getattr(bind, "dialect", None), "name", None) == "sqlite" and database_name not in {
+                None,
+                "",
+                ":memory:",
+            }:
+                isolated_engine = create_engine(
+                    bind.url,
+                    connect_args={"check_same_thread": False, "timeout": 5},
+                    poolclass=NullPool,
+                )
+                db = sessionmaker(autocommit=False, autoflush=False, bind=isolated_engine)()
+                begin_immediate = True
+            else:
+                db = SessionLocal()
+        else:
+            db = SessionLocal()
+        try:
+            if begin_immediate:
+                db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            already_queued_by_run = (
+                tool_name == "start_coding_task"
+                and db.query(OperationsAgentEvent).filter(
+                    OperationsAgentEvent.run_id == run_id,
+                    OperationsAgentEvent.event_type == "terminal",
+                    OperationsAgentEvent.message.like("$ ops start_coding_task%"),
+                ).first() is not None
+            )
+            if already_queued_by_run:
+                result = {
+                    "status": "rejected",
+                    "reason": "This autonomous run already submitted a coding task; inspect the existing task instead of duplicating it.",
+                }
+            elif tool_name == "start_coding_task":
+                result = _operations_start_coding_task(
+                    db,
+                    str(tool_arguments.get("title", "")),
+                    str(tool_arguments.get("instructions", "")),
+                    str(tool_arguments.get("acceptance_test", "")),
+                    lock_timeout_seconds=1,
+                    origin_run_id=run_id,
+                )
+            else:
+                result = execute_operations_tool(db, tool_name, tool_arguments, objective)
+        finally:
+            with contextlib.suppress(Exception):
+                db.close()
+            if isolated_engine is not None:
+                with contextlib.suppress(Exception):
+                    isolated_engine.dispose()
+        label = f"ops {tool_name}"
+    else:
+        raise AgentConsoleError("That action is not executable.")
+
+    observation = sanitize_console_text(
+        json.dumps(result, ensure_ascii=False, default=str, indent=2),
+        limit=12_000,
+    )
+    result_status = result.get("status") if isinstance(result, dict) else None
+    stream = "stderr" if result_status in {"rejected", "failed", "unavailable", "error"} else "stdout"
+    return label, observation, stream
+
+
+async def _run_agent_console(run_id: str, objective: str, max_steps: int) -> None:
+    tool_catalog = compact_tool_catalog(OPERATIONS_TOOL_SCHEMAS, set(AGENT_CONSOLE_ALLOWED_TOOLS))
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": build_agent_system_prompt(tool_catalog, max_steps)},
+        {"role": "user", "content": f"Master objective:\n{objective}"},
+    ]
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + agent_console_total_timeout_seconds()
+    try:
+        await asyncio.to_thread(_agent_record_running, run_id)
+        for step_number in range(1, max_steps + 1):
+            if await _agent_stop_before_next_operation(run_id):
+                return
+            if loop.time() >= deadline:
+                raise asyncio.TimeoutError
+
+            remaining_seconds = deadline - loop.time()
+            if remaining_seconds <= 0:
+                raise asyncio.TimeoutError
+            model_timeout = min(30.0, remaining_seconds)
+            step = await asyncio.wait_for(
+                loop.run_in_executor(
+                    _agent_model_executor,
+                    _agent_model_step,
+                    messages,
+                    model_timeout,
+                ),
+                timeout=model_timeout,
+            )
+            if await _agent_stop_before_next_operation(run_id):
+                return
+            visible_summary = sanitize_console_text(step.thought, limit=500)
+            await asyncio.to_thread(_agent_record_step, run_id, step_number, visible_summary)
+
+            messages.append({"role": "assistant", "content": step.model_dump_json()})
+            if step.action == "complete":
+                try:
+                    complete_arguments = parse_agent_arguments(step.arguments)
+                except AgentConsoleError:
+                    complete_arguments = {}
+                summary = sanitize_console_text(
+                    complete_arguments.get("summary") or visible_summary,
+                    limit=4_000,
+                )
+                await asyncio.to_thread(
+                    _finish_agent_run,
+                    run_id,
+                    "completed",
+                    summary,
+                    event_type="completed",
+                    summary=summary,
+                )
+                return
+
+            if await _agent_stop_before_next_operation(run_id):
+                return
+            coding_submission = (
+                _agent_virtual_tool_name(step.action, step.arguments) == "start_coding_task"
+            )
+            if (
+                coding_submission
+                and deadline - loop.time() < AGENT_CONSOLE_CODING_SUBMISSION_RESERVED_SECONDS
+            ):
+                raise asyncio.TimeoutError
+            await asyncio.to_thread(
+                _agent_record_action_started,
+                run_id,
+                step_number,
+                _agent_public_action_label(step.action, step.arguments),
+                step.action,
+            )
+            cancelled_during_submission = False
+            try:
+                # Only explicit read-only virtual operations, one idempotent
+                # review-branch queue action, and isolated bounded scratch I/O
+                # reach this boundary. The queue action has a five-second DB
+                # deadline and no production/runtime authority.
+                remaining_seconds = deadline - loop.time()
+                if remaining_seconds <= 0:
+                    raise asyncio.TimeoutError
+                action_timeout = min(
+                    float(AGENT_CONSOLE_ACTION_TIMEOUT_SECONDS),
+                    remaining_seconds,
+                )
+                action_future = loop.run_in_executor(
+                    _agent_action_executor,
+                    _agent_execute_action,
+                    run_id,
+                    step.action,
+                    step.arguments,
+                    objective,
+                )
+                if coding_submission:
+                    action_result, cancelled_during_submission = await _await_critical_agent_future(
+                        action_future
+                    )
+                    label, observation, stream = action_result
+                else:
+                    label, observation, stream = await asyncio.wait_for(
+                        action_future,
+                        timeout=action_timeout,
+                    )
+            except AgentConsoleError as exc:
+                label = step.action.replace("_", " ")
+                observation = sanitize_console_text(
+                    json.dumps({"status": "rejected", "reason": str(exc)}, ensure_ascii=False),
+                    limit=2_000,
+                )
+                stream = "stderr"
+            await asyncio.to_thread(
+                _agent_record_observation,
+                run_id,
+                step_number,
+                label,
+                observation,
+                stream,
+            )
+            if cancelled_during_submission:
+                raise asyncio.CancelledError
+            if await _agent_stop_before_next_operation(run_id):
+                return
+            messages.append({"role": "user", "content": f"Observation:\n{observation}"})
+            if len(messages) > 12:
+                messages = messages[:2] + messages[-10:]
+
+        await asyncio.to_thread(
+            _finish_agent_run,
+            run_id,
+            "step_limit",
+            f"The run stopped safely at its {max_steps}-step limit.",
+            event_type="limit_reached",
+            summary="The bounded run reached its step limit before reporting completion.",
+        )
+    except asyncio.TimeoutError:
+        if not await _agent_stop_before_next_operation(run_id):
+            await asyncio.to_thread(
+                _finish_agent_run,
+                run_id,
+                "failed",
+                "The current bounded operation exceeded its execution timeout and the run stopped safely; no production change was authorised.",
+                event_type="error",
+                error="Execution timeout",
+            )
+    except asyncio.CancelledError:
+        await asyncio.shield(asyncio.to_thread(
+            _finish_agent_run,
+            run_id,
+            "interrupted",
+            "The server stopped while this orchestration run was active.",
+            event_type="error",
+            error="Server interruption",
+        ))
+        raise
+    except Exception as exc:
+        logger.exception("Autonomous Operations Console run failed")
+        await asyncio.to_thread(
+            _finish_agent_run,
+            run_id,
+            "failed",
+            "The Operations Console encountered a bounded execution error and stopped.",
+            event_type="error",
+            error=type(exc).__name__,
+        )
+
+
+def _agent_task_done(run_id: str, task: asyncio.Task) -> None:
+    _agent_run_tasks.pop(run_id, None)
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        task.result()
+
+
+def _agent_websocket_origin_allowed(websocket: WebSocket) -> bool:
+    origin = websocket.headers.get("origin", "").strip()
+    if not origin:
+        return False
+    parsed_origin = urlparse(origin)
+    if parsed_origin.scheme not in {"http", "https"} or not parsed_origin.netloc:
+        return False
+    public_url = urlparse(os.getenv("PUBLIC_APP_URL", "").strip())
+    if public_url.scheme in {"http", "https"} and public_url.netloc:
+        expected_scheme = public_url.scheme.casefold()
+        expected_host = public_url.netloc.casefold()
+    else:
+        request_scheme = websocket.url.scheme.casefold()
+        expected_scheme = "https" if request_scheme == "wss" else "http"
+        expected_host = websocket.headers.get("host", "").split(",", 1)[0].strip().casefold()
+    return (
+        bool(expected_host)
+        and parsed_origin.scheme.casefold() == expected_scheme
+        and parsed_origin.netloc.casefold() == expected_host
+    )
+
+
+def _agent_websocket_authenticated(websocket: WebSocket) -> bool:
+    return bool(
+        AUTH_PASSWORD
+        and _valid_admin_session(websocket.cookies.get(AUTH_COOKIE_NAME, ""))
+    )
+
+
+def _agent_load_snapshot(run_id: str, after_sequence: int) -> tuple[Optional[OperationsAgentRun], List[OperationsAgentEvent]]:
+    db = SessionLocal()
+    try:
+        run = db.query(OperationsAgentRun).filter(OperationsAgentRun.id == run_id).first()
+        events = [] if not run else (
+            db.query(OperationsAgentEvent)
+            .filter(
+                OperationsAgentEvent.run_id == run_id,
+                OperationsAgentEvent.sequence > max(0, after_sequence),
+            )
+            .order_by(OperationsAgentEvent.sequence.asc())
+            .limit(100)
+            .all()
+        )
+        if run:
+            db.expunge(run)
+        for event_row in events:
+            db.expunge(event_row)
+        return run, events
+    finally:
+        db.close()
+
+
+async def _stream_agent_run(websocket: WebSocket, run_id: str, after_sequence: int) -> None:
+    disconnected = asyncio.Event()
+
+    async def receive_controls() -> None:
+        try:
+            while True:
+                payload = await websocket.receive_json()
+                if not isinstance(payload, dict):
+                    continue
+                message_type = str(payload.get("type") or "")
+                if message_type == "cancel" and str(payload.get("runId") or "") == run_id:
+                    await asyncio.to_thread(_request_agent_cancel, run_id)
+                elif message_type == "ping":
+                    continue
+        except (WebSocketDisconnect, RuntimeError, ValueError):
+            disconnected.set()
+
+    listener = asyncio.create_task(receive_controls())
+    cursor = max(0, after_sequence)
+    try:
+        while not disconnected.is_set():
+            run, events = await asyncio.to_thread(_agent_load_snapshot, run_id, cursor)
+            if not run:
+                await websocket.send_json({
+                    "type": "error",
+                    "code": "run_not_found",
+                    "message": "That Operations Console run is unavailable.",
+                    "retryable": False,
+                })
+                return
+            for event_row in events:
+                await websocket.send_json(_serialize_agent_event(event_row))
+                cursor = event_row.sequence
+            if run.status in AGENT_CONSOLE_TERMINAL_STATUSES and not events:
+                return
+            await asyncio.sleep(0.25)
+    except (WebSocketDisconnect, RuntimeError):
+        return
+    finally:
+        listener.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await listener
+
+
+@app.get("/api/settings/agent-console/runs")
+def list_agent_console_runs(limit: int = Query(default=20, ge=1, le=50), db: Session = Depends(get_db)):
+    runs = (
+        db.query(OperationsAgentRun)
+        .order_by(OperationsAgentRun.created_at.desc(), OperationsAgentRun.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "enabled": agent_console_enabled(),
+        "runs": [_serialize_agent_run(run) for run in runs],
+    }
+
+
+@app.get("/api/settings/agent-console/runs/{run_id}/events")
+def list_agent_console_events(
+    run_id: str,
+    after: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    run = db.query(OperationsAgentRun).filter(OperationsAgentRun.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Operations Console run not found.")
+    events = (
+        db.query(OperationsAgentEvent)
+        .filter(OperationsAgentEvent.run_id == run_id, OperationsAgentEvent.sequence > after)
+        .order_by(OperationsAgentEvent.sequence.asc())
+        .limit(500)
+        .all()
+    )
+    return {"run": _serialize_agent_run(run), "events": [_serialize_agent_event(event) for event in events]}
+
+
+@app.websocket("/ws/agent")
+async def operations_agent_websocket(websocket: WebSocket):
+    if not _agent_websocket_authenticated(websocket):
+        await websocket.close(code=4401, reason="Admin authentication required.")
+        return
+    if not _agent_websocket_origin_allowed(websocket):
+        await websocket.close(code=4403, reason="WebSocket origin rejected.")
+        return
+
+    await websocket.accept()
+    await websocket.send_json({
+        "type": "ready",
+        "protocolVersion": AGENT_CONSOLE_PROTOCOL_VERSION,
+        "enabled": agent_console_enabled(),
+        "limits": {
+            "maxSteps": agent_console_max_steps(),
+            "actionTimeoutSeconds": 30,
+            "totalTimeoutSeconds": agent_console_total_timeout_seconds(),
+        },
+    })
+    try:
+        payload = await asyncio.wait_for(websocket.receive_json(), timeout=30)
+    except asyncio.TimeoutError:
+        await websocket.send_json({
+            "type": "error", "code": "handshake_timeout",
+            "message": "No objective or run attachment was received.", "retryable": True,
+        })
+        await websocket.close(code=4408)
+        return
+    except (WebSocketDisconnect, ValueError):
+        return
+    if not isinstance(payload, dict):
+        await websocket.send_json({
+            "type": "error", "code": "invalid_request",
+            "message": "The Operations Console request is invalid.", "retryable": True,
+        })
+        await websocket.close(code=4400)
+        return
+
+    message_type = str(payload.get("type") or "")
+    try:
+        after_sequence = max(0, min(1_000_000, int(payload.get("afterSequence") or 0)))
+    except (TypeError, ValueError):
+        after_sequence = 0
+    if message_type == "start":
+        if not agent_console_enabled():
+            await websocket.send_json({
+                "type": "error", "code": "console_unavailable",
+                "message": "The autonomous Operations Console is not configured.", "retryable": False,
+            })
+            await websocket.close(code=1013)
+            return
+        try:
+            run, created = await asyncio.to_thread(
+                _create_agent_run,
+                str(payload.get("requestId") or ""),
+                str(payload.get("objective") or ""),
+            )
+        except AgentConsoleBusyError as exc:
+            await websocket.send_json({
+                "type": "error", "code": "run_busy",
+                "message": str(exc), "retryable": True,
+            })
+            await websocket.close(code=4429)
+            return
+        except AgentConsoleError as exc:
+            await websocket.send_json({
+                "type": "error", "code": "invalid_request",
+                "message": str(exc), "retryable": True,
+            })
+            await websocket.close(code=4400)
+            return
+        run_id = run.id
+        if created:
+            task = asyncio.create_task(_run_agent_console(run.id, run.objective, run.max_steps))
+            _agent_run_tasks[run.id] = task
+            task.add_done_callback(lambda completed, value=run.id: _agent_task_done(value, completed))
+    elif message_type in {"attach", "resume"}:
+        run_id = str(payload.get("runId") or "").strip()
+        if not run_id:
+            await websocket.send_json({
+                "type": "error", "code": "invalid_request",
+                "message": "A run ID is required to reconnect.", "retryable": False,
+            })
+            await websocket.close(code=4400)
+            return
+    else:
+        await websocket.send_json({
+            "type": "error", "code": "invalid_request",
+            "message": "Start a new run or attach to an existing run.", "retryable": True,
+        })
+        await websocket.close(code=4400)
+        return
+
+    await _stream_agent_run(websocket, run_id, after_sequence)
+    with contextlib.suppress(RuntimeError):
+        await websocket.close(code=1000)
 
 
 @app.post("/api/internal/operations/worker-claim")

@@ -1209,3 +1209,32 @@ export async function runOperationsRealtimeTool(
   }
   return response.json();
 }
+
+export interface AgentConsoleRun {
+  id: string;
+  requestId: string;
+  objective: string;
+  status: 'starting' | 'running' | 'completed' | 'cancelled' | 'failed' | 'step_limit' | 'interrupted';
+  stepCount: number;
+  maxSteps: number;
+  cancelRequested: boolean;
+  finalSummary: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
+export async function listAgentConsoleRuns(limit = 12): Promise<{
+  enabled: boolean;
+  runs: AgentConsoleRun[];
+}> {
+  const response = await apiFetch(`${API_BASE}/api/settings/agent-console/runs?limit=${Math.max(1, Math.min(50, limit))}`, {
+    cache: 'no-store',
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Could not load Operations Console runs: ${response.statusText}`);
+  }
+  return response.json();
+}
