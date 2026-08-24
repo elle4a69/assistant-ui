@@ -2248,6 +2248,7 @@ if OPENAI_AVAILABLE and os.getenv("OPENAI_API_KEY"):
 
 # Global flag to enable/disable auto-replies
 AUTO_REPLY_GLOBAL_ENABLED = True
+MAX_CONSECUTIVE_AUTO_REPLIES = 2
 auto_reply_path = os.path.join(DATA_DIR, "auto_reply_global.json")
 if os.path.exists(auto_reply_path):
     try:
@@ -3225,6 +3226,65 @@ def human_replied_after(db: Session, thread_id: str, received_at: datetime) -> b
     ).first() is not None
 
 
+HUMAN_REPLY_EVENT_TYPES = {
+    "human-reply-sent",
+    "information-request-resolved",
+    "draft-approved",
+}
+
+
+def consecutive_auto_replies_without_human(db: Session, thread_id: str) -> int:
+    """Count automatic sends since the latest human-authored or approved reply."""
+    events = db.query(ThreadEvent).filter(
+        ThreadEvent.thread_id == thread_id,
+        ThreadEvent.type.in_(["auto-reply-sent", *HUMAN_REPLY_EVENT_TYPES]),
+    ).order_by(ThreadEvent.at.desc(), ThreadEvent.id.desc()).all()
+
+    count = 0
+    for event in events:
+        # Approved drafts use the auto-reply event for legacy UI compatibility,
+        # but approval is still a human intervention and resets the limit.
+        if event.type in HUMAN_REPLY_EVENT_TYPES or (
+            event.type == "auto-reply-sent" and event.agent_id == "manual-approval"
+        ):
+            break
+        if event.type == "auto-reply-sent":
+            count += 1
+    return count
+
+
+def automatic_reply_block_reason(db: Session, thread: Thread) -> Optional[str]:
+    """Return why this thread must wait for a human instead of auto-replying."""
+    if thread.state == "needs-review":
+        return "needs-review"
+    if consecutive_auto_replies_without_human(db, thread.id) >= MAX_CONSECUTIVE_AUTO_REPLIES:
+        return "consecutive-auto-reply-limit"
+    return None
+
+
+def record_automatic_reply_handoff(
+    db: Session,
+    thread: Thread,
+    reason: str,
+    customer_message_id: Optional[str] = None,
+) -> None:
+    """Keep a blocked conversation visible in the human review queue."""
+    thread.state = "needs-review"
+    thread.updated_at = datetime.utcnow()
+    db.add(ThreadEvent(
+        id=str(uuid.uuid4()),
+        thread_id=thread.id,
+        type="ai-reply-skipped",
+        agent_id=None,
+        meta=json.dumps({
+            "reason": reason,
+            "message_id": customer_message_id,
+            "max_consecutive_auto_replies": MAX_CONSECUTIVE_AUTO_REPLIES,
+        }),
+        at=datetime.utcnow(),
+    ))
+
+
 def latest_customer_message(db: Session, thread_id: str) -> Optional[Message]:
     return (
         db.query(Message)
@@ -3860,6 +3920,18 @@ def run_sms_reply_logic(
     thread = db.query(Thread).filter(Thread.id == thread_id).first()
     if not thread:
         return False, False
+    block_reason = automatic_reply_block_reason(db, thread)
+    if not draft_only and block_reason:
+        source_message = latest_customer_message(db, thread_id)
+        record_automatic_reply_handoff(
+            db,
+            thread,
+            block_reason,
+            source_message.id if source_message else None,
+        )
+        db.commit()
+        print(f"[Autoresponder Skipped] Human review required for {thread_id}: {block_reason}.")
+        return False, False
     if not account_allows_conversational_ai(thread.sms_account_key):
         print(f"[Autoresponder Skipped] Conversational AI is disabled for {thread.sms_account_key}.")
         return False, False
@@ -4442,6 +4514,20 @@ def run_sms_reply_logic(
             print(f"[Autoresponder Cancelled] Human replied while AI was working on {thread_id}.")
             return False, False
 
+        thread = db.query(Thread).filter(Thread.id == thread_id).first()
+        block_reason = automatic_reply_block_reason(db, thread)
+        if block_reason:
+            source_message = latest_customer_message(db, thread_id)
+            record_automatic_reply_handoff(
+                db,
+                thread,
+                block_reason,
+                source_message.id if source_message else None,
+            )
+            db.commit()
+            print(f"[Autoresponder Cancelled] Human review required for {thread_id}: {block_reason}.")
+            return False, False
+
         # Store as sent only after the gateway accepts the SMS. On failure the
         # reply remains a visible draft for human retry/review.
         system_message = Message(
@@ -4606,7 +4692,13 @@ def send_first_contact_auto_reply(
     customer_message: Message,
     config: Dict[str, Any],
     dispatch_sms: bool,
-) -> None:
+) -> bool:
+    block_reason = automatic_reply_block_reason(db, thread)
+    if block_reason:
+        record_automatic_reply_handoff(db, thread, block_reason, customer_message.id)
+        db.commit()
+        return False
+
     reply_text = sanitize_outgoing_urls(config["message"])
     reply_at = datetime.utcnow()
     outbound = Message(
@@ -4675,9 +4767,13 @@ def send_first_contact_auto_reply(
     db.add(outbound)
     db.add(event_log)
     db.commit()
+    return True
 
 
-def _process_first_contact_auto_reply(
+SMS_REPLY_THREAD_LOCKS: Dict[str, threading.Lock] = defaultdict(threading.Lock)
+
+
+def _process_first_contact_auto_reply_unlocked(
     thread_id: str,
     customer_message_id: str,
     config: Dict[str, Any],
@@ -4701,6 +4797,13 @@ def _process_first_contact_auto_reply(
             print(f"[First Contact Delay] Automatic replies are off for {thread_id}. Reply canceled.")
             return
 
+        block_reason = automatic_reply_block_reason(db, thread)
+        if block_reason:
+            record_automatic_reply_handoff(db, thread, block_reason, customer_message.id)
+            db.commit()
+            print(f"[First Contact Delay] Human review required for {thread_id}: {block_reason}.")
+            return
+
         current_config = load_first_contact_autoresponder(thread.sms_account_key)
         if not current_config["enabled"]:
             print(f"[First Contact Delay] First-contact responder is off. Reply canceled for {thread_id}.")
@@ -4712,6 +4815,22 @@ def _process_first_contact_auto_reply(
         db.rollback()
     finally:
         db.close()
+
+
+def _process_first_contact_auto_reply(
+    thread_id: str,
+    customer_message_id: str,
+    config: Dict[str, Any],
+    dispatch_sms: bool,
+) -> None:
+    """Serialize first-contact and conversational sends for the same thread."""
+    with SMS_REPLY_THREAD_LOCKS[thread_id]:
+        _process_first_contact_auto_reply_unlocked(
+            thread_id,
+            customer_message_id,
+            config,
+            dispatch_sms,
+        )
 
 
 def _hash_arrival_token(token: str) -> str:
@@ -5606,9 +5725,6 @@ async def process_first_contact_auto_reply_delayed(
     )
 
 
-SMS_REPLY_THREAD_LOCKS: Dict[str, threading.Lock] = defaultdict(threading.Lock)
-
-
 def _process_sms_reply_unlocked(
     thread_id: str,
     body: str,
@@ -5632,6 +5748,19 @@ def _process_sms_reply_unlocked(
 
         if thread.state == "taken-over":
             print(f"[Autoresponder Delay] Thread is taken-over. Reply canceled for {thread_id}.")
+            return
+
+        block_reason = automatic_reply_block_reason(db, thread)
+        if block_reason:
+            customer_message = latest_customer_message(db, thread_id)
+            record_automatic_reply_handoff(
+                db,
+                thread,
+                block_reason,
+                customer_message.id if customer_message else None,
+            )
+            db.commit()
+            print(f"[Autoresponder Delay] Human review required for {thread_id}: {block_reason}.")
             return
 
         if not account_allows_conversational_ai(thread.sms_account_key):
@@ -5891,7 +6020,18 @@ def process_inbound_sms(
             at=received_at_naive,
         ))
     db.commit()
-    
+
+    block_reason = automatic_reply_block_reason(db, thread)
+    if block_reason:
+        record_automatic_reply_handoff(db, thread, block_reason, customer_message.id)
+        db.commit()
+        return {
+            "status": "success",
+            "thread_id": thread.id,
+            "human_follow_up_required": True,
+            "auto_reply_skipped_reason": block_reason,
+        }
+
     is_testing = "pytest" in sys.modules or any("test" in arg for arg in sys.argv)
     if first_contact_eligible:
         background_tasks.add_task(
@@ -11195,7 +11335,16 @@ def handle_locanto_message(payload: LocantoMessagePayload, db: Session = Depends
         db.commit()
 
         reply_text = None
-        
+        block_reason = automatic_reply_block_reason(db, thread)
+        if block_reason:
+            record_automatic_reply_handoff(db, thread, block_reason, incoming_msg.id)
+            db.commit()
+            return {
+                "status": "success",
+                "replyText": None,
+                "humanFollowUpRequired": True,
+            }
+
         # Check Q&A Rules first
         qa_reply = match_qa_rule(payload.messageSnippet)
         if qa_reply:
