@@ -1,19 +1,194 @@
 import json
 from datetime import datetime, timedelta
-from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import main
-from main import Base, Message, Thread
+from main import Base, CalendarEvent, Message, Thread, ThreadEvent
 
 
-def message(role, text):
-    return SimpleNamespace(role=role, text=text)
+class StaticResponse:
+    def __init__(self, text):
+        self.output_text = text
+        self.output = []
 
 
-def write_services(tmp_path):
+class CapturingResponses:
+    def __init__(self, text):
+        self.text = text
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return StaticResponse(self.text)
+
+
+def make_db():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    return sessionmaker(bind=engine)()
+
+
+def add_message(db, thread_id, role, text, at, message_id):
+    message = Message(
+        id=message_id,
+        thread_id=thread_id,
+        role=role,
+        text=text,
+        provider_message_id=f"provider-{message_id}" if role == "customer" else None,
+        at=at,
+    )
+    db.add(message)
+    return message
+
+
+def configure_reply_flow(monkeypatch, model_text, qa_reply=None):
+    responses = CapturingResponses(model_text)
+    monkeypatch.setattr(main, "openai_client", type("Client", (), {"responses": responses})())
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
+    monkeypatch.setattr(main, "match_qa_rule", lambda _body: qa_reply)
+    monkeypatch.setattr(main, "build_business_context", lambda _body: "")
+    monkeypatch.setattr(main, "get_style_examples", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(main.mobilemessage_service, "delivery_error", lambda _result: None)
+    return responses
+
+
+def test_booking_boundary_policy_is_not_in_model_instructions():
+    instructions = main.build_model_instructions("Be helpful and context-aware.", [])
+
+    assert "Professional booking boundary" not in instructions
+    assert "keep this focused on bookings" not in instructions.casefold()
+    assert "keep this line focused on bookings" not in instructions.casefold()
+    assert main.BOOKING_AVAILABILITY_SAFETY_POLICY in instructions
+
+
+@pytest.mark.parametrize("reply_source", ["model", "qa-rule"])
+def test_internal_booking_focus_wording_cannot_be_sent(reply_source, monkeypatch):
+    db = make_db()
+    now = datetime.utcnow()
+    thread = Thread(
+        id=f"leak-{reply_source}",
+        customer_phone="+61400000001",
+        sms_account_key="primary",
+        state="auto-reply",
+        priority="medium",
+        sla_due_at=now + timedelta(hours=2),
+        unread_count=1,
+        created_at=now,
+        updated_at=now,
+    )
+    customer = add_message(
+        db, thread.id, "customer", "Can you update my booking?", now, f"customer-{reply_source}",
+    )
+    db.add(thread)
+    db.commit()
+    leaked_reply = "Lovely chatting, but I need to keep this line focused on bookings."
+    responses = configure_reply_flow(
+        monkeypatch,
+        leaked_reply,
+        qa_reply=leaked_reply if reply_source == "qa-rule" else None,
+    )
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "send_sms",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("internal instruction text must not be sent")
+        ),
+    )
+
+    main.run_sms_reply_logic(
+        db, thread.id, customer.text, customer.provider_message_id, customer.at,
+    )
+
+    assert len(responses.calls) == (1 if reply_source == "model" else 0)
+    assert db.query(Message).filter(Message.role != "customer").count() == 0
+    failure = db.query(ThreadEvent).filter(ThreadEvent.type == "ai-reply-failed").one()
+    assert json.loads(failure.meta)["reason"] == "internal-instruction-text"
+    assert db.get(Thread, thread.id).state == "needs-review"
+    db.close()
+
+
+@pytest.mark.parametrize(
+    ("customer_request", "normal_reply"),
+    [
+        (
+            "Actually, I need to correct the name on my active booking.",
+            "Of course. What name should I update the booking to?",
+        ),
+        (
+            "Can we amend my booking to a different time?",
+            "Yes, I can help amend it. What day and time would you prefer?",
+        ),
+    ],
+)
+def test_booking_corrections_and_amendments_use_context_aware_ai(
+    customer_request, normal_reply, monkeypatch,
+):
+    db = make_db()
+    now = datetime.utcnow()
+    thread = Thread(
+        id="amendment-thread",
+        customer_phone="+61400000002",
+        sms_account_key="primary",
+        state="auto-reply",
+        priority="medium",
+        sla_due_at=now + timedelta(hours=2),
+        unread_count=1,
+        created_at=now - timedelta(minutes=10),
+        updated_at=now,
+    )
+    db.add(thread)
+    history = [
+        ("customer", "How has your day been?"),
+        ("system", "Good, thanks."),
+        ("customer", "What music do you like?"),
+        ("system", "A bit of everything."),
+        ("customer", "Tell me something else."),
+        ("system", "What would you like to know?"),
+    ]
+    for index, (role, text) in enumerate(history):
+        add_message(
+            db,
+            thread.id,
+            role,
+            text,
+            now - timedelta(minutes=9 - index),
+            f"history-{index}",
+        )
+    customer = add_message(
+        db, thread.id, "customer", customer_request, now, "amendment-customer",
+    )
+    db.add(CalendarEvent(
+        id="active-booking",
+        customer_phone=thread.customer_phone,
+        summary="Existing booking",
+        start_time=now + timedelta(days=1),
+        end_time=now + timedelta(days=1, hours=1),
+    ))
+    db.commit()
+    responses = configure_reply_flow(monkeypatch, normal_reply)
+    sent = []
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "send_sms",
+        lambda phone, text, **kwargs: sent.append((phone, text, kwargs)) or {"status": "success"},
+    )
+
+    main.run_sms_reply_logic(
+        db, thread.id, customer.text, customer.provider_message_id, customer.at,
+    )
+
+    assert len(responses.calls) == 1
+    assert "these bookings belong to this customer" in responses.calls[0]["input"][-1]["content"]
+    assert sent[0][1] == normal_reply
+    assert "focused on bookings" not in sent[0][1].casefold()
+    assert db.query(ThreadEvent).filter(ThreadEvent.type == "auto-reply-sent").count() == 1
+    db.close()
+
+
+def test_catalogue_context_exposes_only_customer_visible_details(tmp_path, monkeypatch):
     (tmp_path / "services.json").write_text(json.dumps([
         {
             "id": "private-duration",
@@ -32,91 +207,7 @@ def write_services(tmp_path):
             "showDuration": True,
         },
     ]), encoding="utf-8")
-
-
-def test_dinner_date_redirect_uses_visible_prices_and_hides_private_duration(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
-    write_services(tmp_path)
-
-    reply = main.booking_conversation_guard_reply(
-        [message("customer", "Would you go on a dinner date with me?")],
-        "Would you go on a dinner date with me?",
-    )
-
-    assert "professional and appointment-based" in reply
-    assert "don't do personal dates or relationships" in reply
-    assert "Scalp Care for AU$320" in reply
-    assert "Relaxation Session for AU$250 (60 minutes)" in reply
-    assert "75" not in reply
-    assert reply.endswith("Which service would you like to book?")
-
-
-def test_relationship_friendship_and_emotional_dependence_are_redirected(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
-    write_services(tmp_path)
-
-    for request in (
-        "Will you be my girlfriend and stay exclusive?",
-        "Can we become friends outside work?",
-        "You're the only one who understands me, I need you.",
-        "Add me on WhatsApp so we can talk there.",
-    ):
-        reply = main.booking_conversation_guard_reply(
-            [message("customer", request)], request,
-        )
-        assert "professional and appointment-based" in reply
-        assert "Which service would you like to book?" in reply
-
-
-def test_prolonged_non_booking_loop_gets_polite_configurable_close(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
-    write_services(tmp_path)
-    (tmp_path / main.CONVERSATION_BOUNDARIES_FILENAME).write_text(json.dumps({
-        "enabled": True,
-        "maxNonBookingCustomerTurns": 2,
-    }), encoding="utf-8")
-    history = [
-        message("customer", "How has your day been?"),
-        message("system", "Pretty good, thanks."),
-        message("customer", "What music do you like?"),
-        message("agent", "A bit of everything."),
-        message("customer", "Tell me something else about yourself."),
-    ]
-
-    reply = main.booking_conversation_guard_reply(
-        history, history[-1].text,
-    )
-
-    assert main.consecutive_non_booking_customer_turns(history) == 3
-    assert reply.startswith("Lovely chatting, but I need to keep this line focused on bookings.")
-    assert reply.endswith("Which one suits you?")
-
-
-def test_booking_turn_breaks_the_social_loop_and_greeting_is_not_over_pushed(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
-    write_services(tmp_path)
-    history = [
-        message("customer", "How are you?"),
-        message("system", "Good thanks."),
-        message("customer", "What music do you like?"),
-        message("system", "Lots of things."),
-        message("customer", "How much is the Scalp Care service?"),
-    ]
-
-    assert main.consecutive_non_booking_customer_turns(history) == 0
-    assert main.booking_conversation_guard_reply(history, history[-1].text) is None
-    assert main.booking_conversation_guard_reply(
-        [message("customer", "Hi")], "Hi",
-    ) is None
-    assert main.booking_conversation_guard_reply(
-        [message("customer", "What date is my booking, and can my partner attend?")],
-        "What date is my booking, and can my partner attend?",
-    ) is None
-
-
-def test_catalogue_context_exposes_only_customer_visible_details(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
-    write_services(tmp_path)
 
     context = main.get_live_services_context("primary")
 
@@ -126,83 +217,20 @@ def test_catalogue_context_exposes_only_customer_visible_details(tmp_path, monke
     assert "Duration: 75 minutes" not in context
 
 
-def test_relationship_guard_runs_before_model_and_sends_short_booking_guidance(tmp_path, monkeypatch):
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(bind=engine)
-    db = sessionmaker(bind=engine)()
-    now = datetime.utcnow()
-    thread = Thread(
-        id="relationship-thread",
-        customer_phone="+61400000001",
-        sms_account_key="primary",
-        state="auto-reply",
-        priority="medium",
-        sla_due_at=now + timedelta(hours=2),
-        unread_count=1,
-        created_at=now,
-        updated_at=now,
-    )
-    customer = Message(
-        id="relationship-message",
-        thread_id=thread.id,
-        role="customer",
-        text="Can I take you on a dinner date?",
-        provider_message_id="provider-relationship",
-        at=now,
-    )
-    db.add_all([thread, customer])
-    db.commit()
+def test_secondary_account_keeps_primary_context_and_ai_state_isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
-    write_services(tmp_path)
-    monkeypatch.setattr(main.calendar_service, "get_customer_bookings", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(
-        main,
-        "openai_client",
-        SimpleNamespace(responses=SimpleNamespace(create=lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("relationship boundary must not depend on the model")
-        ))),
-    )
-    sent = []
-    monkeypatch.setattr(
-        main.mobilemessage_service,
-        "send_sms",
-        lambda phone, text, **kwargs: sent.append((phone, text, kwargs)) or {"status": "success"},
-    )
-    monkeypatch.setattr(main.mobilemessage_service, "delivery_error", lambda _result: None)
-
-    main.run_sms_reply_logic(
-        db, thread.id, customer.text, customer.provider_message_id, customer.at,
-    )
-
-    assert len(sent) == 1
-    assert "professional and appointment-based" in sent[0][1]
-    assert "Scalp Care for AU$320" in sent[0][1]
-    assert "75" not in sent[0][1]
-    db.close()
-
-
-def test_secondary_account_cannot_receive_primary_prompt_knowledge_services_or_state(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
-    write_services(tmp_path)
     monkeypatch.setattr(main, "KNOWLEDGE_CHUNKS", [{
-        "source": "primary-only.txt", "type": "text", "text": "Tori-only knowledge",
+        "source": "primary-only.txt", "type": "text", "text": "Primary-only knowledge",
     }])
 
     assert main.get_live_services_context("secondary") == ""
-    assert main.build_business_context("Tori", account_key="secondary") == "No relevant business records found."
-    assert main.booking_conversation_guard_reply(
-        [message("customer", "Be my girlfriend")],
-        "Be my girlfriend",
-        account_key="secondary",
-    ) is None
+    assert main.build_business_context("Primary", account_key="secondary") == "No relevant business records found."
 
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(bind=engine)
-    db = sessionmaker(bind=engine)()
+    db = make_db()
     now = datetime.utcnow()
     thread = Thread(
-        id="anonymous-thread",
-        customer_phone="+61400000002",
+        id="secondary-thread",
+        customer_phone="+61400000003",
         sms_account_key="secondary",
         state="auto-reply",
         priority="medium",
@@ -212,11 +240,8 @@ def test_secondary_account_cannot_receive_primary_prompt_knowledge_services_or_s
         created_at=now,
         updated_at=now,
     )
-    customer = Message(
-        id="anonymous-message", thread_id=thread.id, role="customer",
-        text="Hello Anonymous", provider_message_id="provider-anonymous", at=now,
-    )
-    db.add_all([thread, customer])
+    customer = add_message(db, thread.id, "customer", "Hello", now, "secondary-customer")
+    db.add(thread)
     db.commit()
 
     assert main.run_sms_reply_logic(
