@@ -7,6 +7,8 @@ import {
   Bot,
   CircleStop,
   History,
+  Mic,
+  PhoneOff,
   RefreshCw,
   Send,
   ShieldCheck,
@@ -33,6 +35,7 @@ import {
   type AgentConsoleFrame,
   type AgentConsoleState,
 } from './agentConsoleProtocol';
+import { useOperationsRealtimeVoice } from './useOperationsRealtimeVoice';
 
 const ACTIVE_STATES = new Set<AgentConsoleState>(['connecting', 'running', 'cancelling', 'disconnected']);
 const RUN_STORAGE_KEY = 'assistant-ui-agent-console-run';
@@ -146,6 +149,11 @@ export default function AgentConsole() {
       if (mountedRef.current) setConversationLoading(false);
     }
   };
+
+  const { voiceState, startVoice, stopVoice } = useOperationsRealtimeVoice({
+    onTurnPersisted: () => { void refreshConversation(); },
+    onError: setError,
+  });
 
   const handleFrame = (frame: AgentConsoleFrame) => {
     if (typeof frame.sequence === 'number') {
@@ -309,6 +317,7 @@ export default function AgentConsole() {
       || !consoleEnabled
       || conversationLoading
       || historyLoading
+      || voiceState !== 'idle'
     ) return;
     const currentRequestId = requestId();
     const optimisticMessage: OperationsChatMessage = {
@@ -445,6 +454,27 @@ export default function AgentConsole() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {voiceState === 'idle' ? (
+              <button
+                type="button"
+                onClick={() => { setError(null); void startVoice(); }}
+                disabled={active || conversationLoading || historyLoading}
+                data-testid="agent-voice-start"
+                className="inline-flex min-h-9 items-center gap-2 rounded-lg border border-indigo-300/30 bg-indigo-300/10 px-3 text-[10px] font-bold text-indigo-100 transition hover:bg-indigo-300/20 disabled:opacity-40"
+              >
+                <Mic className="h-3.5 w-3.5" /> Start realtime voice
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={stopVoice}
+                data-testid="agent-voice-stop"
+                className="inline-flex min-h-9 items-center gap-2 rounded-lg border border-rose-300/30 bg-rose-300/10 px-3 text-[10px] font-bold text-rose-100 transition hover:bg-rose-300/20"
+              >
+                {voiceState === 'connecting' ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <PhoneOff className="h-3.5 w-3.5" />}
+                {voiceState === 'connecting' ? 'Connecting voice…' : 'End voice'}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => { void refreshConversation(true); void refreshHistory(); }}
@@ -460,6 +490,14 @@ export default function AgentConsole() {
           </div>
         </div>
       </header>
+
+      {voiceState !== 'idle' && (
+        <div className="border-b border-emerald-500/30 bg-emerald-500/10 px-4 py-2.5 text-center text-[11px] font-semibold text-emerald-100" role="status" aria-live="polite">
+          {voiceState === 'live'
+            ? 'Realtime voice is live. Speak naturally and interrupt when needed. Voice turns are saved into this same conversation.'
+            : 'Connecting the microphone and loading this persistent conversation…'}
+        </div>
+      )}
 
       <div className="mx-auto grid w-full max-w-7xl flex-1 gap-4 p-3 sm:p-5 lg:grid-cols-[minmax(0,1fr)_300px]">
         <section className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl">
@@ -498,6 +536,11 @@ export default function AgentConsole() {
                         ? 'rounded-br-md bg-indigo-600 text-white'
                         : 'rounded-bl-md border border-slate-700 bg-slate-900 text-slate-100'
                     } ${message.id.startsWith('pending-') ? 'opacity-70' : ''}`}>
+                      {message.id.startsWith('operations-realtime:') && (
+                        <span className="mb-1 flex items-center gap-1 text-[8px] font-black uppercase tracking-wider opacity-70">
+                          <Mic className="h-2.5 w-2.5" /> Voice
+                        </span>
+                      )}
                       {message.role === 'assistant' ? renderLinkedText(message.content) : message.content}
                     </div>
                     {message.role === 'user' && (
@@ -529,7 +572,7 @@ export default function AgentConsole() {
               value={objective}
               onChange={(event) => setObjective(event.target.value)}
               onKeyDown={handleComposerKeyDown}
-              disabled={active}
+              disabled={active || voiceState !== 'idle'}
               rows={3}
               maxLength={8_000}
               placeholder="Message naturally — for example: Still not working. Check the earlier repair and fix it properly."
@@ -538,7 +581,7 @@ export default function AgentConsole() {
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <button
                 type="submit"
-                disabled={active || !objective.trim() || !consoleEnabled || conversationLoading || historyLoading}
+                disabled={active || voiceState !== 'idle' || !objective.trim() || !consoleEnabled || conversationLoading || historyLoading}
                 className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-black text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:bg-slate-700"
               >
                 {runState === 'connecting' ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}

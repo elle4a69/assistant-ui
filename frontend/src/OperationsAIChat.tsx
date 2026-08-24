@@ -1,12 +1,11 @@
 import { FormEvent, KeyboardEvent, ReactNode, useEffect, useRef, useState } from 'react';
 import { Bot, CornerDownLeft, Mic, PhoneOff, RefreshCw, Send, ShieldCheck, UserRound, Volume2 } from 'lucide-react';
 import {
-  createOperationsRealtimeSession,
   getOperationsChatMessages,
   OperationsChatMessage,
-  runOperationsRealtimeTool,
   sendOperationsChatMessage,
 } from './api';
+import { useOperationsRealtimeVoice } from './useOperationsRealtimeVoice';
 
 const OPERATIONS_URL_PATTERN = /(https?:\/\/[^\s<>\])]+)/g;
 
@@ -24,13 +23,8 @@ export default function OperationsAIChat() {
   const [draft, setDraft] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
-  const [voiceState, setVoiceState] = useState<'idle' | 'connecting' | 'live'>('idle');
   const [error, setError] = useState<string | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
-  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
-  const microphoneStreamRef = useRef<MediaStream | null>(null);
-  const audioElementRef = useRef<HTMLAudioElement | null>(null);
-  const voiceDataChannelRef = useRef<RTCDataChannel | null>(null);
 
   const loadMessages = async () => {
     setLoading(true);
@@ -45,9 +39,13 @@ export default function OperationsAIChat() {
     }
   };
 
+  const { voiceState, startVoice, stopVoice } = useOperationsRealtimeVoice({
+    onTurnPersisted: () => { void loadMessages(); },
+    onError: setError,
+  });
+
   useEffect(() => {
     void loadMessages();
-    return () => stopVoice();
   }, []);
 
   useEffect(() => {
@@ -89,101 +87,6 @@ export default function OperationsAIChat() {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
       void submitMessage();
-    }
-  };
-
-  const stopVoice = () => {
-    microphoneStreamRef.current?.getTracks().forEach((track) => track.stop());
-    microphoneStreamRef.current = null;
-    peerConnectionRef.current?.close();
-    peerConnectionRef.current = null;
-    voiceDataChannelRef.current?.close();
-    voiceDataChannelRef.current = null;
-    if (audioElementRef.current) {
-      audioElementRef.current.pause();
-      audioElementRef.current.srcObject = null;
-      audioElementRef.current.remove();
-      audioElementRef.current = null;
-    }
-    setVoiceState('idle');
-  };
-
-  const startVoice = async () => {
-    if (voiceState !== 'idle') return;
-    setError(null);
-    setVoiceState('connecting');
-    try {
-      const microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      microphoneStreamRef.current = microphoneStream;
-
-      const peerConnection = new RTCPeerConnection();
-      peerConnectionRef.current = peerConnection;
-      const audioElement = document.createElement('audio');
-      audioElement.autoplay = true;
-      audioElementRef.current = audioElement;
-      peerConnection.ontrack = (event) => {
-        audioElement.srcObject = event.streams[0];
-        void audioElement.play().catch(() => undefined);
-      };
-      peerConnection.onconnectionstatechange = () => {
-        if (peerConnection.connectionState === 'connected') setVoiceState('live');
-        if (['failed', 'disconnected', 'closed'].includes(peerConnection.connectionState)) stopVoice();
-      };
-      microphoneStream.getAudioTracks().forEach((track) => peerConnection.addTrack(track, microphoneStream));
-      const dataChannel = peerConnection.createDataChannel('oai-events');
-      voiceDataChannelRef.current = dataChannel;
-      dataChannel.onmessage = (event) => {
-        void (async () => {
-          let payload: Record<string, unknown>;
-          try {
-            payload = JSON.parse(String(event.data)) as Record<string, unknown>;
-          } catch {
-            return;
-          }
-          if (payload.type !== 'response.function_call_arguments.done') return;
-          const callId = typeof payload.call_id === 'string' ? payload.call_id : '';
-          const name = typeof payload.name === 'string' ? payload.name : '';
-          if (!callId || !name) return;
-          let args: Record<string, unknown> = {};
-          try {
-            args = JSON.parse(typeof payload.arguments === 'string' ? payload.arguments : '{}') as Record<string, unknown>;
-          } catch {
-            args = {};
-          }
-          let output: Record<string, unknown>;
-          try {
-            output = await runOperationsRealtimeTool(name, args);
-          } catch (toolError) {
-            output = {
-              status: 'error',
-              reason: toolError instanceof Error ? toolError.message : 'Voice diagnostic failed.',
-            };
-          }
-          if (dataChannel.readyState !== 'open') return;
-          dataChannel.send(JSON.stringify({
-            type: 'conversation.item.create',
-            item: {
-              type: 'function_call_output',
-              call_id: callId,
-              output: JSON.stringify(output),
-            },
-          }));
-          dataChannel.send(JSON.stringify({ type: 'response.create' }));
-        })();
-      };
-
-      const offer = await peerConnection.createOffer();
-      await peerConnection.setLocalDescription(offer);
-      if (!offer.sdp) throw new Error('The browser could not create a realtime audio offer.');
-      const answerSdp = await createOperationsRealtimeSession(offer.sdp);
-      await peerConnection.setRemoteDescription({ type: 'answer', sdp: answerSdp });
-    } catch (requestError) {
-      stopVoice();
-      if (requestError instanceof DOMException && requestError.name === 'NotAllowedError') {
-        setError('Microphone access was declined. Allow microphone access in this browser to use realtime voice.');
-      } else {
-        setError(requestError instanceof Error ? requestError.message : 'Realtime voice could not start.');
-      }
     }
   };
 
@@ -253,7 +156,7 @@ export default function OperationsAIChat() {
       <div className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-3 text-[10px] leading-relaxed text-amber-900">
         <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
         <p>
-          Text chat can self-diagnose, research, remember, update confirmed settings, and run isolated coding tasks on GitHub-hosted cloud runners. Production deployment requires your separate exact confirmation. Voice can privately read message threads and reply-decision events, but remains read-only. Voice is not added to persistent text history.
+          Text and realtime voice now share this persistent conversation, operational memory and audited inspection tools. Voice can investigate, research and start isolated review-branch coding work, but protected settings and production deployment still require your separate typed confirmation.
         </p>
       </div>
 
@@ -292,6 +195,11 @@ export default function OperationsAIChat() {
                     ? 'rounded-br-md bg-indigo-600 text-white'
                     : 'rounded-bl-md border border-slate-200 bg-white text-slate-800'
                 }`}>
+                  {message.id.startsWith('operations-realtime:') && (
+                    <span className="mb-1 flex items-center gap-1 text-[8px] font-black uppercase tracking-wider opacity-70">
+                      <Mic className="h-2.5 w-2.5" /> Voice
+                    </span>
+                  )}
                   {message.role === 'assistant' ? renderLinkedText(message.content) : message.content}
                 </div>
                 {message.role === 'user' && (

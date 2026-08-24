@@ -134,6 +134,7 @@ test('Agent Runner presents one persistent conversational coding-agent thread', 
   assert.match(viewSource, /event\.key === 'Enter' && !event\.shiftKey/);
   assert.match(viewSource, /<Send[^>]*\/>\s*}\s*\n\s*Send/);
   assert.match(viewSource, /Still not working/);
+  assert.match(viewSource, /Voice turns are saved into this same conversation/);
   assert.doesNotMatch(viewSource, /One objective/);
   assert.doesNotMatch(viewSource, />\s*Start run\s*</);
 });

@@ -1195,6 +1195,30 @@ export async function createOperationsRealtimeSession(sdp: string): Promise<stri
   return response.text();
 }
 
+export interface OperationsRealtimeTurn {
+  sessionId: string;
+  userItemId: string;
+  responseId: string;
+  userTranscript: string;
+  assistantTranscript: string;
+}
+
+export async function persistOperationsRealtimeTurn(turn: OperationsRealtimeTurn): Promise<{
+  persisted: boolean;
+  messages: OperationsChatMessage[];
+}> {
+  const response = await apiFetch(`${API_BASE}/api/settings/operations-chat/realtime/turns`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(turn),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Voice conversation could not be saved: ${response.statusText}`);
+  }
+  return response.json();
+}
+
 export async function runOperationsRealtimeTool(
   name: string,
   args: Record<string, unknown>,

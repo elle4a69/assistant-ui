@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from urllib import request as url_request
+import uuid
 
 import pytest
 from sqlalchemy import create_engine
@@ -805,7 +806,12 @@ def test_realtime_session_uses_server_key_and_current_voice_model(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "protected-test-key")
     monkeypatch.setattr(url_request, "urlopen", fake_urlopen)
 
-    answer = main.create_operations_realtime_session("v=0\r\no=offer", '{"status":"ok"}')
+    answer = main.create_operations_realtime_session(
+        "v=0\r\no=offer",
+        '{"status":"ok"}',
+        '[{"title":"Keep reports direct"}]',
+        "Recent authenticated conversation:\nOwner: Check the earlier repair.\nAssistant: I will inspect it.",
+    )
 
     assert answer == "v=0\r\no=answer"
     request = captured["request"]
@@ -813,9 +819,16 @@ def test_realtime_session_uses_server_key_and_current_voice_model(monkeypatch):
     assert request.headers["Authorization"] == "Bearer protected-test-key"
     assert b'gpt-realtime-2.1' in request.data
     assert b'"voice": "marin"' in request.data
+    assert b'"transcription": {"model": "gpt-4o-mini-transcribe", "language": "en"}' in request.data
+    assert b'"type": "server_vad"' in request.data
+    assert b'"interrupt_response": true' in request.data
     assert b'find_message_threads' in request.data
     assert b'inspect_message_thread' in request.data
-    assert b'read-only message diagnostic tools' in request.data
+    assert b'start_coding_task' in request.data
+    assert "execute_code_deployment" not in main.OPERATIONS_VOICE_TOOL_NAMES
+    assert "execute_runtime_change" not in main.OPERATIONS_VOICE_TOOL_NAMES
+    assert b'Check the earlier repair' in request.data
+    assert b'voice exchange is saved' in request.data
     assert b'protected-test-key' not in request.data
     assert captured["timeout"] == 20
 
@@ -869,13 +882,62 @@ def test_voice_can_read_full_account_bound_thread_and_reply_events():
     db.close()
 
 
-def test_voice_tool_endpoint_rejects_every_mutating_tool():
+def test_voice_tools_allow_review_branch_coding_but_reject_protected_execution(monkeypatch):
     db = make_db()
-    result = main.execute_operations_voice_tool(
+    monkeypatch.setattr(main, "_operations_start_coding_task", lambda *_args: {
+        "status": "queued",
+        "task_id": "voice-review-task",
+    })
+
+    queued = main.execute_operations_voice_tool(
+        db,
+        "start_coding_task",
+        {
+            "title": "Repair the simulator",
+            "instructions": "Inspect and repair the internal simulator with mocked provider tests.",
+            "acceptance_test": "Backend and frontend tests pass.",
+        },
+    )
+    rejected = main.execute_operations_voice_tool(
         db,
         "execute_runtime_change",
         {"action_id": "anything"},
     )
-    assert result["status"] == "rejected"
-    assert "read-only" in result["reason"]
+
+    assert queued == {"status": "queued", "task_id": "voice-review-task"}
+    assert rejected["status"] == "rejected"
+    assert "typed confirmation" in rejected["reason"]
+    assert "start_coding_task" in main.OPERATIONS_VOICE_TOOL_NAMES
+    assert "inspect_deployments" in main.OPERATIONS_VOICE_TOOL_NAMES
+    assert "execute_runtime_change" not in main.OPERATIONS_VOICE_TOOL_NAMES
+    assert "execute_code_deployment" not in main.OPERATIONS_VOICE_TOOL_NAMES
+    db.close()
+
+
+def test_realtime_voice_turn_is_chronological_sanitised_and_idempotent():
+    db = make_db()
+    session_id = str(uuid.uuid4())
+    payload = main.OperationsRealtimeTurnInput(
+        sessionId=session_id,
+        userItemId="item-owner-1",
+        responseId="response-assistant-1",
+        userTranscript="Please check it. FLY_API_TOKEN=do-not-store-this",
+        assistantTranscript="I checked the current deployment and it is healthy.",
+    )
+
+    first = main.persist_operations_realtime_turn(payload, db)
+    second = main.persist_operations_realtime_turn(payload, db)
+    rows = db.query(OperationsChatMessage).order_by(
+        OperationsChatMessage.created_at,
+        OperationsChatMessage.id,
+    ).all()
+
+    assert first["persisted"] is True
+    assert second["persisted"] is False
+    assert len(rows) == 2
+    assert [item.role for item in rows] == ["user", "assistant"]
+    assert rows[0].created_at < rows[1].created_at
+    assert "do-not-store-this" not in rows[0].content
+    assert "[REDACTED]" in rows[0].content
+    assert [item["id"] for item in first["messages"]] == [item["id"] for item in second["messages"]]
     db.close()
