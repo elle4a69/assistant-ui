@@ -2086,6 +2086,148 @@ def find_pending_information_request(
             return event_item
     return None
 
+
+NEEDS_REVIEW_FAILURE_EVENT_TYPES = {
+    "ai-reply-failed",
+    "ai-reply-missed",
+    "sms-delivery-failed",
+}
+NEEDS_REVIEW_TERMINAL_EVENT_TYPES = {
+    "ai-reply-cancelled",
+    "ai-reply-skipped",
+    "auto-reply-sent",
+    "human-reply-sent",
+    "information-request-resolved",
+    "resolution",
+    "draft-approved",
+    "draft-discarded",
+    "drafts-cleared",
+}
+
+
+def thread_has_actionable_review(db: Session, thread: Thread) -> bool:
+    """Return whether the thread still contains work requiring an operator."""
+    db.flush()
+    if thread.pending_booking:
+        return True
+    if db.query(Message.id).filter(
+        Message.thread_id == thread.id,
+        Message.role == "draft",
+    ).first():
+        return True
+    if find_pending_information_request(db, thread.id):
+        return True
+
+    latest_outcome = db.query(ThreadEvent).filter(
+        ThreadEvent.thread_id == thread.id,
+        ThreadEvent.type.in_(
+            NEEDS_REVIEW_FAILURE_EVENT_TYPES | NEEDS_REVIEW_TERMINAL_EVENT_TYPES
+        ),
+    ).order_by(ThreadEvent.at.desc(), ThreadEvent.id.desc()).first()
+    return bool(
+        latest_outcome
+        and latest_outcome.type in NEEDS_REVIEW_FAILURE_EVENT_TYPES
+    )
+
+
+def sync_thread_needs_review(
+    db: Session,
+    thread: Thread,
+    *,
+    mark_actionable: bool = False,
+    release_taken_over: bool = False,
+) -> bool:
+    """Synchronise a review flag after a lifecycle outcome; return actionability."""
+    actionable = thread_has_actionable_review(db, thread)
+    if actionable and mark_actionable:
+        thread.state = "needs-review"
+    elif not actionable and (
+        thread.state == "needs-review"
+        or (release_taken_over and thread.state == "taken-over")
+    ):
+        thread.state = "auto-reply"
+    return actionable
+
+
+NEEDS_REVIEW_REPAIR_ACTION_TYPE = "repair_stale_needs_review_v1"
+NEEDS_REVIEW_REPAIR_BATCH_SIZE = 100
+_needs_review_repair_lock = threading.Lock()
+
+
+def ensure_needs_review_repair_action(db: Session) -> OperationsAction:
+    """Enqueue the versioned one-off repair through the audited operations queue."""
+    action = db.query(OperationsAction).filter(
+        OperationsAction.action_type == NEEDS_REVIEW_REPAIR_ACTION_TYPE,
+    ).first()
+    if action:
+        return action
+    action = OperationsAction(
+        id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"assistant-ui:{NEEDS_REVIEW_REPAIR_ACTION_TYPE}")),
+        action_type=NEEDS_REVIEW_REPAIR_ACTION_TYPE,
+        payload=json.dumps({"cursor": None, "scanned": 0, "cleared": 0}),
+        reason="Clear legacy needs-review flags only when no actionable review item remains.",
+        status="queued",
+    )
+    db.add(action)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        action = db.query(OperationsAction).filter(
+            OperationsAction.action_type == NEEDS_REVIEW_REPAIR_ACTION_TYPE,
+        ).one()
+    return action
+
+
+def process_needs_review_repair_batch(
+    db: Session,
+    batch_size: int = NEEDS_REVIEW_REPAIR_BATCH_SIZE,
+) -> Dict[str, Any]:
+    """Process one bounded, resumable, idempotent operations-queue batch."""
+    bounded_size = max(1, min(NEEDS_REVIEW_REPAIR_BATCH_SIZE, int(batch_size)))
+    with _needs_review_repair_lock:
+        action = ensure_needs_review_repair_action(db)
+        if action.status == "completed":
+            payload = json.loads(action.payload or "{}")
+            return {"status": "completed", "processed": 0, **payload}
+        try:
+            payload = json.loads(action.payload or "{}")
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        cursor = payload.get("cursor")
+        query = db.query(Thread).filter(Thread.state == "needs-review")
+        if cursor:
+            query = query.filter(Thread.id > str(cursor))
+        candidates = query.order_by(Thread.id.asc()).limit(bounded_size).all()
+        cleared = 0
+        for thread in candidates:
+            if not thread_has_actionable_review(db, thread):
+                thread.state = "auto-reply"
+                cleared += 1
+        payload.update({
+            "cursor": candidates[-1].id if candidates else cursor,
+            "scanned": int(payload.get("scanned") or 0) + len(candidates),
+            "cleared": int(payload.get("cleared") or 0) + cleared,
+            "batch_limit": bounded_size,
+        })
+        action.payload = json.dumps(payload)
+        action.status = "completed" if len(candidates) < bounded_size else "queued"
+        action.executed_at = datetime.utcnow() if action.status == "completed" else None
+        db.commit()
+        return {"status": action.status, "processed": len(candidates), **payload}
+
+
+def _run_needs_review_repair_batch() -> None:
+    db = SessionLocal()
+    try:
+        process_needs_review_repair_batch(db)
+    except Exception:
+        db.rollback()
+        logger.exception("Needs-review repair batch failed")
+    finally:
+        db.close()
+
+
 # Google Calendar Service
 class GoogleCalendarService:
     def __init__(self, db_session_factory):
@@ -2704,6 +2846,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+async def _needs_review_repair_worker() -> None:
+    while True:
+        await asyncio.to_thread(_run_needs_review_repair_batch)
+        db = SessionLocal()
+        try:
+            action = db.query(OperationsAction).filter(
+                OperationsAction.action_type == NEEDS_REVIEW_REPAIR_ACTION_TYPE,
+            ).first()
+            if action and action.status == "completed":
+                return
+        finally:
+            db.close()
+        await asyncio.sleep(5)
+
+
+@app.on_event("startup")
+async def start_needs_review_repair_worker() -> None:
+    """Drain the versioned repair in bounded batches without blocking startup."""
+    asyncio.create_task(_needs_review_repair_worker())
 
 
 @app.middleware("http")
@@ -3970,6 +4133,7 @@ def run_sms_reply_logic(
             meta=json.dumps({"reason": "superseded-by-newer-customer-message"}),
             at=datetime.utcnow(),
         ))
+        sync_thread_needs_review(db, thread)
         db.commit()
         return False, False
     if not draft_only and human_replied_after(db, thread_id, received_at_naive):
@@ -3981,6 +4145,7 @@ def run_sms_reply_logic(
             meta=json.dumps({"reason": "human-replied", "received_at": received_at_naive.isoformat()}),
             at=datetime.utcnow(),
         ))
+        sync_thread_needs_review(db, thread)
         db.commit()
         print(f"[Conversational AI Cancelled] Human already replied on {thread_id}.")
         return False, False
@@ -4440,6 +4605,9 @@ def run_sms_reply_logic(
             meta=json.dumps({"reason": "newer-customer-message-during-generation"}),
             at=datetime.utcnow(),
         ))
+        thread = db.query(Thread).filter(Thread.id == thread_id).first()
+        if thread:
+            sync_thread_needs_review(db, thread)
         db.commit()
         return False, False
 
@@ -4499,6 +4667,7 @@ def run_sms_reply_logic(
             meta=json.dumps({"reason": "duplicate-ai-reply-for-customer-turn"}),
             at=datetime.utcnow(),
         ))
+        sync_thread_needs_review(db, thread)
         db.commit()
         return booking_confirmed, False
 
@@ -4573,6 +4742,8 @@ def run_sms_reply_logic(
                 meta=json.dumps({"reason": "human-replied-during-generation"}),
                 at=datetime.utcnow(),
             ))
+            if thread:
+                sync_thread_needs_review(db, thread)
             db.commit()
             print(f"[Conversational AI Cancelled] Human replied while AI was working on {thread_id}.")
             return False, False
@@ -4634,7 +4805,8 @@ def run_sms_reply_logic(
             )
         db.add(system_message)
         db.add(event_log)
-            
+
+    sync_thread_needs_review(db, thread, mark_actionable=True)
     db.commit()
     return booking_confirmed, slots_presented
 
@@ -4804,6 +4976,7 @@ def send_first_contact_auto_reply(
 
     db.add(outbound)
     db.add(event_log)
+    sync_thread_needs_review(db, thread, mark_actionable=True)
     db.commit()
 
 
@@ -6020,6 +6193,7 @@ def process_inbound_sms(
             meta=json.dumps({"message_id": customer_message.id, "reason": "global-ai-off"}),
             at=received_at_naive,
         ))
+        sync_thread_needs_review(db, thread, mark_actionable=True)
     db.commit()
     
     is_testing = "pytest" in sys.modules or any("test" in arg for arg in sys.argv)
@@ -6049,8 +6223,9 @@ def process_inbound_sms(
                 "reason": "account-autoresponder-only",
                 "sms_account_key": thread.sms_account_key,
             }),
-            at=received_at_naive,
+            at=datetime.utcnow(),
         ))
+        sync_thread_needs_review(db, thread)
         db.commit()
         return {
             "status": "success",
@@ -6628,6 +6803,7 @@ def reply_thread(thread_id: str, payload: ReplyInput, db: Session = Depends(get_
         ))
         thread.updated_at = now
         thread.unread_count = 0
+        sync_thread_needs_review(db, thread)
         db.commit()
         return _manual_reply_response(agent_message)
 
@@ -10860,13 +11036,6 @@ def approve_draft_message(message_id: str, db: Session = Depends(get_db)):
         msg.role = "agent"
         msg.at = datetime.utcnow()
 
-        other_drafts = db.query(Message).filter(
-            Message.thread_id == thread.id,
-            Message.role == "draft",
-            Message.id != message_id,
-        ).count()
-        if other_drafts == 0:
-            thread.state = "auto-reply"
         thread.unread_count = 0
 
         approval_event = ThreadEvent(
@@ -10878,6 +11047,7 @@ def approve_draft_message(message_id: str, db: Session = Depends(get_db)):
             at=datetime.utcnow(),
         )
         db.add(approval_event)
+        sync_thread_needs_review(db, thread, release_taken_over=True)
         db.commit()
         return {"status": "success", "duplicate": False}
 
@@ -10897,11 +11067,6 @@ def discard_draft_message(message_id: str, db: Session = Depends(get_db)):
     # Delete message
     db.delete(msg)
     
-    # Resolve needs-review state of thread if no other drafts exist
-    other_drafts = db.query(Message).filter(Message.thread_id == thread.id, Message.role == "draft", Message.id != message_id).count()
-    if other_drafts == 0:
-        thread.state = "auto-reply"
-        
     # Log discard event
     discard_event = ThreadEvent(
         id=str(uuid.uuid4()),
@@ -10912,6 +11077,7 @@ def discard_draft_message(message_id: str, db: Session = Depends(get_db)):
         at=datetime.utcnow()
     )
     db.add(discard_event)
+    sync_thread_needs_review(db, thread, release_taken_over=True)
     db.commit()
     return {"status": "success"}
 
@@ -10929,8 +11095,6 @@ def clear_pending_draft_messages(db: Session = Depends(get_db)):
     db.query(Message).filter(Message.role == "draft").delete(synchronize_session=False)
 
     for thread in affected_threads:
-        if thread.state == "needs-review":
-            thread.state = "auto-reply"
         thread.updated_at = cleared_at
         db.add(ThreadEvent(
             id=str(uuid.uuid4()),
@@ -10940,6 +11104,7 @@ def clear_pending_draft_messages(db: Session = Depends(get_db)):
             meta=json.dumps({"count": draft_counts[thread.id]}),
             at=cleared_at,
         ))
+        sync_thread_needs_review(db, thread)
 
     db.commit()
     return {
@@ -11803,6 +11968,7 @@ def handle_locanto_message(payload: LocantoMessagePayload, db: Session = Depends
                     at=datetime.utcnow()
                 )
                 db.add(event_log)
+                sync_thread_needs_review(db, thread, mark_actionable=True)
                 db.commit()
                 
                 return {
@@ -11829,6 +11995,7 @@ def handle_locanto_message(payload: LocantoMessagePayload, db: Session = Depends
                     at=datetime.utcnow()
                 )
                 db.add(event_log)
+                sync_thread_needs_review(db, thread)
                 db.commit()
                 
                 return {
