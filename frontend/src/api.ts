@@ -285,10 +285,12 @@ export async function listThreads(params: ListThreadsParams = {}): Promise<Threa
 }
 
 export interface CatchUpResult {
-  processed: boolean;
-  threadId?: string;
-  outcome: 'draft' | 'information-request' | 'complete';
-  remaining: number;
+  examined: number;
+  processed: number;
+  skipped: number;
+  failures: number;
+  outcome: 'complete' | 'budget' | 'failed' | 'ai-disabled' | 'already-running';
+  stoppedOnBudget: boolean;
 }
 
 export interface ArrivalMessage {

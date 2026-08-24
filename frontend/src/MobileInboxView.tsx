@@ -302,29 +302,12 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     setCatchingUp(true)
     setNotice('Checking missed messages…')
     setError('')
-    let drafts = 0
-    let informationRequests = 0
     try {
-      // Keep memory bounded by processing one model request at a time, while
-      // continuing through the full queue instead of silently stopping at ten.
-      const safetyLimit = 50
-      let remaining = 0
-      let reachedSafetyLimit = false
-      for (let processed = 0; processed < safetyLimit; processed += 1) {
-        const result = await catchUpMissedMessage()
-        remaining = result.remaining
-        if (!result.processed) break
-        if (result.outcome === 'draft') drafts += 1
-        if (result.outcome === 'information-request') informationRequests += 1
-        setNotice(`Catch-up: ${drafts} draft${drafts === 1 ? '' : 's'}, ${informationRequests} information request${informationRequests === 1 ? '' : 's'}, ${remaining} remaining`)
-        if ((processed + 1) % 5 === 0) await loadThreads()
-        await new Promise(resolve => window.setTimeout(resolve, 750))
-        reachedSafetyLimit = processed === safetyLimit - 1 && remaining > 0
-      }
+      const result = await catchUpMissedMessage()
       setNotice(
-        reachedSafetyLimit
-          ? `Catch-up paused after ${safetyLimit} conversations for safety. Click refresh again to continue.`
-          : `Catch-up complete: ${drafts} draft${drafts === 1 ? '' : 's'}, ${informationRequests} information request${informationRequests === 1 ? '' : 's'}`,
+        result.stoppedOnBudget
+          ? `Catch-up paused on its time budget after ${result.processed} conversation${result.processed === 1 ? '' : 's'}. It will resume automatically.`
+          : `Catch-up complete: ${result.processed} processed, ${result.failures} failed.`,
       )
       await loadThreads()
     } catch (err) {

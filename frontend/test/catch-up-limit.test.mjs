@@ -7,7 +7,7 @@ const mobileInboxSource = await readFile(
   'utf8',
 );
 
-test('manual catch-up processes no more than 50 conversations per run', () => {
-  assert.match(mobileInboxSource, /const safetyLimit = 50\b/);
-  assert.doesNotMatch(mobileInboxSource, /const safetyLimit = 250\b/);
+test('manual catch-up delegates one bounded batch to the server', () => {
+  assert.equal((mobileInboxSource.match(/await catchUpMissedMessage\(\)/g) || []).length, 1);
+  assert.doesNotMatch(mobileInboxSource, /safetyLimit/);
 });

@@ -16,6 +16,7 @@ import string
 import json
 import shutil
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any, Literal
 
@@ -925,6 +926,36 @@ class ThreadEvent(Base):
     meta = Column(Text, nullable=True)
     
     thread = relationship("Thread", back_populates="events")
+
+
+class CatchUpCursor(Base):
+    """Durable keyset position and operations-visible state for one SMS account."""
+    __tablename__ = "catch_up_cursors"
+
+    account_key = Column(String, primary_key=True)
+    last_message_at = Column(DateTime, nullable=True)
+    last_thread_id = Column(String, nullable=True)
+    last_message_id = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="idle")
+    processed_count = Column(Integer, nullable=False, default=0)
+    skipped_count = Column(Integer, nullable=False, default=0)
+    failure_count = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class CatchUpClaim(Base):
+    """One retry-safe claim per inbound turn handled by catch-up."""
+    __tablename__ = "catch_up_claims"
+
+    message_id = Column(String, primary_key=True)
+    account_key = Column(String, nullable=False, index=True)
+    thread_id = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, default="processing")
+    outcome = Column(String, nullable=True)
+    error = Column(Text, nullable=True)
+    claimed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
 
 
 def find_thread_by_phone(db: Session, phone: str, sms_account_key: str = "primary") -> Optional[Thread]:
@@ -3762,6 +3793,7 @@ def run_sms_reply_logic(
     dispatch_sms: bool = True,
     draft_only: bool = False,
     is_simulation: bool = False,
+    history_message_limit: Optional[int] = None,
 ):
     import json
     thread = db.query(Thread).filter(Thread.id == thread_id).first()
@@ -3797,12 +3829,15 @@ def run_sms_reply_logic(
     booking_confirmed = False
     booking_arrival_link: Optional[str] = None
     slots_presented = False
-    history_msgs = (
-        db.query(Message)
-        .filter(Message.thread_id == thread.id)
-        .order_by(Message.at.asc(), Message.id.asc())
-        .all()
-    )
+    history_query = db.query(Message).filter(Message.thread_id == thread.id)
+    if history_message_limit is None:
+        history_msgs = history_query.order_by(Message.at.asc(), Message.id.asc()).all()
+    else:
+        history_msgs = list(reversed(
+            history_query.order_by(Message.at.desc(), Message.id.desc())
+            .limit(max(1, history_message_limit))
+            .all()
+        ))
     effective_body = current_customer_burst(history_msgs, body)
     clean_body = effective_body.strip().lower()
     if thread.pending_booking and is_explicit_booking_rejection(effective_body):
@@ -4291,6 +4326,20 @@ def run_sms_reply_logic(
         db.commit()
         return booking_confirmed, False
 
+    if draft_only:
+        db.expire_all()
+        if human_replied_after(db, thread_id, received_at_naive):
+            db.add(ThreadEvent(
+                id=str(uuid.uuid4()),
+                thread_id=thread_id,
+                type="ai-reply-cancelled",
+                agent_id=None,
+                meta=json.dumps({"reason": "human-replied-during-catch-up"}),
+                at=datetime.utcnow(),
+            ))
+            db.commit()
+            return False, False
+
     catch_up_handoff = re.fullmatch(
         r"\s*\[\[HANDOFF(?::\s*(.*?))?\]\]\s*",
         assistant_reply or "",
@@ -4440,6 +4489,14 @@ TAKEOVER_RELEASE_EVENT_TYPES = {
     "drafts-cleared",
 }
 
+CATCH_UP_MAX_THREADS_PER_BATCH = 20
+CATCH_UP_MAX_MESSAGES_PER_THREAD = 25
+CATCH_UP_WALL_CLOCK_SECONDS = 20.0
+CATCH_UP_RECENT_DAYS = 7
+CATCH_UP_YIELD_SECONDS = 0.01
+CATCH_UP_SCHEDULE_SECONDS = 60
+CATCH_UP_RUN_LOCK = threading.Lock()
+
 
 def has_active_explicit_takeover(db: Session, thread_id: str) -> bool:
     latest_control = db.query(ThreadEvent).filter(
@@ -4449,8 +4506,19 @@ def has_active_explicit_takeover(db: Session, thread_id: str) -> bool:
     return bool(latest_control and latest_control.type == "takeover")
 
 
-def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
-    """Return unanswered conversations, excluding only genuine operator control."""
+def list_catch_up_candidates(
+    db: Session,
+    *,
+    account_key: Optional[str] = None,
+    after: Optional[tuple[datetime, str, str]] = None,
+    limit: int = 50,
+    now: Optional[datetime] = None,
+    return_scan: bool = False,
+    mature_only: bool = False,
+) -> Any:
+    """Return a bounded keyset page of recent threads for catch-up evaluation."""
+    now = now or datetime.utcnow()
+    bounded_limit = max(1, min(200, limit))
     ranked_messages = db.query(
         Message.id.label("message_id"),
         Message.thread_id.label("thread_id"),
@@ -4459,7 +4527,7 @@ def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
             order_by=(Message.at.desc(), Message.id.desc()),
         ).label("row_number"),
     ).subquery()
-    rows = db.query(Thread, Message).join(
+    query = db.query(Thread, Message).join(
         ranked_messages,
         ranked_messages.c.thread_id == Thread.id,
     ).join(
@@ -4468,11 +4536,22 @@ def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
     ).filter(
         ranked_messages.c.row_number == 1,
         Message.role == "customer",
-        Thread.auto_reply_enabled.is_(True),
-        Thread.state.in_(["auto-reply", "resolved", "taken-over"]),
-    ).all()
+        Message.at >= now - timedelta(days=CATCH_UP_RECENT_DAYS),
+    )
+    if mature_only:
+        query = query.filter(Message.at <= now - timedelta(minutes=3))
+    if account_key is not None:
+        query = query.filter(Thread.sms_account_key == account_key)
+    if after is not None:
+        after_at, after_thread_id, after_message_id = after
+        query = query.filter(or_(
+            Message.at > after_at,
+            Message.at == after_at, Thread.id > after_thread_id,
+            Message.at == after_at, Thread.id == after_thread_id, Message.id > after_message_id,
+        ))
+    rows = query.order_by(Message.at.asc(), Thread.id.asc(), Message.id.asc()).limit(bounded_limit).all()
     if not rows:
-        return []
+        return ([], None, 0) if return_scan else []
 
     thread_ids = [thread.id for thread, _message in rows]
     events = db.query(ThreadEvent).filter(
@@ -4485,7 +4564,7 @@ def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
     ).all()
     latest_control_events: Dict[str, ThreadEvent] = {}
     cleared_events: Dict[str, List[datetime]] = {}
-    explicitly_missed: set[str] = set()
+    global_ai_off_messages: set[str] = set()
     for event_item in events:
         if event_item.type == "takeover" or event_item.type in TAKEOVER_RELEASE_EVENT_TYPES:
             current = latest_control_events.get(event_item.thread_id)
@@ -4499,12 +4578,15 @@ def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
             except (TypeError, json.JSONDecodeError):
                 continue
             message_id = missed_meta.get("message_id")
-            if message_id:
-                explicitly_missed.add(message_id)
+            if message_id and missed_meta.get("reason") == "global-ai-off":
+                global_ai_off_messages.add(message_id)
 
-    cutoff = datetime.utcnow() - timedelta(minutes=3)
     candidates = []
     for thread, latest in rows:
+        if not thread.auto_reply_enabled or thread.state not in {"auto-reply", "resolved", "taken-over"}:
+            continue
+        if latest.id in global_ai_off_messages:
+            continue
         # A taken-over state is genuine only when an operator explicitly used
         # Take over. Draft approval/discard/cleanup historically set the same
         # state automatically and must not strand later customer messages.
@@ -4514,15 +4596,191 @@ def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
         retry_after_clear = any(
             cleared_at >= latest.at for cleared_at in cleared_events.get(thread.id, [])
         )
-        if latest.id in explicitly_missed or latest.at <= cutoff or retry_after_clear:
+        if latest.at <= now - timedelta(minutes=3) or retry_after_clear:
             candidates.append((thread, latest))
-    return sorted(candidates, key=lambda item: (item[1].at, item[1].id))
+    if return_scan:
+        last_thread, last_message = rows[-1]
+        return candidates, (last_message.at, last_thread.id, last_message.id), len(rows)
+    return candidates
 
 
 def find_oldest_catch_up_candidate(db: Session):
     """Return the oldest conversation whose latest message is still unanswered."""
-    candidates = list_catch_up_candidates(db)
+    candidates = []
+    for account_key in FIRST_CONTACT_ACCOUNT_KEYS:
+        if account_allows_conversational_ai(account_key):
+            candidates.extend(list_catch_up_candidates(db, account_key=account_key))
+    candidates.sort(key=lambda item: (item[1].at, item[0].id, item[1].id))
     return candidates[0] if candidates else None
+
+
+def _advance_catch_up_cursor(
+    cursor: CatchUpCursor,
+    key: tuple[datetime, str, str],
+) -> None:
+    cursor.last_message_at, cursor.last_thread_id, cursor.last_message_id = key
+    cursor.updated_at = datetime.utcnow()
+
+
+def process_catch_up_batch(
+    db: Session,
+    *,
+    max_threads: int = CATCH_UP_MAX_THREADS_PER_BATCH,
+    max_messages_per_thread: int = CATCH_UP_MAX_MESSAGES_PER_THREAD,
+    budget_seconds: float = CATCH_UP_WALL_CLOCK_SECONDS,
+    clock=time.monotonic,
+    yield_fn=None,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Run one bounded, resumable, draft-only catch-up slice."""
+    started = clock()
+    now = now or datetime.utcnow()
+    thread_cap = max(1, min(CATCH_UP_MAX_THREADS_PER_BATCH, max_threads))
+    message_cap = max(1, min(CATCH_UP_MAX_MESSAGES_PER_THREAD, max_messages_per_thread))
+    budget = max(0.0, min(CATCH_UP_WALL_CLOCK_SECONDS, budget_seconds))
+    yield_fn = yield_fn or (lambda: time.sleep(CATCH_UP_YIELD_SECONDS))
+    totals = {"examined": 0, "processed": 0, "skipped": 0, "failures": 0}
+    stopped_on_budget = False
+    account_reports = []
+
+    if not AUTO_REPLY_GLOBAL_ENABLED:
+        return {**totals, "outcome": "ai-disabled", "stoppedOnBudget": False, "accounts": []}
+
+    for account_key in FIRST_CONTACT_ACCOUNT_KEYS:
+        if totals["examined"] >= thread_cap or clock() - started >= budget:
+            stopped_on_budget = clock() - started >= budget
+            break
+        if not account_allows_conversational_ai(account_key):
+            account_reports.append({"accountKey": account_key, "status": "disabled", "processed": 0})
+            continue
+
+        cursor = db.get(CatchUpCursor, account_key)
+        if cursor is None:
+            cursor = CatchUpCursor(account_key=account_key)
+            db.add(cursor)
+            db.commit()
+        cursor.status = "running"
+        cursor.updated_at = datetime.utcnow()
+        db.commit()
+        after = None
+        if cursor.last_message_at and cursor.last_thread_id and cursor.last_message_id:
+            after = (cursor.last_message_at, cursor.last_thread_id, cursor.last_message_id)
+        remaining_cap = thread_cap - totals["examined"]
+        candidates, scan_end, scanned = list_catch_up_candidates(
+            db,
+            account_key=account_key,
+            after=after,
+            limit=remaining_cap,
+            now=now,
+            return_scan=True,
+            mature_only=True,
+        )
+        eligible_by_id = {message.id: (thread, message) for thread, message in candidates}
+        page_processed = 0
+
+        # Walk the actual page order so skipped rows also advance the durable keyset.
+        ranked = db.query(Thread, Message).join(Message, Message.thread_id == Thread.id).filter(
+            Thread.sms_account_key == account_key,
+            Message.id.in_(list(eligible_by_id) or [""]),
+        ).all()
+        candidate_order = sorted(ranked, key=lambda item: (item[1].at, item[0].id, item[1].id))
+        for thread, message in candidate_order:
+            if clock() - started >= budget:
+                stopped_on_budget = True
+                break
+            key = (message.at, thread.id, message.id)
+            claim = db.get(CatchUpClaim, message.id)
+            if claim is not None and claim.status in {"completed", "failed"}:
+                totals["skipped"] += 1
+                cursor.skipped_count += 1
+                _advance_catch_up_cursor(cursor, key)
+                db.commit()
+                continue
+
+            newer_reply = db.query(Message.id).filter(
+                Message.thread_id == thread.id,
+                Message.role.in_(["agent", "system", "draft"]),
+                Message.at > message.at,
+            ).first()
+            if newer_reply or human_replied_after(db, thread.id, message.at):
+                if claim is not None:
+                    claim.status = "completed"
+                    claim.outcome = "deduplicated"
+                    claim.completed_at = datetime.utcnow()
+                totals["skipped"] += 1
+                cursor.skipped_count += 1
+                _advance_catch_up_cursor(cursor, key)
+                db.commit()
+                continue
+
+            if claim is None:
+                claim = CatchUpClaim(
+                    message_id=message.id,
+                    account_key=account_key,
+                    thread_id=thread.id,
+                )
+                db.add(claim)
+                try:
+                    db.commit()
+                except IntegrityError:
+                    db.rollback()
+                    totals["skipped"] += 1
+                    continue
+            try:
+                run_sms_reply_logic(
+                    db,
+                    thread.id,
+                    message.text,
+                    message.provider_message_id or f"catch-up:{message.id}",
+                    message.at,
+                    dispatch_sms=False,
+                    draft_only=True,
+                    history_message_limit=message_cap,
+                )
+                latest = db.query(Message).filter(Message.thread_id == thread.id).order_by(
+                    Message.at.desc(), Message.id.desc()
+                ).first()
+                claim = db.get(CatchUpClaim, message.id)
+                claim.status = "completed"
+                claim.outcome = "draft" if latest and latest.role == "draft" else "information-request"
+                claim.completed_at = datetime.utcnow()
+                totals["processed"] += 1
+                page_processed += 1
+                cursor.processed_count += 1
+            except Exception as exc:
+                db.rollback()
+                claim = db.get(CatchUpClaim, message.id)
+                claim.status = "failed"
+                claim.error = type(exc).__name__
+                claim.completed_at = datetime.utcnow()
+                cursor = db.get(CatchUpCursor, account_key)
+                cursor.failure_count += 1
+                cursor.last_error = type(exc).__name__
+                totals["failures"] += 1
+                db.add(ThreadEvent(
+                    id=str(uuid.uuid4()), thread_id=thread.id, type="catch-up-failed",
+                    meta=json.dumps({"message_id": message.id, "error": type(exc).__name__}),
+                    at=datetime.utcnow(),
+                ))
+            _advance_catch_up_cursor(cursor, key)
+            db.commit()
+            logger.info("Catch-up progress account=%s processed=%d failures=%d", account_key, totals["processed"], totals["failures"])
+            yield_fn()
+
+        # If the full page was evaluated, advance past trailing ineligible rows too.
+        if not stopped_on_budget and scan_end is not None:
+            _advance_catch_up_cursor(cursor, scan_end)
+        totals["examined"] += scanned
+        cursor.skipped_count += max(0, scanned - len(candidates))
+        totals["skipped"] += max(0, scanned - len(candidates))
+        cursor.status = "failed" if cursor.last_error else ("budget" if stopped_on_budget else "idle")
+        cursor.updated_at = datetime.utcnow()
+        db.commit()
+        account_reports.append({"accountKey": account_key, "status": cursor.status, "processed": page_processed})
+        yield_fn()
+
+    outcome = "budget" if stopped_on_budget else ("failed" if totals["failures"] else "complete")
+    return {**totals, "outcome": outcome, "stoppedOnBudget": stopped_on_budget, "accounts": account_reports}
 
 def send_first_contact_auto_reply(
     db: Session,
@@ -6076,63 +6334,38 @@ def get_threads(
     return [item[3] for item in ordered_results]
 
 
+def _run_scheduled_catch_up() -> Dict[str, Any]:
+    if not CATCH_UP_RUN_LOCK.acquire(blocking=False):
+        return {
+            "examined": 0, "processed": 0, "skipped": 0, "failures": 0,
+            "outcome": "already-running", "stoppedOnBudget": False, "accounts": [],
+        }
+    db = SessionLocal()
+    try:
+        return process_catch_up_batch(db)
+    finally:
+        db.close()
+        CATCH_UP_RUN_LOCK.release()
+
+
 @app.post("/api/threads/catch-up")
-def catch_up_missed_messages(db: Session = Depends(get_db)):
-    """Draft one oldest unanswered conversation per call; never dispatch externally."""
+async def catch_up_missed_messages():
+    """Run a bounded catch-up slice outside the request event loop."""
     if not AUTO_REPLY_GLOBAL_ENABLED:
         raise HTTPException(status_code=409, detail="Turn AI on before catching up missed messages.")
+    return await asyncio.to_thread(_run_scheduled_catch_up)
 
-    candidate = find_oldest_catch_up_candidate(db)
-    if not candidate:
-        return {"processed": False, "outcome": "complete", "remaining": 0}
 
-    thread, customer_message = candidate
-    thread_id = thread.id
-    try:
-        run_sms_reply_logic(
-            db,
-            thread_id,
-            customer_message.text,
-            customer_message.provider_message_id or "catch-up",
-            customer_message.at,
-            dispatch_sms=False,
-            draft_only=True,
-        )
-    except Exception as exc:
-        db.rollback()
-        thread = db.query(Thread).filter(Thread.id == thread_id).first()
-        if thread:
-            thread.state = "needs-review"
-            db.add(ThreadEvent(
-                id=str(uuid.uuid4()),
-                thread_id=thread.id,
-                type="information-request",
-                agent_id=None,
-                meta=json.dumps({
-                    "reason": f"Catch-up failed: {type(exc).__name__}",
-                    "status": "pending",
-                    "customer_message_id": customer_message.id,
-                }),
-                at=datetime.utcnow(),
-            ))
-            db.commit()
-        return {
-            "processed": True,
-            "threadId": thread_id,
-            "outcome": "information-request",
-            "remaining": len(list_catch_up_candidates(db)),
-        }
+async def catch_up_scheduler() -> None:
+    """Periodically resume catch-up without occupying live inbound request workers."""
+    while True:
+        await asyncio.sleep(CATCH_UP_SCHEDULE_SECONDS)
+        await asyncio.to_thread(_run_scheduled_catch_up)
 
-    latest = db.query(Message).filter(Message.thread_id == thread_id).order_by(
-        Message.at.desc(), Message.id.desc()
-    ).first()
-    outcome = "draft" if latest and latest.role == "draft" else "information-request"
-    return {
-        "processed": True,
-        "threadId": thread_id,
-        "outcome": outcome,
-        "remaining": len(list_catch_up_candidates(db)),
-    }
+
+@app.on_event("startup")
+async def start_catch_up_scheduler() -> None:
+    asyncio.create_task(catch_up_scheduler())
 
 
 @app.get("/api/threads/{thread_id}")
@@ -7354,6 +7587,7 @@ def _operations_recent_failures(db: Session, limit: int) -> Dict[str, Any]:
         "ai-reply-missed",
         "ai-reply-skipped",
         "draft-created",
+        "catch-up-failed",
     }
     events = (
         db.query(ThreadEvent)
@@ -7369,6 +7603,10 @@ def _operations_recent_failures(db: Session, limit: int) -> Dict[str, Any]:
         except (TypeError, json.JSONDecodeError):
             return {}
 
+    catch_up = db.query(CatchUpCursor).filter(
+        CatchUpCursor.failure_count > 0,
+    ).order_by(CatchUpCursor.updated_at.desc()).limit(max(1, min(50, limit))).all()
+
     return {
         "status": "ok",
         "events": [
@@ -7379,6 +7617,18 @@ def _operations_recent_failures(db: Session, limit: int) -> Dict[str, Any]:
                 "meta": safe_meta(item.meta),
             }
             for item in events
+        ],
+        "catch_up": [
+            {
+                "account_key": item.account_key,
+                "status": item.status,
+                "processed_count": item.processed_count,
+                "skipped_count": item.skipped_count,
+                "failure_count": item.failure_count,
+                "last_error": item.last_error,
+                "updated_at": item.updated_at.isoformat() + "Z",
+            }
+            for item in catch_up
         ],
     }
 
