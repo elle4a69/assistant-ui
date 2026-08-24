@@ -825,6 +825,7 @@ def test_realtime_session_uses_server_key_and_current_voice_model(monkeypatch):
     assert b'find_message_threads' in request.data
     assert b'inspect_message_thread' in request.data
     assert b'start_coding_task' in request.data
+    assert b'"strict": true' not in request.data
     assert "execute_code_deployment" not in main.OPERATIONS_VOICE_TOOL_NAMES
     assert "execute_runtime_change" not in main.OPERATIONS_VOICE_TOOL_NAMES
     assert b'Check the earlier repair' in request.data

@@ -7295,7 +7295,11 @@ def create_operations_realtime_session(
             voice_read_access=True,
             conversation=conversation,
         ),
-        "tools": OPERATIONS_VOICE_TOOL_SCHEMAS,
+        # Realtime rejects the Responses API's otherwise-valid `strict` tool option.
+        "tools": [
+            {key: value for key, value in schema.items() if key != "strict"}
+            for schema in OPERATIONS_VOICE_TOOL_SCHEMAS
+        ],
         "tool_choice": "auto",
         "parallel_tool_calls": False,
         "max_output_tokens": 1200,
