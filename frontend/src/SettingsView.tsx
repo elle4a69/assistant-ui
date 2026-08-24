@@ -1267,7 +1267,7 @@ export default function SettingsView() {
                     rows={8}
                     className="w-full text-xs font-mono bg-slate-900 text-slate-200 border border-slate-805 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
-                  <p className="text-[10px] text-slate-400">Defines constraints, timezone rules, persona, and response formatting. Business variable tokens can be used here.</p>
+                  <p className="text-[10px] text-slate-400">Defines shared tone and formatting. Server-enforced professional boundaries, booking redirection, and separate Tori/Anonymous identities apply to both SMS lines and cannot be overridden here. Business variable tokens can be used here.</p>
                 </div>
 
                 {/* User Prompt */}

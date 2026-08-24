@@ -153,7 +153,7 @@ def test_first_contact_greeting_is_selected_by_inbound_sms_account(monkeypatch):
     db.close()
 
 
-def test_secondary_line_is_anonymous_autoresponder_only(monkeypatch):
+def test_both_lines_use_their_isolated_conversational_ai_account(monkeypatch):
     db = make_db()
     monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
     monkeypatch.setattr(
@@ -198,14 +198,16 @@ def test_secondary_line_is_anonymous_autoresponder_only(monkeypatch):
         "received_at": "2026-08-13 10:00:01",
     })
 
-    assert secondary["autoresponder_only"] is True
+    assert secondary.get("autoresponder_only") is None
     assert primary.get("autoresponder_only") is None
-    assert ai_calls == [("primary", "Hello Tori")]
-    skipped = db.query(main.ThreadEvent).filter(
+    assert ai_calls == [
+        ("secondary", "Who is this?"),
+        ("primary", "Hello Tori"),
+    ]
+    assert db.query(main.ThreadEvent).filter(
         main.ThreadEvent.thread_id == secondary["thread_id"],
         main.ThreadEvent.type == "ai-reply-skipped",
-    ).one()
-    assert "account-autoresponder-only" in skipped.meta
+    ).count() == 0
     db.close()
 
 

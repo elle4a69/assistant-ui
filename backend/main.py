@@ -2148,11 +2148,187 @@ FIRST_CONTACT_AUTORESPONDER_DEFAULT = {
 }
 
 FIRST_CONTACT_ACCOUNT_KEYS = ("primary", "secondary")
-CONVERSATIONAL_AI_ACCOUNT_KEYS = frozenset({"primary"})
+CONVERSATIONAL_AI_ACCOUNT_KEYS = frozenset(FIRST_CONTACT_ACCOUNT_KEYS)
+
+ACCOUNT_CONVERSATION_POLICIES: Dict[str, Dict[str, str]] = {
+    "primary": {"identity": "Tori", "service_hint": ""},
+    "secondary": {"identity": "Anonymous", "service_hint": "anonymous"},
+}
+
+RELATIONSHIP_REQUEST_PATTERN = re.compile(
+    r"\b(?:dinner|drinks?|coffee|date me|go on a date|girlfriend|boyfriend|partner|"
+    r"relationship|be (?:my )?friends?|friendship|hang out|meet outside|outside (?:of )?work|"
+    r"personal (?:phone|number|mobile)|private (?:phone|number|mobile)|whatsapp|telegram|"
+    r"off[- ]platform|exclusive|only see me|just (?:you and me|us)|fall in love|marry me|"
+    r"text you anytime|call you anytime|always be there for me)\b",
+    re.IGNORECASE,
+)
+SOCIAL_CHAT_PATTERN = re.compile(
+    r"\b(?:hey|hi|hello|how are you|how's your day|hows your day|what are you doing|"
+    r"thinking of you|miss you|love you|beautiful|gorgeous|sexy|babe|baby|sweetheart|"
+    r"lonely|talk to me|keep me company|chat with me|tell me about yourself|"
+    r"favourite|favorite|for fun|your hobbies|tell me a secret|where did you grow up|"
+    r"what music|what movies?|what are you wearing)\b",
+    re.IGNORECASE,
+)
+BOOKING_OR_SERVICE_PATTERN = re.compile(
+    r"\b(?:book|booking|appointment|session|service|services|rate|rates|price|cost|"
+    r"available|availability|free (?:today|tonight|tomorrow)|time|times|duration|"
+    r"incall|outcall|address|location|deposit|confirm|cancel|reschedule|arriv|"
+    r"photo|picture|privacy|discreet|boundary|include|offer|provide|website)\w*\b",
+    re.IGNORECASE,
+)
+UNSAFE_RELATIONSHIP_REPLY_PATTERNS = (
+    r"\b(?:i(?:'d| would) love to|let's|we can) (?:go (?:to|for)|have) (?:dinner|drinks?|coffee)\b",
+    r"\b(?:i can be|i(?:'ll| will) be|be) your (?:girlfriend|partner|friend)\b",
+    r"\bi(?:'m| am) always (?:here|available) for you\b",
+    r"\b(?:my personal (?:number|phone)|message me on (?:whatsapp|telegram))\b",
+    r"\b(?:just|only) (?:you and me|the two of us)\b",
+)
+
+
+def account_conversation_policy(account_key: str) -> Dict[str, str]:
+    """Return an immutable policy for one SMS account without cross-account fallback."""
+    return ACCOUNT_CONVERSATION_POLICIES.get(
+        account_key,
+        {"identity": "the service provider", "service_hint": ""},
+    )
+
+
+def is_relationship_request(text: str) -> bool:
+    return bool(RELATIONSHIP_REQUEST_PATTERN.search(text or ""))
+
+
+def is_non_booking_social_turn(text: str) -> bool:
+    value = text or ""
+    return bool(
+        (SOCIAL_CHAT_PATTERN.search(value) or RELATIONSHIP_REQUEST_PATTERN.search(value))
+        and not BOOKING_OR_SERVICE_PATTERN.search(value)
+    )
+
+
+def consecutive_non_booking_social_turns(history_messages: List[Any]) -> int:
+    """Count recent customer social turns, stopping at genuine service progress."""
+    count = 0
+    for message in reversed(history_messages):
+        if getattr(message, "role", None) != "customer":
+            continue
+        text = str(getattr(message, "text", ""))
+        if BOOKING_OR_SERVICE_PATTERN.search(text):
+            break
+        if is_non_booking_social_turn(text):
+            count += 1
+            continue
+        break
+    return count
+
+
+def _service_for_conversation(account_key: str, customer_text: str) -> Optional[Dict[str, Any]]:
+    services = [item for item in load_booking_services() if isinstance(item, dict) and item.get("name")]
+    if not services:
+        return None
+    policy = account_conversation_policy(account_key)
+    hint = policy.get("service_hint", "").casefold()
+    if hint:
+        candidates = [
+            item for item in services
+            if hint in str(item.get("name", "")).casefold()
+        ]
+        if not candidates:
+            return None
+    else:
+        candidates = [
+            item for item in services
+            if not any(
+                other.get("service_hint", "").casefold() in str(item.get("name", "")).casefold()
+                for key, other in ACCOUNT_CONVERSATION_POLICIES.items()
+                if key != account_key and other.get("service_hint")
+            )
+        ] or services
+    words = set(re.findall(r"[a-z0-9]+", (customer_text or "").casefold()))
+    return max(
+        candidates,
+        key=lambda item: len(words & set(re.findall(r"[a-z0-9]+", str(item.get("name", "")).casefold()))),
+    )
+
+
+def _service_price_phrase(account_key: str, customer_text: str) -> str:
+    service = _service_for_conversation(account_key, customer_text)
+    if not service:
+        return "I only offer professional in-person appointments"
+    name = str(service.get("name", "appointment")).strip()
+    price = service.get("price")
+    if price in (None, ""):
+        return f"I offer {name} as a professional in-person appointment"
+    if isinstance(price, float) and price.is_integer():
+        price = int(price)
+    price_text = str(price).strip()
+    if not price_text.startswith("$"):
+        price_text = f"${price_text}"
+    return f"I offer {name} as a professional in-person appointment for {price_text}"
+
+
+def conversation_policy_instructions(account_key: str, social_turns: int) -> str:
+    identity = account_conversation_policy(account_key)["identity"]
+    return f"""Account-scoped customer relationship policy:
+- This SMS account is {identity}. Never identify as or borrow the persona of another account.
+- This is a professional service conversation, not personal availability or a real friendship, date, romance, or exclusive relationship.
+- Light, customer-led flirting may be acknowledged briefly, but never imply emotional dependence, personal availability, exclusivity, off-platform contact, dinner/drink dates, friendship, or dating.
+- Introduce the relevant in-person service and exact supplied price in the first substantive reply when relevant, otherwise no later than the next reply. Never invent a price.
+- Move naturally toward the service, availability, and booking. Do not repeatedly pressure the customer.
+- At most two non-booking social customer turns may receive social acknowledgement. On the third, redirect once or close politely. Never ask an open social question merely to prolong chatting.
+- This conversation currently has {social_turns} consecutive non-booking social customer turn(s)."""
+
+
+def enforce_customer_conversation_policy(
+    account_key: str,
+    customer_text: str,
+    proposed_reply: str,
+    history_messages: List[Any],
+) -> str:
+    """Apply deterministic relationship and loop safeguards to every reply source."""
+    identity = account_conversation_policy(account_key)["identity"]
+    proposed_reply = proposed_reply or ""
+    for key, other_policy in ACCOUNT_CONVERSATION_POLICIES.items():
+        other_identity = other_policy["identity"]
+        if key != account_key:
+            proposed_reply = re.sub(
+                rf"\b(?:I am|I'm)\s+{re.escape(other_identity)}\b",
+                f"I'm {identity}",
+                proposed_reply,
+                flags=re.IGNORECASE,
+            )
+    social_turns = consecutive_non_booking_social_turns(history_messages)
+    disclosure = _service_price_phrase(account_key, customer_text)
+    relationship_request = is_relationship_request(customer_text)
+    unsafe_generated = any(
+        re.search(pattern, proposed_reply, re.IGNORECASE)
+        for pattern in UNSAFE_RELATIONSHIP_REPLY_PATTERNS
+    )
+
+    if social_turns >= 3:
+        return (
+            f"I keep this line for professional bookings, so I'll leave the social chat there. "
+            f"{disclosure}. If you'd like an appointment with {identity}, send the service and time you want."
+        )
+    if relationship_request or unsafe_generated:
+        return (
+            f"That's sweet, but I keep things professional and don't do personal dates or relationships. "
+            f"{disclosure}. If that suits you, what day were you looking to book?"
+        )
+    if is_non_booking_social_turn(customer_text):
+        normalized = proposed_reply.casefold()
+        service = _service_for_conversation(account_key, customer_text)
+        price = service.get("price") if service else None
+        has_price = price not in (None, "") and str(price).lstrip("$") in normalized
+        has_service = bool(service and str(service.get("name", "")).casefold() in normalized)
+        if not (has_price and has_service):
+            return f"{proposed_reply.strip()} {disclosure}. What day were you looking to book?".strip()
+    return proposed_reply
 
 
 def account_allows_conversational_ai(account_key: str) -> bool:
-    """Keep Anonymous on Line 2 isolated from Tori's shared AI and Q&A rules."""
+    """Enable only accounts with explicit, isolated conversation policies."""
     return account_key in CONVERSATIONAL_AI_ACCOUNT_KEYS
 
 
@@ -3731,6 +3907,10 @@ def run_sms_reply_logic(
                 examples,
                 STYLE_PROFILE_STORE.get_applied(),
             )
+            instructions += "\n\n" + conversation_policy_instructions(
+                thread.sms_account_key,
+                consecutive_non_booking_social_turns(history_msgs),
+            )
             instructions += (
                 "\n\nSafety rule: never send a holding response such as 'I'll get back to you', "
                 "'I can't check that right now', 'just a sec', or similar. If the supplied facts "
@@ -3974,6 +4154,14 @@ def run_sms_reply_logic(
 
     if booking_confirmed and booking_arrival_link and assistant_reply and booking_arrival_link not in assistant_reply:
         assistant_reply = f"{assistant_reply.rstrip()}\n\nWhen you arrive, tap: {booking_arrival_link}"
+
+    if assistant_reply:
+        assistant_reply = enforce_customer_conversation_policy(
+            thread.sms_account_key,
+            effective_body,
+            assistant_reply,
+            history_msgs,
+        )
 
     rejected_reply_reason = rejected_reply_reason or unsafe_ai_reply_reason(
         assistant_reply or "",
