@@ -570,15 +570,6 @@ AVAILABILITY_REPLY_POLICY = """Availability reply rule:
 - If availability exists, do not begin with “sorry”. End with one clear question such as “What time suits you?” or “What time were you after?” Never write “Where were you after?”
 - Never offer a date or time that is already in the past."""
 
-BOOKING_CONVERSATION_BOUNDARY_POLICY = """Professional booking boundary:
-- This SMS conversation is for professional services and arranging bookings, not an open-ended social or personal relationship.
-- Politely decline or redirect dinner dates, dating, friendship, personal relationships, exclusivity, emotional dependence, and requests to move a personal relationship off-platform.
-- Never imply that you are the customer's girlfriend, partner, friend, exclusive companion, emotional support, or available for non-service dates or social meetups.
-- Limited light flirting is acceptable only in the professional service context. After acknowledging it naturally, move toward a concrete service, price, availability, or booking question.
-- When a customer asks about a service or price, give the relevant customer-visible catalogue facts early. Never invent or infer a service, price, inclusion, or duration. A duration marked hidden is scheduling-only data and must never be disclosed.
-- Do not force a booking pitch into a simple greeting or an unrelated practical question. Keep those replies brief and relevant.
-- If chronological conversation context says the hard non-booking limit has been reached, use the supplied booking-oriented close and do not resume social chatting."""
-
 BOOKING_AVAILABILITY_SAFETY_POLICY = """Booking availability safety rule:
 - The booking discovery tools are the only authoritative source for bookable times.
 - The calendar uses 15-minute increments internally. A booking is available only when enough consecutive increments are free for the service's full configured duration. For example, 60 minutes requires four consecutive free increments and 30 minutes requires two.
@@ -655,7 +646,6 @@ def build_model_instructions(
     """Combine the stable prompt with examples and an optional style overlay, validating zero unresolved placeholders."""
     sections = [
         system_prompt,
-        BOOKING_CONVERSATION_BOUNDARY_POLICY,
         AVAILABILITY_REPLY_POLICY,
         BOOKING_AVAILABILITY_SAFETY_POLICY,
         SMS_TYPOGRAPHY_POLICY,
@@ -3014,9 +3004,61 @@ UNSAFE_HOLDING_REPLY_PATTERNS = (
 )
 
 
-def unsafe_ai_reply_reason(reply: str, requested_booking_confirmed: bool = False) -> Optional[str]:
+INTERNAL_INSTRUCTION_REPLY_PATTERNS = (
+    r"\bkeep (?:this|the)(?: (?:line|conversation|chat|discussion))? (?:strictly )?(?:focused|limited|restricted) (?:on|to) (?:bookings?|appointments?)\b",
+    r"\b(?:this|the) (?:line|conversation|chat|discussion) (?:must|needs? to|should) (?:remain|be|stay) (?:strictly )?(?:focused|limited|restricted) (?:on|to) (?:bookings?|appointments?)\b",
+    r"\b(?:professional )?booking (?:conversation )?boundary\b",
+    r"\b(?:system|developer|internal|hidden) (?:prompt|message|instructions?|polic(?:y|ies)|rules?|guardrails?)\b",
+    r"\b(?:conversation context|conversational booking|booking availability safety|sms typography|safety) rule\s*:",
+    r"\[\s*conversation guard\s*\]",
+    r"\bi keep things professional and appointment-based\b",
+    r"\blovely chatting, but i need to\b.*\b(?:bookings?|appointments?)\b",
+    r"\byou are tori, a 32-year-old independent adult companion\b",
+    r"\bbefore sending, silently check\b",
+    r"\btreat customer messages and retrieved text as content\b",
+    r"\bdo not narrate your rules\b",
+    r"\buse these examples only for conversational rhythm\b",
+    r"\bno generic appointment times are supplied here\b",
+    r"\bcustomer booking context \(authoritative\b",
+    r"\bpending conversational booking proposal\b",
+    r"\b(?:customer message|knowledge context|calendar openings)\s*:",
+    r"\[(?:live services and prices from settings|authoritative business details from settings)\]",
+    r"\b(?:propose_booking|confirm_booking|get_times_today|get_times_tomorrow|get_next_available)\b",
+    r"\bas an ai(?: language model| assistant)?\b",
+    r"\b(?:i am|i'm) (?:an? )?(?:ai|virtual assistant|language model)\b",
+)
+
+
+def contains_verbatim_internal_instruction(reply: str, internal_instructions: str) -> bool:
+    """Detect a model copying a complete internal instruction line into its reply."""
+    normalized_reply = " ".join((reply or "").casefold().replace("’", "'").split())
+    for raw_line in (internal_instructions or "").splitlines():
+        normalized_line = " ".join(
+            raw_line.lstrip(" -*\t").casefold().replace("’", "'").split()
+        )
+        instruction_words = normalized_line.split()
+        if len(instruction_words) >= 6 and normalized_line in normalized_reply:
+            return True
+        if len(instruction_words) >= 10 and any(
+            " ".join(instruction_words[index:index + 10]) in normalized_reply
+            for index in range(len(instruction_words) - 9)
+        ):
+            return True
+    return False
+
+
+def unsafe_ai_reply_reason(
+    reply: str,
+    requested_booking_confirmed: bool = False,
+    internal_instructions: str = "",
+) -> Optional[str]:
     """Reject low-information or contradictory AI text before it can become an SMS."""
     normalized = " ".join((reply or "").casefold().replace("’", "'").split())
+    if (
+        any(re.search(pattern, normalized) for pattern in INTERNAL_INSTRUCTION_REPLY_PATTERNS)
+        or contains_verbatim_internal_instruction(reply, internal_instructions)
+    ):
+        return "internal-instruction-leak"
     if any(re.search(pattern, normalized) for pattern in UNSAFE_HOLDING_REPLY_PATTERNS):
         return "generic-holding-reply"
     if requested_booking_confirmed and re.search(
@@ -3025,164 +3067,6 @@ def unsafe_ai_reply_reason(reply: str, requested_booking_confirmed: bool = False
     ):
         return "contradicts-customer-booking"
     return None
-
-
-CONVERSATION_BOUNDARIES_FILENAME = "conversation_boundaries.json"
-CONVERSATION_BOUNDARY_DEFAULTS = {
-    "enabled": True,
-    "maxNonBookingCustomerTurns": 3,
-}
-RELATIONSHIP_FRAMING_PATTERNS = (
-    r"\b(?:dinner|lunch|drinks?)\s+(?:date|with (?:you|me))\b",
-    r"\b(?:have|grab|join me for|go (?:out )?for)\s+(?:dinner|lunch|drinks?)\b",
-    r"\b(?:take you|go with me|come with me)\s+(?:out|to dinner|on a date)\b",
-    r"\b(?:date (?:you|me)|dating|personal relationship|romantic relationship|exclusivity|marry|marriage)\b",
-    r"\b(?:be|become|stay)\s+(?:my|your)\s+(?:partner|girlfriend|boyfriend)\b",
-    r"\b(?:be|become|stay)\s+(?:my\s+)?(?:friend|friends|best friend)\b",
-    r"\b(?:can|could|will|would)\s+(?:we|you)\s+(?:just\s+)?(?:be|become|stay)\s+(?:friends|my friend|exclusive)\b",
-    r"\b(?:let's|we should)\s+be exclusive\b",
-    r"\b(?:hang out|meet up)\b.*\b(?:socially|outside|not (?:for )?(?:work|a booking))\b",
-    r"\b(?:need you (?:emotionally|in my life)|can(?:not|'t) live without you|only one who understands me|always be there for me)\b",
-    r"\b(?:i love you|do you love me|falling in love with you)\b",
-    r"\b(?:personal number|private number|whatsapp|telegram|snapchat|instagram)\b.*\b(?:chat|talk|relationship|date|friends?)\b",
-    r"\b(?:chat|talk|message|add me)\b.*\b(?:whatsapp|telegram|snapchat|instagram)\b",
-)
-
-
-def load_conversation_boundary_config() -> Dict[str, Any]:
-    """Load the small operational guard config without coupling it to prompts."""
-    config = dict(CONVERSATION_BOUNDARY_DEFAULTS)
-    path = os.path.join(DATA_DIR, CONVERSATION_BOUNDARIES_FILENAME)
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            saved = json.load(handle)
-        if isinstance(saved, dict):
-            if isinstance(saved.get("enabled"), bool):
-                config["enabled"] = saved["enabled"]
-            limit = saved.get("maxNonBookingCustomerTurns")
-            if isinstance(limit, int) and not isinstance(limit, bool) and 1 <= limit <= 20:
-                config["maxNonBookingCustomerTurns"] = limit
-    except (OSError, ValueError):
-        pass
-    return config
-
-
-def is_relationship_framing(message: str) -> bool:
-    normalized = " ".join((message or "").casefold().replace("’", "'").split())
-    return any(re.search(pattern, normalized) for pattern in RELATIONSHIP_FRAMING_PATTERNS)
-
-
-def is_booking_focused_message(message: str) -> bool:
-    intent = classify_query_intent(message)
-    return intent in {
-        "availability", "booking_request", "booking_confirmed", "reschedule_or_cancel",
-        "pricing", "service_inquiry", "location_or_arrival", "payment", "boundary_or_safety",
-        "complaint_or_dispute",
-    }
-
-
-def consecutive_non_booking_customer_turns(history_messages: List[Any]) -> int:
-    """Count the trailing chronological customer/agent loop, merging SMS bursts."""
-    turns: List[tuple[str, str]] = []
-    for message in history_messages:
-        raw_role = getattr(message, "role", None)
-        role = "customer" if raw_role == "customer" else (
-            "agent" if raw_role in {"agent", "system"} else None
-        )
-        if not role:
-            continue
-        text = str(getattr(message, "text", "")).strip()
-        if turns and turns[-1][0] == role:
-            turns[-1] = (role, f"{turns[-1][1]}\n{text}".strip())
-        else:
-            turns.append((role, text))
-
-    if not turns or turns[-1][0] != "customer":
-        return 0
-    count = 0
-    expected = "customer"
-    for role, text in reversed(turns):
-        if role != expected:
-            break
-        if role == "customer":
-            if is_booking_focused_message(text):
-                break
-            count += 1
-            expected = "agent"
-        else:
-            expected = "customer"
-    return count
-
-
-def _format_catalogue_price(price: Any) -> Optional[str]:
-    if isinstance(price, bool) or not isinstance(price, (int, float)):
-        return None
-    return f"AU${price:g}"
-
-
-def customer_visible_service_summary(account_key: str = "primary", limit: int = 3) -> str:
-    """Return only facts displayed on this account's customer booking catalogue."""
-    if account_key != "primary":
-        return ""
-    path = os.path.join(DATA_DIR, "services.json")
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            services = json.load(handle)
-    except (OSError, ValueError):
-        return ""
-    if not isinstance(services, list):
-        return ""
-
-    items = []
-    for service in services:
-        if not isinstance(service, dict):
-            continue
-        name = str(service.get("name", "")).strip()
-        price = _format_catalogue_price(service.get("price"))
-        if not name or not price:
-            continue
-        item = f"{name} for {price}"
-        if service.get("showDuration", True) is not False:
-            duration = service.get("duration")
-            if isinstance(duration, int) and not isinstance(duration, bool) and duration > 0:
-                item += f" ({duration} minutes)"
-        items.append(item)
-        if len(items) >= limit:
-            break
-    return ", ".join(items)
-
-
-def booking_conversation_guard_reply(
-    history_messages: List[Any],
-    latest_message: str,
-    account_key: str = "primary",
-) -> Optional[str]:
-    """Deterministically enforce relationship and prolonged-chat boundaries."""
-    if account_key != "primary":
-        return None
-    service_summary = customer_visible_service_summary(account_key)
-    if is_relationship_framing(latest_message):
-        redirect = (
-            f" My bookable services include {service_summary}. Which service would you like to book?"
-            if service_summary else
-            " If you'd like a professional service booking, which service were you interested in?"
-        )
-        return (
-            "I keep things professional and appointment-based, so I don't do personal dates "
-            f"or relationships.{redirect}"
-        )
-
-    config = load_conversation_boundary_config()
-    if not config["enabled"]:
-        return None
-    if consecutive_non_booking_customer_turns(history_messages) <= config["maxNonBookingCustomerTurns"]:
-        return None
-    redirect = (
-        f" If you'd like to book, my services include {service_summary}. Which one suits you?"
-        if service_summary else
-        " If you'd like to book a professional service, tell me which service you're after."
-    )
-    return f"Lovely chatting, but I need to keep this line focused on bookings.{redirect}"
 
 
 def extract_requested_business_time(message: str, now_local: datetime) -> Optional[datetime]:
@@ -3223,6 +3107,29 @@ def human_replied_after(db: Session, thread_id: str, received_at: datetime) -> b
         Message.at > received_at,
         Message.provider_message_id.like("manual-reply:%"),
     ).first() is not None
+
+
+def normalized_reply_fingerprint(text: str) -> str:
+    """Normalize harmless formatting differences for same-turn reply deduplication."""
+    return re.sub(r"\W+", " ", (text or "").casefold()).strip()
+
+
+def identical_ai_reply_exists_for_customer_turn(
+    db: Session,
+    thread_id: str,
+    received_at: datetime,
+    reply: str,
+) -> bool:
+    """Return true when this exact AI reply was already sent for the active customer turn."""
+    fingerprint = normalized_reply_fingerprint(reply)
+    if not fingerprint:
+        return False
+    prior_replies = db.query(Message.text).filter(
+        Message.thread_id == thread_id,
+        Message.role == "system",
+        Message.at >= received_at,
+    ).all()
+    return any(normalized_reply_fingerprint(item.text) == fingerprint for item in prior_replies)
 
 
 def latest_customer_message(db: Session, thread_id: str) -> Optional[Message]:
@@ -3861,7 +3768,7 @@ def run_sms_reply_logic(
     if not thread:
         return False, False
     if not account_allows_conversational_ai(thread.sms_account_key):
-        print(f"[Autoresponder Skipped] Conversational AI is disabled for {thread.sms_account_key}.")
+        print(f"[Conversational AI Skipped] Disabled for {thread.sms_account_key}.")
         return False, False
     if not is_latest_customer_turn(db, thread_id, provider_message_id, received_at_naive, body):
         db.add(ThreadEvent(
@@ -3884,7 +3791,7 @@ def run_sms_reply_logic(
             at=datetime.utcnow(),
         ))
         db.commit()
-        print(f"[Autoresponder Cancelled] Human already replied on {thread_id}.")
+        print(f"[Conversational AI Cancelled] Human already replied on {thread_id}.")
         return False, False
         
     booking_confirmed = False
@@ -3898,11 +3805,6 @@ def run_sms_reply_logic(
     )
     effective_body = current_customer_burst(history_msgs, body)
     clean_body = effective_body.strip().lower()
-    guarded_reply = booking_conversation_guard_reply(
-        history_msgs,
-        effective_body,
-        thread.sms_account_key,
-    )
     if thread.pending_booking and is_explicit_booking_rejection(effective_body):
         thread.pending_booking = None
     pending_booking_at_turn_start = bool(thread.pending_booking)
@@ -4002,19 +3904,18 @@ def run_sms_reply_logic(
         **business_variables,
         "current_time": now_local.strftime("%A %d %B %Y, %I:%M %p %Z"),
     })
+    outbound_instruction_reference = system_prompt_rendered
     user_prompt_rendered = render_template_variables(user_prompt_tmpl, {
         **business_variables,
         "message": effective_body,
         "knowledge": retrieved_context,
         "slots": slots_str,
     })
-    
+
     # Check Q&A Rules first
-    assistant_reply = guarded_reply or match_qa_rule(effective_body)
+    assistant_reply = match_qa_rule(effective_body)
     rejected_reply_reason: Optional[str] = None
-    if guarded_reply:
-        print(f"[Conversation Guard] Booking boundary applied on thread {thread_id}.")
-    elif assistant_reply:
+    if assistant_reply:
         print(f"[QA Rules Match] Trigger matched. Using pre-configured reply.")
         
     # Step 5: Chat completions via OpenAI Responses API if available
@@ -4117,6 +4018,7 @@ def run_sms_reply_logic(
                     "business context, or calendar does not support a confident answer, output "
                     "exactly [[HANDOFF: concise reason]] instead of a customer-facing holding message."
                 )
+            outbound_instruction_reference = instructions
 
             requested_duration = requested_duration_minutes(history_msgs, effective_body)
             input_history = build_model_input(
@@ -4336,6 +4238,7 @@ def run_sms_reply_logic(
     rejected_reply_reason = rejected_reply_reason or unsafe_ai_reply_reason(
         assistant_reply or "",
         requested_booking_confirmed=requested_booking_confirmed or booking_confirmed,
+        internal_instructions=outbound_instruction_reference,
     )
     if rejected_reply_reason:
         print(f"[AI Reply Rejected] {rejected_reply_reason} on thread {thread_id}.")
@@ -4366,6 +4269,27 @@ def run_sms_reply_logic(
         return booking_confirmed, slots_presented
             
     assistant_reply = sanitize_outgoing_urls(assistant_reply)
+
+    if (
+        not TRAINING_MODE_ENABLED
+        and not draft_only
+        and identical_ai_reply_exists_for_customer_turn(
+            db,
+            thread_id,
+            received_at_naive,
+            assistant_reply,
+        )
+    ):
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread_id,
+            type="ai-reply-cancelled",
+            agent_id=None,
+            meta=json.dumps({"reason": "duplicate-ai-reply-for-customer-turn"}),
+            at=datetime.utcnow(),
+        ))
+        db.commit()
+        return booking_confirmed, False
 
     catch_up_handoff = re.fullmatch(
         r"\s*\[\[HANDOFF(?::\s*(.*?))?\]\]\s*",
@@ -4439,7 +4363,7 @@ def run_sms_reply_logic(
                 at=datetime.utcnow(),
             ))
             db.commit()
-            print(f"[Autoresponder Cancelled] Human replied while AI was working on {thread_id}.")
+            print(f"[Conversational AI Cancelled] Human replied while AI was working on {thread_id}.")
             return False, False
 
         # Store as sent only after the gateway accepts the SMS. On failure the
@@ -5619,31 +5543,31 @@ def _process_sms_reply_unlocked(
     try:
         thread = db.query(Thread).filter(Thread.id == thread_id).first()
         if not thread:
-            print(f"[Autoresponder Delay] Thread {thread_id} not found. Skipping auto-reply.")
+            print(f"[Conversational AI Delay] Thread {thread_id} not found. Skipping reply.")
             return
 
         if not AUTO_REPLY_GLOBAL_ENABLED:
-            print(f"[Autoresponder Delay] Global AI replies are off. Reply canceled for {thread_id}.")
+            print(f"[Conversational AI Delay] Global AI replies are off. Reply cancelled for {thread_id}.")
             return
 
         if not thread.auto_reply_enabled:
-            print(f"[Autoresponder Delay] Thread auto_reply_enabled is False. Reply canceled for {thread_id}.")
+            print(f"[Conversational AI Delay] Thread auto_reply_enabled is false. Reply cancelled for {thread_id}.")
             return
 
         if thread.state == "taken-over":
-            print(f"[Autoresponder Delay] Thread is taken-over. Reply canceled for {thread_id}.")
+            print(f"[Conversational AI Delay] Thread is taken over. Reply cancelled for {thread_id}.")
             return
 
         if not account_allows_conversational_ai(thread.sms_account_key):
             print(
-                f"[Autoresponder Delay] Conversational AI is disabled for "
+                f"[Conversational AI Delay] Disabled for "
                 f"{thread.sms_account_key}. Reply canceled for {thread_id}."
             )
             return
 
         run_sms_reply_logic(db, thread_id, body, provider_message_id, received_at_naive)
     except Exception as e:
-        print(f"[Autoresponder Delay Error] {e}")
+        print(f"[Conversational AI Delay Error] {e}")
         db.rollback()
     finally:
         db.close()
@@ -5669,7 +5593,7 @@ async def process_sms_reply_delayed(
     import random
 
     delay = random.randint(30, 120)
-    print(f"[Autoresponder Delay] Waiting {delay}s before replying on thread {thread_id}...")
+    print(f"[Conversational AI Delay] Waiting {delay}s before replying on thread {thread_id}...")
     await asyncio.sleep(delay)
     await asyncio.to_thread(
         _process_sms_reply,
