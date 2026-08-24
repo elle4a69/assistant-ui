@@ -556,6 +556,15 @@ AVAILABILITY_REPLY_POLICY = """Availability reply rule:
 - If availability exists, do not begin with “sorry”. End with one clear question such as “What time suits you?” or “What time were you after?” Never write “Where were you after?”
 - Never offer a date or time that is already in the past."""
 
+BOOKING_CONVERSATION_BOUNDARY_POLICY = """Professional booking boundary:
+- This SMS conversation is for professional services and arranging bookings, not an open-ended social or personal relationship.
+- Politely decline or redirect dinner dates, dating, friendship, personal relationships, exclusivity, emotional dependence, and requests to move a personal relationship off-platform.
+- Never imply that you are the customer's girlfriend, partner, friend, exclusive companion, emotional support, or available for non-service dates or social meetups.
+- Limited light flirting is acceptable only in the professional service context. After acknowledging it naturally, move toward a concrete service, price, availability, or booking question.
+- When a customer asks about a service or price, give the relevant customer-visible catalogue facts early. Never invent or infer a service, price, inclusion, or duration. A duration marked hidden is scheduling-only data and must never be disclosed.
+- Do not force a booking pitch into a simple greeting or an unrelated practical question. Keep those replies brief and relevant.
+- If chronological conversation context says the hard non-booking limit has been reached, use the supplied booking-oriented close and do not resume social chatting."""
+
 BOOKING_AVAILABILITY_SAFETY_POLICY = """Booking availability safety rule:
 - The booking discovery tools are the only authoritative source for bookable times.
 - The calendar uses 15-minute increments internally. A booking is available only when enough consecutive increments are free for the service's full configured duration. For example, 60 minutes requires four consecutive free increments and 30 minutes requires two.
@@ -632,6 +641,7 @@ def build_model_instructions(
     """Combine the stable prompt with examples and an optional style overlay, validating zero unresolved placeholders."""
     sections = [
         system_prompt,
+        BOOKING_CONVERSATION_BOUNDARY_POLICY,
         AVAILABILITY_REPLY_POLICY,
         BOOKING_AVAILABILITY_SAFETY_POLICY,
         SMS_TYPOGRAPHY_POLICY,
@@ -1396,12 +1406,14 @@ def search_knowledge(query: str, limit: int = 5) -> str:
     return "\n\n".join(output_parts)
 
 
-def get_live_services_context() -> str:
+def get_live_services_context(account_key: str = "primary") -> str:
     """Read the current Settings service catalogue for every AI reply.
 
     This intentionally avoids a cache: saving Settings should affect the very next
     conversation without a restart or a separate knowledge-base upload.
     """
+    if account_key != "primary":
+        return ""
     services_path = os.path.join(DATA_DIR, "services.json")
     if not os.path.exists(services_path):
         return ""
@@ -1431,7 +1443,7 @@ def get_live_services_context() -> str:
         if price is not None:
             details.append(f"Price: ${price}")
         duration = service.get("duration")
-        if duration is not None:
+        if duration is not None and service.get("showDuration", True) is not False:
             details.append(f"Duration: {duration} minutes")
         description = re.sub(
             r"\s+", " ", str(service.get("description", "")).strip()
@@ -1626,8 +1638,10 @@ def get_live_business_variables_context() -> str:
     return "\n".join(rendered)
 
 
-def build_business_context(query: str, limit: int = 3) -> str:
+def build_business_context(query: str, limit: int = 3, account_key: str = "primary") -> str:
     """Combine optional uploaded knowledge with authoritative live Settings."""
+    if account_key != "primary":
+        return "No relevant business records found."
     output_parts = []
     matched_chunks = retrieve_knowledge_chunks(query, limit=limit)
     for result in matched_chunks:
@@ -1638,7 +1652,7 @@ def build_business_context(query: str, limit: int = 3) -> str:
     if variables_context:
         output_parts.append(variables_context)
 
-    services_context = get_live_services_context()
+    services_context = get_live_services_context(account_key)
     if services_context:
         output_parts.append(services_context)
     return "\n\n".join(output_parts) or "No relevant business records found."
@@ -2844,6 +2858,7 @@ def propose_conversational_booking(
         "service_id": service["id"],
         "service_name": str(service.get("name") or "Appointment"),
         "duration": duration,
+        "show_duration": service.get("showDuration", True) is not False,
         "start_time": start.isoformat(),
         "customer_name": clean_name,
         "customer_phone": canonical_phone_number(thread.customer_phone),
@@ -2854,7 +2869,8 @@ def propose_conversational_booking(
         "status": "awaiting_confirmation",
         "proposal": proposal,
         "instruction": (
-            "Present every proposal field to the customer and ask them to confirm that it is correct. "
+            "Present the service, date, time, and customer name, then ask them to confirm. "
+            "Present the duration only when show_duration is true. "
             "Do not say it is booked or confirmed yet."
         ),
     }
@@ -2959,6 +2975,164 @@ def unsafe_ai_reply_reason(reply: str, requested_booking_confirmed: bool = False
     ):
         return "contradicts-customer-booking"
     return None
+
+
+CONVERSATION_BOUNDARIES_FILENAME = "conversation_boundaries.json"
+CONVERSATION_BOUNDARY_DEFAULTS = {
+    "enabled": True,
+    "maxNonBookingCustomerTurns": 3,
+}
+RELATIONSHIP_FRAMING_PATTERNS = (
+    r"\b(?:dinner|lunch|drinks?)\s+(?:date|with (?:you|me))\b",
+    r"\b(?:have|grab|join me for|go (?:out )?for)\s+(?:dinner|lunch|drinks?)\b",
+    r"\b(?:take you|go with me|come with me)\s+(?:out|to dinner|on a date)\b",
+    r"\b(?:date (?:you|me)|dating|personal relationship|romantic relationship|exclusivity|marry|marriage)\b",
+    r"\b(?:be|become|stay)\s+(?:my|your)\s+(?:partner|girlfriend|boyfriend)\b",
+    r"\b(?:be|become|stay)\s+(?:my\s+)?(?:friend|friends|best friend)\b",
+    r"\b(?:can|could|will|would)\s+(?:we|you)\s+(?:just\s+)?(?:be|become|stay)\s+(?:friends|my friend|exclusive)\b",
+    r"\b(?:let's|we should)\s+be exclusive\b",
+    r"\b(?:hang out|meet up)\b.*\b(?:socially|outside|not (?:for )?(?:work|a booking))\b",
+    r"\b(?:need you (?:emotionally|in my life)|can(?:not|'t) live without you|only one who understands me|always be there for me)\b",
+    r"\b(?:i love you|do you love me|falling in love with you)\b",
+    r"\b(?:personal number|private number|whatsapp|telegram|snapchat|instagram)\b.*\b(?:chat|talk|relationship|date|friends?)\b",
+    r"\b(?:chat|talk|message|add me)\b.*\b(?:whatsapp|telegram|snapchat|instagram)\b",
+)
+
+
+def load_conversation_boundary_config() -> Dict[str, Any]:
+    """Load the small operational guard config without coupling it to prompts."""
+    config = dict(CONVERSATION_BOUNDARY_DEFAULTS)
+    path = os.path.join(DATA_DIR, CONVERSATION_BOUNDARIES_FILENAME)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            saved = json.load(handle)
+        if isinstance(saved, dict):
+            if isinstance(saved.get("enabled"), bool):
+                config["enabled"] = saved["enabled"]
+            limit = saved.get("maxNonBookingCustomerTurns")
+            if isinstance(limit, int) and not isinstance(limit, bool) and 1 <= limit <= 20:
+                config["maxNonBookingCustomerTurns"] = limit
+    except (OSError, ValueError):
+        pass
+    return config
+
+
+def is_relationship_framing(message: str) -> bool:
+    normalized = " ".join((message or "").casefold().replace("’", "'").split())
+    return any(re.search(pattern, normalized) for pattern in RELATIONSHIP_FRAMING_PATTERNS)
+
+
+def is_booking_focused_message(message: str) -> bool:
+    intent = classify_query_intent(message)
+    return intent in {
+        "availability", "booking_request", "booking_confirmed", "reschedule_or_cancel",
+        "pricing", "service_inquiry", "location_or_arrival", "payment", "boundary_or_safety",
+        "complaint_or_dispute",
+    }
+
+
+def consecutive_non_booking_customer_turns(history_messages: List[Any]) -> int:
+    """Count the trailing chronological customer/agent loop, merging SMS bursts."""
+    turns: List[tuple[str, str]] = []
+    for message in history_messages:
+        raw_role = getattr(message, "role", None)
+        role = "customer" if raw_role == "customer" else (
+            "agent" if raw_role in {"agent", "system"} else None
+        )
+        if not role:
+            continue
+        text = str(getattr(message, "text", "")).strip()
+        if turns and turns[-1][0] == role:
+            turns[-1] = (role, f"{turns[-1][1]}\n{text}".strip())
+        else:
+            turns.append((role, text))
+
+    if not turns or turns[-1][0] != "customer":
+        return 0
+    count = 0
+    expected = "customer"
+    for role, text in reversed(turns):
+        if role != expected:
+            break
+        if role == "customer":
+            if is_booking_focused_message(text):
+                break
+            count += 1
+            expected = "agent"
+        else:
+            expected = "customer"
+    return count
+
+
+def _format_catalogue_price(price: Any) -> Optional[str]:
+    if isinstance(price, bool) or not isinstance(price, (int, float)):
+        return None
+    return f"AU${price:g}"
+
+
+def customer_visible_service_summary(account_key: str = "primary", limit: int = 3) -> str:
+    """Return only facts displayed on this account's customer booking catalogue."""
+    if account_key != "primary":
+        return ""
+    path = os.path.join(DATA_DIR, "services.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            services = json.load(handle)
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(services, list):
+        return ""
+
+    items = []
+    for service in services:
+        if not isinstance(service, dict):
+            continue
+        name = str(service.get("name", "")).strip()
+        price = _format_catalogue_price(service.get("price"))
+        if not name or not price:
+            continue
+        item = f"{name} for {price}"
+        if service.get("showDuration", True) is not False:
+            duration = service.get("duration")
+            if isinstance(duration, int) and not isinstance(duration, bool) and duration > 0:
+                item += f" ({duration} minutes)"
+        items.append(item)
+        if len(items) >= limit:
+            break
+    return ", ".join(items)
+
+
+def booking_conversation_guard_reply(
+    history_messages: List[Any],
+    latest_message: str,
+    account_key: str = "primary",
+) -> Optional[str]:
+    """Deterministically enforce relationship and prolonged-chat boundaries."""
+    if account_key != "primary":
+        return None
+    service_summary = customer_visible_service_summary(account_key)
+    if is_relationship_framing(latest_message):
+        redirect = (
+            f" My bookable services include {service_summary}. Which service would you like to book?"
+            if service_summary else
+            " If you'd like a professional service booking, which service were you interested in?"
+        )
+        return (
+            "I keep things professional and appointment-based, so I don't do personal dates "
+            f"or relationships.{redirect}"
+        )
+
+    config = load_conversation_boundary_config()
+    if not config["enabled"]:
+        return None
+    if consecutive_non_booking_customer_turns(history_messages) <= config["maxNonBookingCustomerTurns"]:
+        return None
+    redirect = (
+        f" If you'd like to book, my services include {service_summary}. Which one suits you?"
+        if service_summary else
+        " If you'd like to book a professional service, tell me which service you're after."
+    )
+    return f"Lovely chatting, but I need to keep this line focused on bookings.{redirect}"
 
 
 def extract_requested_business_time(message: str, now_local: datetime) -> Optional[datetime]:
@@ -3654,6 +3828,11 @@ def run_sms_reply_logic(
     )
     effective_body = current_customer_burst(history_msgs, body)
     clean_body = effective_body.strip().lower()
+    guarded_reply = booking_conversation_guard_reply(
+        history_msgs,
+        effective_body,
+        thread.sms_account_key,
+    )
     if thread.pending_booking and is_explicit_booking_rejection(effective_body):
         thread.pending_booking = None
     pending_booking_at_turn_start = bool(thread.pending_booking)
@@ -3674,6 +3853,8 @@ def run_sms_reply_logic(
             thread.pending_slots = None
     
     # Step 1: Read uploaded knowledge plus the authoritative live Settings catalogue.
+    # Only the primary account reaches this point; secondary is rejected above.
+    # Keep the one-argument call compatible with injected context loaders.
     retrieved_context = build_business_context(effective_body)
     
     now_local = current_business_time()
@@ -3704,9 +3885,14 @@ def run_sms_reply_logic(
         try:
             pending = json.loads(thread.pending_booking)
             pending_start = parse_business_datetime(pending["start_time"])
+            duration_guidance = (
+                f", {pending['duration']} minutes"
+                if pending.get("show_duration", True) else
+                ", duration is hidden customer-facing scheduling data and must not be stated"
+            )
             slots_str += (
                 "\nPending conversational booking proposal (not booked yet): "
-                f"{pending['service_name']}, {pending['duration']} minutes, "
+                f"{pending['service_name']}{duration_guidance}, "
                 f"{pending_start.strftime('%A %d %B %Y at %I:%M %p')}, "
                 f"customer {pending['customer_name']}. "
                 "Only confirm_booking can finalize it, and only after an explicit customer confirmation."
@@ -3754,9 +3940,11 @@ def run_sms_reply_logic(
     })
     
     # Check Q&A Rules first
-    assistant_reply = match_qa_rule(effective_body)
+    assistant_reply = guarded_reply or match_qa_rule(effective_body)
     rejected_reply_reason: Optional[str] = None
-    if assistant_reply:
+    if guarded_reply:
+        print(f"[Conversation Guard] Booking boundary applied on thread {thread_id}.")
+    elif assistant_reply:
         print(f"[QA Rules Match] Trigger matched. Using pre-configured reply.")
         
     # Step 5: Chat completions via OpenAI Responses API if available
@@ -3846,8 +4034,9 @@ def run_sms_reply_logic(
                 "Use the booking discovery tools for the current time, services, and live availability; "
                 "never invent a service or time. "
                 "First gather the customer's name, exact service, and exact offered time. Call "
-                "propose_booking, then present the complete service, date, time, duration, name, and any "
-                "notes and ask whether everything is correct. Only after the customer's next message "
+                "propose_booking, then present the complete service, date, time, name, and any notes and "
+                "ask whether everything is correct. Include duration only when show_duration is true. "
+                "Only after the customer's next message "
                 "explicitly confirms that summary may you call confirm_booking. Never ask the customer "
                 "to visit a form or webpage. Never claim a booking is confirmed unless confirm_booking "
                 "returns confirmed or already_confirmed."

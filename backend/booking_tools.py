@@ -163,17 +163,20 @@ class LegacyCalendarDiscoveryProvider:
         self.slot_interval_minutes = slot_interval_minutes
 
     def list_services(self) -> list[dict[str, Any]]:
-        return [
-            {
+        services = []
+        for service in self.services_loader():
+            if not isinstance(service, dict) or not service.get("id") or not service.get("name"):
+                continue
+            public_service = {
                 "id": str(service.get("id", "")),
                 "name": str(service.get("name", "")),
                 "description": service.get("description"),
-                "duration_minutes": int(service.get("duration", 60)),
                 "price": service.get("price"),
             }
-            for service in self.services_loader()
-            if isinstance(service, dict) and service.get("id") and service.get("name")
-        ]
+            if service.get("showDuration", True) is not False:
+                public_service["duration_minutes"] = int(service.get("duration", 60))
+            services.append(public_service)
+        return services
 
     def search_availability(
         self,
@@ -183,12 +186,15 @@ class LegacyCalendarDiscoveryProvider:
         limit: int,
     ) -> list[dict[str, Any]]:
         service = next(
-            (item for item in self.list_services() if item["id"] == service_id),
+            (
+                item for item in self.services_loader()
+                if isinstance(item, dict) and str(item.get("id", "")) == service_id
+            ),
             None,
         )
         if not service:
             raise BookingToolError("That service is not available.")
-        duration = timedelta(minutes=service["duration_minutes"])
+        duration = timedelta(minutes=max(1, int(service.get("duration", 60))))
         hours = {
             item.get("day"): item
             for item in self.working_hours_loader()
@@ -211,8 +217,8 @@ class LegacyCalendarDiscoveryProvider:
                         for item in busy
                     ):
                         slots.append({
-                            "service_id": service["id"],
-                            "service_name": service["name"],
+                            "service_id": str(service["id"]),
+                            "service_name": str(service["name"]),
                             "start_time": candidate.isoformat(),
                             "end_time": candidate_end.isoformat(),
                         })
@@ -342,7 +348,7 @@ BOOKING_DISCOVERY_TOOL_SCHEMAS = [
     {
         "type": "function",
         "name": "list_booking_services",
-        "description": "List the services currently available to book, with exact service IDs, duration and price.",
+        "description": "List the customer-visible services currently available to book, with exact service IDs and prices. Duration is included only when it is customer-visible.",
         "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         "strict": True,
     },

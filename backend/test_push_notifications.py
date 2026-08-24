@@ -140,7 +140,11 @@ def test_arrival_push_uses_nonsensitive_payload_and_disables_expired_subscriptio
 def test_due_arrival_alert_is_claimed_once_and_acknowledgement_stops_repeats(monkeypatch):
     _cleanup()
     delivered = []
-    monkeypatch.setattr(main, "send_arrival_push_notifications", delivered.append)
+    monkeypatch.setattr(
+        main,
+        "send_arrival_push_notifications",
+        lambda session_id, **_kwargs: delivered.append(session_id),
+    )
     now = datetime.utcnow()
     db = SessionLocal()
     try:
