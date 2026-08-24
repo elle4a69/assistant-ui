@@ -78,6 +78,28 @@ def test_secondary_account_cannot_receive_primary_prompt_knowledge_services_or_s
     db.add_all([thread, customer])
     db.commit()
 
+    calls = []
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return type("Response", (), {
+                "output": [],
+                "output_text": "Hello from Anonymous.",
+            })()
+
+    monkeypatch.setattr(
+        main,
+        "openai_client",
+        type("Client", (), {"responses": FakeResponses()})(),
+    )
+    monkeypatch.setattr(main.calendar_service, "get_customer_bookings", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "send_sms",
+        lambda *_args, **_kwargs: {"status": "success"},
+    )
+
     assert main.run_sms_reply_logic(
         db,
         thread.id,
@@ -88,5 +110,11 @@ def test_secondary_account_cannot_receive_primary_prompt_knowledge_services_or_s
     db.refresh(thread)
     assert thread.state == "auto-reply"
     assert thread.pending_slots == '[{"secondary": true}]'
-    assert db.query(Message).filter(Message.thread_id == thread.id).count() == 1
+    messages = db.query(Message).filter(Message.thread_id == thread.id).order_by(Message.at).all()
+    assert [message.text for message in messages] == ["Hello Anonymous", "Hello from Anonymous."]
+    assert "Tori-only knowledge" not in str(calls[0]["input"])
+    assert "Scalp Care" not in str(calls[0]["input"])
+    assert "Relaxation Session" not in str(calls[0]["input"])
+    assert "Tori" not in calls[0]["instructions"]
+    assert "Anonymous" in calls[0]["instructions"]
     db.close()

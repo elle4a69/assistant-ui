@@ -2283,11 +2283,11 @@ FIRST_CONTACT_AUTORESPONDER_DEFAULT = {
 }
 
 FIRST_CONTACT_ACCOUNT_KEYS = ("primary", "secondary")
-CONVERSATIONAL_AI_ACCOUNT_KEYS = frozenset({"primary"})
+CONVERSATIONAL_AI_ACCOUNT_KEYS = frozenset(FIRST_CONTACT_ACCOUNT_KEYS)
 
 
 def account_allows_conversational_ai(account_key: str) -> bool:
-    """Keep Anonymous on Line 2 isolated from Tori's shared AI and Q&A rules."""
+    """Allow conversational AI only for explicitly configured SMS accounts."""
     return account_key in CONVERSATIONAL_AI_ACCOUNT_KEYS
 
 
@@ -3824,10 +3824,15 @@ def run_sms_reply_logic(
         except (TypeError, json.JSONDecodeError):
             thread.pending_slots = None
     
-    # Step 1: Read uploaded knowledge plus the authoritative live Settings catalogue.
-    # Only the primary account reaches this point; secondary is rejected above.
-    # Keep the one-argument call compatible with injected context loaders.
-    retrieved_context = build_business_context(effective_body)
+    # Step 1: Read only the knowledge and Settings catalogue allowed for this account.
+    retrieved_context = (
+        build_business_context(effective_body)
+        if thread.sms_account_key == "primary"
+        else build_business_context(
+            effective_body,
+            account_key=thread.sms_account_key,
+        )
+    )
     
     now_local = current_business_time()
     reply_at_naive = datetime.utcnow()
@@ -3893,6 +3898,8 @@ def run_sms_reply_logic(
     if os.path.exists(system_prompt_path):
         with open(system_prompt_path, "r", encoding="utf-8") as f:
             system_prompt_tmpl = f.read()
+    if thread.sms_account_key == "secondary":
+        system_prompt_tmpl = re.sub(r"\bTori\b", "Anonymous", system_prompt_tmpl, flags=re.IGNORECASE)
             
     user_prompt_tmpl = "Customer message: {message}\nKnowledge context:\n{knowledge}\nCalendar openings:\n{slots}"
     if os.path.exists(user_prompt_path):
@@ -3913,7 +3920,11 @@ def run_sms_reply_logic(
     })
 
     # Check Q&A Rules first
-    assistant_reply = match_qa_rule(effective_body)
+    assistant_reply = (
+        match_qa_rule(effective_body)
+        if thread.sms_account_key == "primary"
+        else None
+    )
     rejected_reply_reason: Optional[str] = None
     if assistant_reply:
         print(f"[QA Rules Match] Trigger matched. Using pre-configured reply.")
