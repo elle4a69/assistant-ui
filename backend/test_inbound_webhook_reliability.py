@@ -370,7 +370,7 @@ def test_superseded_customer_fragment_cannot_generate_a_reply(monkeypatch):
 def test_model_input_consolidates_latest_customer_burst_with_deep_history():
     now = datetime.utcnow()
     history = []
-    for index in range(15):
+    for index in range(115):
         history.append(type("Stored", (), {
             "role": "customer" if index % 2 == 0 else "system",
             "text": f"historical-{index}",

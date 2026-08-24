@@ -562,6 +562,43 @@ def test_proposal_without_verified_live_time_is_rejected(monkeypatch):
     db.close()
 
 
+def test_evening_proposal_uses_authoritative_local_time_evidence(tmp_path, monkeypatch):
+    service = {"id": "service", "name": "Service", "duration": 30, "price": 100}
+    (tmp_path / "services.json").write_text(json.dumps([service]), encoding="utf-8")
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "load_working_hours", lambda: [
+        {"day": day, "enabled": True, "open": "00:00", "close": "23:59"}
+        for day in main.DAY_NAMES
+    ])
+    calendar = FakeCalendar()
+    monkeypatch.setattr(main, "calendar_service", calendar)
+    db = make_db()
+    thread = add_thread(db)
+    start = (current_business_time() + timedelta(days=2)).replace(
+        hour=20, minute=0, second=0, microsecond=0,
+    )
+    verified = [{
+        "service_id": "service",
+        "start": start.isoformat(),
+        "end": (start + timedelta(minutes=30)).isoformat(),
+    }]
+
+    assert main.booking_proposal_has_live_evidence(
+        "service", start.astimezone(main.timezone.utc).isoformat(), verified,
+    )
+    result = propose_conversational_booking(
+        thread,
+        service_id="service",
+        start_time=start.astimezone(main.timezone.utc).isoformat(),
+        customer_name="Example Customer",
+        notes=None,
+    )
+
+    assert result["proposal"]["start_time"] == start.isoformat()
+    assert main.parse_business_datetime(result["proposal"]["start_time"]).hour == 20
+    db.close()
+
+
 def test_simulator_retains_proposal_while_training_mode_creates_a_draft(tmp_path, monkeypatch):
     service = {"id": "service", "name": "Service", "duration": 30, "price": 100}
     (tmp_path / "services.json").write_text(json.dumps([service]), encoding="utf-8")

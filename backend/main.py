@@ -681,10 +681,13 @@ def build_model_input(
     history_messages: list[Any],
     current_history_text: str,
     enriched_current_prompt: str,
-    history_limit: int = 100,
+    history_limit: Optional[int] = None,
 ) -> list[dict[str, str]]:
     """Map deep chronological history and consolidate the active customer burst."""
-    selected = list(history_messages[-history_limit:])
+    # Booking corrections often refer to a confirmation much earlier in the
+    # thread. Keep the complete chronological thread; trimming here can turn a
+    # terse correction into an unrelated new request.
+    selected = list(history_messages)
     current_index = None
     for index in range(len(selected) - 1, -1, -1):
         message = selected[index]
@@ -2063,6 +2066,7 @@ class GoogleCalendarService:
         start: datetime,
         end: datetime,
         db: Optional[Session] = None,
+        sms_account_key: str = "primary",
     ) -> List[Dict[str, Any]]:
         """Return real calendar events owned by one customer, with local times."""
         from zoneinfo import ZoneInfo
@@ -2087,6 +2091,11 @@ class GoogleCalendarService:
                 for event_item in response.get("items", []):
                     description = event_item.get("description", "") or ""
                     private = event_item.get("extendedProperties", {}).get("private", {})
+                    event_account = private.get("sms_account_key")
+                    if event_account and event_account != sms_account_key:
+                        continue
+                    if not event_account and sms_account_key != "primary":
+                        continue
                     event_phone = private.get("customer_phone")
                     if not event_phone and "Customer phone:" in description:
                         event_phone = description.split("Customer phone:", 1)[1].splitlines()[0].strip()
@@ -2112,9 +2121,18 @@ class GoogleCalendarService:
         owns_session = db is None
         local_db = db or self.db_session_factory()
         try:
+            account_filter = (
+                or_(
+                    CalendarEvent.sms_account_key == "primary",
+                    CalendarEvent.sms_account_key.is_(None),
+                )
+                if sms_account_key == "primary"
+                else CalendarEvent.sms_account_key == sms_account_key
+            )
             local_events = local_db.query(CalendarEvent).filter(
                 CalendarEvent.start_time < end_aware.replace(tzinfo=None),
                 CalendarEvent.end_time > start_aware.replace(tzinfo=None),
+                account_filter,
             ).all()
             for event_item in local_events:
                 if canonical_phone_number(event_item.customer_phone or "") != canonical_customer:
@@ -2129,13 +2147,21 @@ class GoogleCalendarService:
                     "summary": event_item.summary,
                     "start": event_start,
                     "end": event_end,
+                    "sms_account_key": event_item.sms_account_key or "primary",
                 })
         finally:
             if owns_session:
                 local_db.close()
         return sorted(results, key=lambda item: item["start"])
             
-    def create_booking(self, summary: str, start: datetime, end: datetime, customer_phone: str) -> Optional[str]:
+    def create_booking(
+        self,
+        summary: str,
+        start: datetime,
+        end: datetime,
+        customer_phone: str,
+        sms_account_key: str = "primary",
+    ) -> Optional[str]:
         # Clear cache on modification
         if hasattr(self, "_cache"):
             self._cache.clear()
@@ -2154,7 +2180,10 @@ class GoogleCalendarService:
                     "summary": summary,
                     "description": f"Customer phone: {customer_phone}",
                     "extendedProperties": {
-                        "private": {"customer_phone": canonical_phone_number(customer_phone)}
+                        "private": {
+                            "customer_phone": canonical_phone_number(customer_phone),
+                            "sms_account_key": sms_account_key,
+                        }
                     },
                     "start": {
                         "dateTime": start_aware.isoformat(),
@@ -2172,6 +2201,7 @@ class GoogleCalendarService:
                     booking = CalendarEvent(
                         id=booking_id,
                         customer_phone=customer_phone,
+                        sms_account_key=sms_account_key,
                         summary=summary,
                         start_time=start_aware.replace(tzinfo=None),
                         end_time=end_aware.replace(tzinfo=None),
@@ -2193,6 +2223,7 @@ class GoogleCalendarService:
             booking = CalendarEvent(
                 id=booking_id,
                 customer_phone=customer_phone,
+                sms_account_key=sms_account_key,
                 summary=summary,
                 start_time=start_aware.replace(tzinfo=None),
                 end_time=end_aware.replace(tzinfo=None)
@@ -2791,6 +2822,62 @@ def parse_business_datetime(value: str) -> datetime:
     return parsed.astimezone(business_tz)
 
 
+def customer_bookings_for_thread(
+    db: Session,
+    thread: Thread,
+    start: datetime,
+    end: datetime,
+) -> List[Dict[str, Any]]:
+    """Load only bookings owned by the thread's SMS account and customer."""
+    try:
+        return calendar_service.get_customer_bookings(
+            thread.customer_phone,
+            start,
+            end,
+            db=db,
+            sms_account_key=thread.sms_account_key,
+        )
+    except TypeError as exc:
+        # Keep injected legacy test/provider adapters compatible. Production's
+        # provider accepts the account key and enforces the isolation above.
+        if "sms_account_key" not in str(exc):
+            raise
+        return calendar_service.get_customer_bookings(
+            thread.customer_phone,
+            start,
+            end,
+            db=db,
+        )
+
+
+def create_booking_for_account(
+    *,
+    summary: str,
+    start: datetime,
+    end: datetime,
+    customer_phone: str,
+    sms_account_key: str,
+) -> Optional[str]:
+    """Create a booking with explicit account ownership."""
+    try:
+        return calendar_service.create_booking(
+            summary=summary,
+            start=start,
+            end=end,
+            customer_phone=customer_phone,
+            sms_account_key=sms_account_key,
+        )
+    except TypeError as exc:
+        if "sms_account_key" not in str(exc):
+            raise
+        return calendar_service.create_booking(
+            summary=summary,
+            start=start,
+            end=end,
+            customer_phone=customer_phone,
+        )
+
+
 def is_explicit_booking_confirmation(message: str) -> bool:
     """Accept a short, unambiguous confirmation of an already-presented proposal."""
     normalized = re.sub(
@@ -2953,11 +3040,11 @@ def confirm_conversational_booking(
             "reason": "The proposed booking expired. Check availability and present it again.",
         }, False
 
-    existing = calendar_service.get_customer_bookings(
-        thread.customer_phone,
+    existing = customer_bookings_for_thread(
+        db,
+        thread,
         start - timedelta(minutes=1),
         start + timedelta(minutes=duration + 1),
-        db=db,
     )
     if any(item["start"] == start for item in existing):
         thread.pending_booking = None
@@ -2978,11 +3065,12 @@ def confirm_conversational_booking(
         f"{proposal['customer_name']} - {proposal['service_name']} "
         f"({booking_provider_name})"
     )
-    booking_id = calendar_service.create_booking(
+    booking_id = create_booking_for_account(
         summary=booking_summary,
         start=start,
         end=end,
         customer_phone=thread.customer_phone,
+        sms_account_key=thread.sms_account_key,
     )
     if not booking_id:
         return {"status": "failed", "reason": "The calendar did not accept the booking."}, False
@@ -3037,6 +3125,7 @@ RELATIONSHIP_FRAMING_PATTERNS = (
     r"\b(?:have|grab|join me for|go (?:out )?for)\s+(?:dinner|lunch|drinks?)\b",
     r"\b(?:take you|go with me|come with me)\s+(?:out|to dinner|on a date)\b",
     r"\b(?:date (?:you|me)|dating|personal relationship|romantic relationship|exclusivity|marry|marriage)\b",
+    r"\bexclusive\s+(?:partner|girlfriend|boyfriend|relationship)\b",
     r"\b(?:be|become|stay)\s+(?:my|your)\s+(?:partner|girlfriend|boyfriend)\b",
     r"\b(?:be|become|stay)\s+(?:my\s+)?(?:friend|friends|best friend)\b",
     r"\b(?:can|could|will|would)\s+(?:we|you)\s+(?:just\s+)?(?:be|become|stay)\s+(?:friends|my friend|exclusive)\b",
@@ -3074,11 +3163,38 @@ def is_relationship_framing(message: str) -> bool:
 
 def is_booking_focused_message(message: str) -> bool:
     intent = classify_query_intent(message)
-    return intent in {
+    return is_booking_amendment_message(message) or intent in {
         "availability", "booking_request", "booking_confirmed", "reschedule_or_cancel",
         "pricing", "service_inquiry", "location_or_arrival", "payment", "boundary_or_safety",
         "complaint_or_dispute",
     }
+
+
+BOOKING_AMENDMENT_PATTERNS = (
+    r"\b(?:amend|change|correct|fix|move|reschedule|rebook)\b.*\b(?:book(?:ing)?|appointment|time|date|day)\b",
+    r"\b(?:book(?:ing)?|appointment|time|date|day)\b.*\b(?:wrong|incorrect|amend|change|correct|fix|move|reschedule)\b",
+    r"\b(?:i meant|make that|actually|not)\b.*(?<!\d)(?:1[0-2]|0?[1-9])(?:(?::|\.)(?:[0-5]\d))?\s*(?:am|pm)\b",
+    r"\b(?:wrong|incorrect)\s+(?:time|date|day)\b",
+)
+
+
+def is_booking_amendment_message(message: str, active_booking_context: bool = False) -> bool:
+    """Recognise corrections that must outrank the prolonged-chat boundary."""
+    normalized = " ".join((message or "").casefold().replace("’", "'").split())
+    if any(re.search(pattern, normalized) for pattern in BOOKING_AMENDMENT_PATTERNS):
+        return True
+    if not active_booking_context:
+        return False
+    # Once a proposal or confirmed booking exists, terse SMS corrections such
+    # as "no, 8pm" and "it should be Friday" are booking-focused too.
+    return bool(
+        re.search(r"\b(?:no|sorry|actually|instead|should be|i said|i meant)\b", normalized)
+        and re.search(
+            r"(?<!\d)(?:1[0-2]|0?[1-9])(?:(?::|\.)(?:[0-5]\d))?\s*(?:am|pm)\b|"
+            r"\b(?:today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+            normalized,
+        )
+    )
 
 
 def consecutive_non_booking_customer_turns(history_messages: List[Any]) -> int:
@@ -3156,6 +3272,7 @@ def booking_conversation_guard_reply(
     history_messages: List[Any],
     latest_message: str,
     account_key: str = "primary",
+    active_booking_context: bool = False,
 ) -> Optional[str]:
     """Deterministically enforce relationship and prolonged-chat boundaries."""
     if account_key != "primary":
@@ -3167,10 +3284,23 @@ def booking_conversation_guard_reply(
             if service_summary else
             " If you'd like a professional service booking, which service were you interested in?"
         )
-        return (
+        reply = (
             "I keep things professional and appointment-based, so I don't do personal dates "
             f"or relationships.{redirect}"
         )
+        if any(
+            getattr(message, "role", None) in {"agent", "system"}
+            and "professional and appointment-based" in str(getattr(message, "text", "")).casefold()
+            for message in history_messages
+        ):
+            return "[[HANDOFF: Repeated relationship boundary request requires human review]]"
+        return reply
+
+    # A correction to an active or clearly referenced booking is operational,
+    # not prolonged social chat. The model receives the owned booking context
+    # and must verify any replacement exact time before asserting it.
+    if is_booking_amendment_message(latest_message, active_booking_context):
+        return None
 
     config = load_conversation_boundary_config()
     if not config["enabled"]:
@@ -3182,7 +3312,14 @@ def booking_conversation_guard_reply(
         if service_summary else
         " If you'd like to book a professional service, tell me which service you're after."
     )
-    return f"Lovely chatting, but I need to keep this line focused on bookings.{redirect}"
+    reply = f"Lovely chatting, but I need to keep this line focused on bookings.{redirect}"
+    if any(
+        getattr(message, "role", None) in {"agent", "system"}
+        and "keep this line focused on bookings" in str(getattr(message, "text", "")).casefold()
+        for message in history_messages
+    ):
+        return "[[HANDOFF: Repeated non-booking conversation requires human review]]"
+    return reply
 
 
 def extract_requested_business_time(message: str, now_local: datetime) -> Optional[datetime]:
@@ -3566,15 +3703,13 @@ def update_booking_endpoint(booking_id: str, payload: UpdateBookingInput, db: Se
         
     if payload.startTime is not None:
         try:
-            dt_start = datetime.fromisoformat(payload.startTime.replace("Z", "+00:00"))
-            booking.start_time = dt_start.astimezone(tz_hobart).replace(tzinfo=None)
+            booking.start_time = parse_business_datetime(payload.startTime).replace(tzinfo=None)
         except Exception:
             pass
             
     if payload.endTime is not None:
         try:
-            dt_end = datetime.fromisoformat(payload.endTime.replace("Z", "+00:00"))
-            booking.end_time = dt_end.astimezone(tz_hobart).replace(tzinfo=None)
+            booking.end_time = parse_business_datetime(payload.endTime).replace(tzinfo=None)
         except Exception:
             pass
 
@@ -3898,10 +4033,18 @@ def run_sms_reply_logic(
     )
     effective_body = current_customer_burst(history_msgs, body)
     clean_body = effective_body.strip().lower()
+    now_local = current_business_time()
+    customer_bookings = customer_bookings_for_thread(
+        db,
+        thread,
+        now_local - timedelta(days=1),
+        now_local + timedelta(days=14),
+    )
     guarded_reply = booking_conversation_guard_reply(
         history_msgs,
         effective_body,
         thread.sms_account_key,
+        active_booking_context=bool(thread.pending_booking or customer_bookings),
     )
     if thread.pending_booking and is_explicit_booking_rejection(effective_body):
         thread.pending_booking = None
@@ -3927,18 +4070,11 @@ def run_sms_reply_logic(
     # Keep the one-argument call compatible with injected context loaders.
     retrieved_context = build_business_context(effective_body)
     
-    now_local = current_business_time()
     reply_at_naive = datetime.utcnow()
     
     # Step 2: Supply customer-owned booking context, but never inject generic
     # 30-minute openings. Exact availability comes only from the booking tools,
     # which search using the selected service's configured duration.
-    customer_bookings = calendar_service.get_customer_bookings(
-        thread.customer_phone,
-        now_local - timedelta(days=1),
-        now_local + timedelta(days=14),
-        db=db,
-    )
     requested_time = extract_requested_business_time(effective_body, now_local)
     booking_guidance, requested_booking_confirmed = customer_booking_guidance(
         customer_bookings,
@@ -4098,6 +4234,13 @@ def run_sms_reply_logic(
                 "\n\nConversation context rule: read the supplied conversation in chronological order before "
                 "replying. Consecutive customer messages form one combined turn. Address all relevant details in "
                 "that combined turn and do not answer one fragment in isolation."
+            )
+            instructions += (
+                "\n\nBooking amendment priority rule: when this customer corrects or changes a pending or "
+                "confirmed booking, handle that operational request before generic booking-boundary steering. "
+                "Do not repeat a prior generic redirect. A replacement exact time requires fresh service-specific "
+                "availability evidence; if the available tools cannot safely amend the existing booking, output "
+                "exactly [[HANDOFF: booking amendment requires human review]]."
             )
             instructions += (
                 "\n\nConversational booking rule: complete the booking entirely in this conversation. "
@@ -4332,6 +4475,24 @@ def run_sms_reply_logic(
 
     if booking_confirmed and booking_arrival_link and assistant_reply and booking_arrival_link not in assistant_reply:
         assistant_reply = f"{assistant_reply.rstrip()}\n\nWhen you arrive, tap: {booking_arrival_link}"
+
+    # Do not send the same generic boundary redirect again on retries or a
+    # continuing burst. Escalation is deterministic and customer-invisible.
+    if assistant_reply and not assistant_reply.lstrip().startswith("[[HANDOFF"):
+        normalized_reply = " ".join(assistant_reply.casefold().split())
+        generic_boundary = (
+            "keep this line focused on bookings" in normalized_reply
+            or "professional and appointment-based" in normalized_reply
+        )
+        if generic_boundary and any(
+            getattr(message, "role", None) in {"agent", "system"}
+            and (
+                "keep this line focused on bookings" in str(getattr(message, "text", "")).casefold()
+                or "professional and appointment-based" in str(getattr(message, "text", "")).casefold()
+            )
+            for message in history_msgs
+        ):
+            assistant_reply = "[[HANDOFF: Repeated generic boundary reply suppressed]]"
 
     rejected_reply_reason = rejected_reply_reason or unsafe_ai_reply_reason(
         assistant_reply or "",
@@ -4742,6 +4903,8 @@ def _arrival_messages(db: Session, session_id: str) -> List[Dict[str, Any]]:
 
 def _arrival_payload(db: Session, session: ArrivalSession, include_messages: bool = True) -> Dict[str, Any]:
     booking = _arrival_booking(db, session.booking_id)
+    booking_start = parse_business_datetime(booking.start_time.isoformat()).isoformat() if booking else None
+    booking_end = parse_business_datetime(booking.end_time.isoformat()).isoformat() if booking else None
     payload: Dict[str, Any] = {
         "id": session.id,
         "bookingId": session.booking_id,
@@ -4760,8 +4923,8 @@ def _arrival_payload(db: Session, session: ArrivalSession, include_messages: boo
         "booking": {
             "summary": booking.summary if booking else "Appointment",
             "customerPhone": booking.customer_phone if booking else None,
-            "startTime": booking.start_time.isoformat() + "Z" if booking else None,
-            "endTime": booking.end_time.isoformat() + "Z" if booking else None,
+            "startTime": booking_start,
+            "endTime": booking_end,
         },
     }
     if include_messages:
@@ -11128,11 +11291,12 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
         end_dt = start_dt + timedelta(minutes=duration)
         
         summary = f"{payload.name} - {service['name']} ({provider['name']})"
-        booking_id = calendar_service.create_booking(
+        booking_id = create_booking_for_account(
             summary=summary,
             start=start_dt,
             end=end_dt,
-            customer_phone=customer_phone
+            customer_phone=customer_phone,
+            sms_account_key=sms_account_key,
         )
         if not booking_id:
             raise HTTPException(status_code=500, detail="Failed to create booking in calendar service.")

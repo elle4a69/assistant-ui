@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import main
-from main import Base, Message, Thread
+from main import Base, CalendarEvent, Message, Thread
 
 
 def message(role, text):
@@ -112,6 +112,85 @@ def test_booking_turn_breaks_the_social_loop_and_greeting_is_not_over_pushed(tmp
         [message("customer", "What date is my booking, and can my partner attend?")],
         "What date is my booking, and can my partner attend?",
     ) is None
+
+
+def test_booking_amendment_after_confirmation_overrides_prolonged_chat_boundary(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    write_services(tmp_path)
+    history = [
+        message("customer", "How has your day been?"),
+        message("system", "Fine thanks."),
+        message("customer", "What music do you like?"),
+        message("system", "A bit of everything."),
+        message("customer", "Tell me more."),
+        message("system", "Your appointment is confirmed for 6:00 PM Friday."),
+        message("customer", "No, I meant 8pm Friday, the booking time is wrong."),
+    ]
+
+    assert main.booking_conversation_guard_reply(
+        history,
+        history[-1].text,
+        active_booking_context=True,
+    ) is None
+    assert main.is_booking_amendment_message(history[-1].text, True)
+
+
+def test_repeated_generic_boundary_reply_escalates_without_repeating(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    write_services(tmp_path)
+    prior_reply = (
+        "Lovely chatting, but I need to keep this line focused on bookings. "
+        "Which service would you like to book?"
+    )
+    history = [
+        message("customer", "How are you?"),
+        message("system", "Good thanks."),
+        message("customer", "What music do you like?"),
+        message("system", prior_reply),
+        message("customer", "Tell me something else about yourself."),
+        message("system", "I can help with a professional booking."),
+        message("customer", "Keep chatting with me."),
+    ]
+
+    reply = main.booking_conversation_guard_reply(history, history[-1].text)
+
+    assert reply == "[[HANDOFF: Repeated non-booking conversation requires human review]]"
+    assert reply != prior_reply
+
+
+def test_repeated_inbound_booking_correction_never_reuses_generic_boundary(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    write_services(tmp_path)
+    prior_generic = "Lovely chatting, but I need to keep this line focused on bookings."
+    history = [
+        message("system", "Your appointment is confirmed for 6:00 PM Friday."),
+        message("customer", "No, I meant 8pm Friday."),
+        message("system", prior_generic),
+        message("customer", "I said the booking should be 8pm Friday, not 6pm."),
+    ]
+
+    reply = main.booking_conversation_guard_reply(
+        history,
+        history[-1].text,
+        active_booking_context=True,
+    )
+
+    assert reply is None
+    assert main.is_booking_amendment_message(history[-1].text, True)
+
+
+def test_relationship_boundary_still_wins_with_active_booking(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    write_services(tmp_path)
+
+    reply = main.booking_conversation_guard_reply(
+        [message("customer", "Will you be my exclusive girlfriend?")],
+        "Will you be my exclusive girlfriend?",
+        active_booking_context=True,
+    )
+
+    assert "professional and appointment-based" in reply
+    assert "relationships" in reply
 
 
 def test_catalogue_context_exposes_only_customer_visible_details(tmp_path, monkeypatch):
@@ -226,4 +305,40 @@ def test_secondary_account_cannot_receive_primary_prompt_knowledge_services_or_s
     assert thread.state == "auto-reply"
     assert thread.pending_slots == '[{"secondary": true}]'
     assert db.query(Message).filter(Message.thread_id == thread.id).count() == 1
+    db.close()
+
+
+def test_customer_booking_lookup_isolated_by_sms_account_for_same_phone():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    now = main.parse_business_datetime("2026-08-24T12:00:00+10:00")
+    phone = "+61400000003"
+    db.add_all([
+        CalendarEvent(
+            id="primary-booking", customer_phone=phone, sms_account_key="primary",
+            summary="Primary appointment",
+            start_time=datetime(2026, 8, 25, 18, 0),
+            end_time=datetime(2026, 8, 25, 18, 30),
+        ),
+        CalendarEvent(
+            id="secondary-booking", customer_phone=phone, sms_account_key="secondary",
+            summary="Secondary appointment",
+            start_time=datetime(2026, 8, 25, 20, 0),
+            end_time=datetime(2026, 8, 25, 20, 30),
+        ),
+    ])
+    db.commit()
+    service = main.GoogleCalendarService(Session)
+
+    primary = service.get_customer_bookings(
+        phone, now, now + timedelta(days=2), db=db, sms_account_key="primary",
+    )
+    secondary = service.get_customer_bookings(
+        phone, now, now + timedelta(days=2), db=db, sms_account_key="secondary",
+    )
+
+    assert [item["id"] for item in primary] == ["primary-booking"]
+    assert [item["id"] for item in secondary] == ["secondary-booking"]
     db.close()
