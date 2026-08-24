@@ -123,5 +123,17 @@ test('Agent Runner is monitor-only, responsive and cleans up browser resources',
   assert.match(viewSource, /type:\s*'cancel'/);
   assert.match(viewSource, /sessionStorage/);
   assert.match(appSource, /\/agent-console/);
-  assert.match(appSource, /Agent Runner/);
+  assert.match(appSource, /Coding Agent/);
+});
+
+test('Agent Runner presents one persistent conversational coding-agent thread', () => {
+  assert.match(viewSource, /getOperationsChatMessages/);
+  assert.match(viewSource, /OperationsChatMessage/);
+  assert.match(viewSource, /data-testid="agent-conversation-transcript"/);
+  assert.match(viewSource, /message\.role === 'user'/);
+  assert.match(viewSource, /event\.key === 'Enter' && !event\.shiftKey/);
+  assert.match(viewSource, /<Send[^>]*\/>\s*}\s*\n\s*Send/);
+  assert.match(viewSource, /Still not working/);
+  assert.doesNotMatch(viewSource, /One objective/);
+  assert.doesNotMatch(viewSource, />\s*Start run\s*</);
 });

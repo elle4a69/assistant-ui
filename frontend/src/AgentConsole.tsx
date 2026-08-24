@@ -1,20 +1,26 @@
-import { useEffect, useRef, useState } from 'react';
+import { FormEvent, KeyboardEvent, ReactNode, useEffect, useRef, useState } from 'react';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import {
   Ban,
+  Bot,
   CircleStop,
   History,
-  Play,
   RefreshCw,
+  Send,
   ShieldCheck,
-  SquareTerminal,
   Trash2,
+  UserRound,
   Wifi,
   WifiOff,
 } from 'lucide-react';
-import { listAgentConsoleRuns, type AgentConsoleRun } from './api';
+import {
+  getOperationsChatMessages,
+  listAgentConsoleRuns,
+  type AgentConsoleRun,
+  type OperationsChatMessage,
+} from './api';
 import {
   buildAgentWebSocketUrl,
   formatAgentTerminalMessage,
@@ -30,6 +36,15 @@ import {
 
 const ACTIVE_STATES = new Set<AgentConsoleState>(['connecting', 'running', 'cancelling', 'disconnected']);
 const RUN_STORAGE_KEY = 'assistant-ui-agent-console-run';
+const AGENT_URL_PATTERN = /(https?:\/\/[^\s<>\])]+)/g;
+
+function renderLinkedText(content: string): ReactNode[] {
+  return content.split(AGENT_URL_PATTERN).map((part, index) => (
+    part.startsWith('https://') || part.startsWith('http://')
+      ? <a key={`${part}-${index}`} href={part} target="_blank" rel="noreferrer" className="font-semibold text-indigo-300 underline decoration-indigo-500 underline-offset-2">{part}</a>
+      : part
+  ));
+}
 
 function requestId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
@@ -75,13 +90,16 @@ export default function AgentConsole() {
   const stateRef = useRef<AgentConsoleState>('idle');
   const reconnectRef = useRef(false);
   const cancelRequestedRef = useRef(false);
+  const transcriptEndRef = useRef<HTMLDivElement | null>(null);
 
   const [objective, setObjective] = useState('');
+  const [messages, setMessages] = useState<OperationsChatMessage[]>([]);
+  const [conversationLoading, setConversationLoading] = useState(true);
   const [runState, setRunState] = useState<AgentConsoleState>('idle');
   const [runId, setRunId] = useState<string | null>(null);
   const [step, setStep] = useState(0);
   const [maxSteps, setMaxSteps] = useState(15);
-  const [statusMessage, setStatusMessage] = useState('Describe an outcome, then start a bounded autonomous run.');
+  const [statusMessage, setStatusMessage] = useState('Ask naturally. The agent remembers this conversation and works through the authorised steps.');
   const [error, setError] = useState<string | null>(null);
   const [recentRuns, setRecentRuns] = useState<AgentConsoleRun[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
@@ -112,6 +130,20 @@ export default function AgentConsole() {
       }
     } finally {
       if (mountedRef.current) setHistoryLoading(false);
+    }
+  };
+
+  const refreshConversation = async (showLoading = false) => {
+    if (showLoading) setConversationLoading(true);
+    try {
+      const result = await getOperationsChatMessages();
+      if (mountedRef.current) setMessages(result.messages);
+    } catch (requestError) {
+      if (mountedRef.current) {
+        setError(requestError instanceof Error ? requestError.message : 'Could not load the agent conversation.');
+      }
+    } finally {
+      if (mountedRef.current) setConversationLoading(false);
     }
   };
 
@@ -160,6 +192,7 @@ export default function AgentConsole() {
       reconnectRef.current = false;
       sessionStorage.removeItem(RUN_STORAGE_KEY);
       void refreshHistory();
+      void refreshConversation();
     }
   };
 
@@ -249,6 +282,7 @@ export default function AgentConsole() {
           setStatusMessage('The server did not acknowledge the run. Check your sign-in and connection, then try again.');
           setError('Could not establish an authenticated Operations Console session.');
           void refreshHistory();
+          void refreshConversation();
           return;
         }
         setState('disconnected');
@@ -266,19 +300,42 @@ export default function AgentConsole() {
     };
   };
 
-  const startRun = () => {
+  const startRun = (event?: FormEvent) => {
+    event?.preventDefault();
     const cleanObjective = objective.trim();
-    if (!cleanObjective || ACTIVE_STATES.has(stateRef.current) || !consoleEnabled) return;
+    if (
+      !cleanObjective
+      || ACTIVE_STATES.has(stateRef.current)
+      || !consoleEnabled
+      || conversationLoading
+      || historyLoading
+    ) return;
+    const currentRequestId = requestId();
+    const optimisticMessage: OperationsChatMessage = {
+      id: `pending-${currentRequestId}`,
+      role: 'user',
+      content: cleanObjective,
+      createdAt: new Date().toISOString(),
+    };
+    setMessages((current) => [...current.filter((item) => !item.id.startsWith('pending-')), optimisticMessage]);
+    setObjective('');
     terminalRef.current?.clear();
     sequenceRef.current = 0;
     runIdRef.current = null;
     setRunId(null);
     setStep(0);
-    setStatusMessage('Connecting to the autonomous Operations Console…');
+    setStatusMessage('Connecting to the Operations Coding Agent…');
     cancelRequestedRef.current = false;
     reconnectRef.current = true;
     reconnectAttemptRef.current = 0;
-    connectSocket('start', { objective: cleanObjective, requestId: requestId() });
+    connectSocket('start', { objective: cleanObjective, requestId: currentRequestId });
+  };
+
+  const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      startRun();
+    }
   };
 
   const cancelRun = () => {
@@ -335,8 +392,8 @@ export default function AgentConsole() {
     fit();
     const observer = new ResizeObserver(fit);
     observer.observe(host);
-    terminal.writeln('\x1b[1;36mAssistant UI — Autonomous Operations Console\x1b[0m');
-    terminal.writeln('\x1b[0;90mAuthenticated · audited · bounded · scratch storage isolated\x1b[0m');
+    terminal.writeln('\x1b[1;36mAssistant UI — Conversational Coding Agent\x1b[0m');
+    terminal.writeln('\x1b[0;90mAuthenticated · persistent context · audited actions · bounded execution\x1b[0m');
     terminal.writeln('');
     return () => {
       observer.disconnect();
@@ -349,6 +406,7 @@ export default function AgentConsole() {
   useEffect(() => {
     mountedRef.current = true;
     void refreshHistory();
+    void refreshConversation(true);
     const savedRunId = sessionStorage.getItem(RUN_STORAGE_KEY);
     if (savedRunId) {
       runIdRef.current = savedRunId;
@@ -367,6 +425,10 @@ export default function AgentConsole() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [messages, runState]);
+
   const active = ACTIVE_STATES.has(runState);
 
   return (
@@ -375,45 +437,112 @@ export default function AgentConsole() {
         <div className="mx-auto flex max-w-7xl flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
             <div className="rounded-xl bg-indigo-500/15 p-2.5 ring-1 ring-indigo-300/20">
-              <SquareTerminal className="h-5 w-5 text-indigo-200" />
+              <Bot className="h-5 w-5 text-indigo-200" />
             </div>
             <div>
-              <h1 className="text-base font-black">Autonomous Operations Console</h1>
-              <p className="mt-0.5 text-[11px] text-slate-400">One objective, live evidence, bounded scratch work and isolated review-branch coding.</p>
+              <h1 className="text-base font-black">Operations Coding Agent</h1>
+              <p className="mt-0.5 text-[11px] text-slate-400">A persistent conversation with live evidence, durable memory and reviewed cloud coding.</p>
             </div>
           </div>
-          <div className={`inline-flex items-center gap-2 self-start rounded-full border px-3 py-1.5 text-[10px] font-black uppercase tracking-wide ${stateTone(runState)}`} role="status" aria-live="polite">
-            {runState === 'disconnected' ? <WifiOff className="h-3.5 w-3.5" /> : <Wifi className="h-3.5 w-3.5" />}
-            {stateLabel(runState)}
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => { void refreshConversation(true); void refreshHistory(); }}
+              disabled={conversationLoading || historyLoading || active}
+              className="inline-flex min-h-9 items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 text-[10px] font-bold text-slate-300 hover:bg-white/10 disabled:opacity-50"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${conversationLoading || historyLoading ? 'animate-spin' : ''}`} /> Refresh
+            </button>
+            <div className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[10px] font-black uppercase tracking-wide ${stateTone(runState)}`} role="status" aria-live="polite">
+              {runState === 'disconnected' ? <WifiOff className="h-3.5 w-3.5" /> : <Wifi className="h-3.5 w-3.5" />}
+              {stateLabel(runState)}
+            </div>
           </div>
         </div>
       </header>
 
       <div className="mx-auto grid w-full max-w-7xl flex-1 gap-4 p-3 sm:p-5 lg:grid-cols-[minmax(0,1fr)_300px]">
         <section className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl">
-          <div className="border-b border-slate-800 p-3 sm:p-4">
-            <label htmlFor="agent-objective" className="mb-2 flex items-center gap-2 text-xs font-black text-slate-200">
-              <Play className="h-3.5 w-3.5 text-indigo-300" /> Engineering objective
-            </label>
+          <div
+            className="h-[390px] min-h-[300px] overflow-y-auto bg-slate-950/55 px-3 py-5 sm:px-5"
+            role="log"
+            aria-live="polite"
+            aria-label="Operations coding agent conversation"
+            data-testid="agent-conversation-transcript"
+          >
+            {conversationLoading && messages.length === 0 ? (
+              <div className="flex h-full items-center justify-center gap-2 text-xs font-semibold text-indigo-300">
+                <RefreshCw className="h-4 w-4 animate-spin" /> Loading conversation…
+              </div>
+            ) : messages.length === 0 ? (
+              <div className="mx-auto flex h-full max-w-lg flex-col items-center justify-center text-center">
+                <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-indigo-500/15 text-indigo-300 ring-1 ring-indigo-300/20">
+                  <Bot className="h-6 w-6" />
+                </div>
+                <h2 className="text-sm font-black text-white">Tell me the outcome you want</h2>
+                <p className="mt-2 text-xs leading-relaxed text-slate-400">
+                  I can investigate the live system, inspect source, research current technical issues, remember durable lessons and run reviewed coding work.
+                </p>
+              </div>
+            ) : (
+              <div className="mx-auto flex max-w-3xl flex-col gap-4">
+                {messages.map((message) => (
+                  <div key={message.id} className={`flex gap-2.5 ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    {message.role === 'assistant' && (
+                      <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-indigo-500/15 text-indigo-300 ring-1 ring-indigo-300/20">
+                        <Bot className="h-3.5 w-3.5" />
+                      </div>
+                    )}
+                    <div className={`max-w-[84%] whitespace-pre-wrap rounded-2xl px-3.5 py-2.5 text-xs leading-relaxed shadow-sm ${
+                      message.role === 'user'
+                        ? 'rounded-br-md bg-indigo-600 text-white'
+                        : 'rounded-bl-md border border-slate-700 bg-slate-900 text-slate-100'
+                    } ${message.id.startsWith('pending-') ? 'opacity-70' : ''}`}>
+                      {message.role === 'assistant' ? renderLinkedText(message.content) : message.content}
+                    </div>
+                    {message.role === 'user' && (
+                      <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-800 text-slate-300">
+                        <UserRound className="h-3.5 w-3.5" />
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {active && (
+                  <div className="flex items-center gap-2.5">
+                    <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-500/15 text-indigo-300 ring-1 ring-indigo-300/20">
+                      <Bot className="h-3.5 w-3.5" />
+                    </div>
+                    <div className="rounded-2xl rounded-bl-md border border-indigo-500/30 bg-slate-900 px-3.5 py-2.5 text-xs font-semibold text-indigo-200 shadow-sm">
+                      Working on it… live progress is shown below.
+                    </div>
+                  </div>
+                )}
+                <div ref={transcriptEndRef} />
+              </div>
+            )}
+          </div>
+
+          <form onSubmit={startRun} className="border-y border-slate-800 bg-slate-900 p-3 sm:p-4">
+            <label htmlFor="agent-message" className="sr-only">Message the operations coding agent</label>
             <textarea
-              id="agent-objective"
+              id="agent-message"
               value={objective}
               onChange={(event) => setObjective(event.target.value)}
+              onKeyDown={handleComposerKeyDown}
               disabled={active}
               rows={3}
               maxLength={8_000}
-              placeholder="For example: diagnose why booking alerts repeat, implement and test the fix on an isolated review branch, then report the task ID."
+              placeholder="Message naturally — for example: Still not working. Check the earlier repair and fix it properly."
               className="w-full resize-y rounded-xl border border-slate-700 bg-slate-950 px-3 py-3 text-sm leading-relaxed text-white outline-none transition placeholder:text-slate-600 focus:border-indigo-500 disabled:opacity-60"
             />
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <button
-                type="button"
-                onClick={startRun}
-                disabled={active || !objective.trim() || !consoleEnabled}
+                type="submit"
+                disabled={active || !objective.trim() || !consoleEnabled || conversationLoading || historyLoading}
                 className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-black text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:bg-slate-700"
               >
-                {runState === 'connecting' ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                Start run
+                {runState === 'connecting' ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                Send
               </button>
               <button
                 type="button"
@@ -423,42 +552,39 @@ export default function AgentConsole() {
               >
                 <CircleStop className="h-4 w-4" /> Cancel
               </button>
-              <button
-                type="button"
-                onClick={() => terminalRef.current?.clear()}
-                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-slate-700 px-4 py-2.5 text-xs font-black text-slate-300 transition hover:bg-slate-800"
-              >
-                <Trash2 className="h-4 w-4" /> Clear output
-              </button>
+              <span className="text-[10px] text-slate-500">Enter to send · Shift+Enter for a new line</span>
               <span className="ml-auto text-[10px] font-bold text-slate-400">Step {step}/{maxSteps}</span>
             </div>
             {!consoleEnabled && (
               <div className="mt-3 flex items-start gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-100" role="alert">
-                <Ban className="mt-0.5 h-4 w-4 shrink-0" /> The autonomous console is disabled or missing its server configuration.
+                <Ban className="mt-0.5 h-4 w-4 shrink-0" /> The coding agent is disabled or missing its server configuration.
               </div>
             )}
             {error && <div className="mt-3 rounded-xl border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-100" role="alert">{error}</div>}
-          </div>
+          </form>
 
-          <div className="border-b border-slate-800 bg-slate-950/70 px-4 py-2.5 text-[11px] text-slate-300" aria-live="polite">
-            {statusMessage}
+          <div className="flex items-center justify-between gap-3 border-b border-slate-800 bg-slate-950/70 px-4 py-2.5 text-[11px] text-slate-300">
+            <span aria-live="polite">{statusMessage}</span>
+            <button type="button" onClick={() => terminalRef.current?.clear()} className="inline-flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1 text-[10px] font-bold text-slate-400 hover:bg-slate-800 hover:text-white">
+              <Trash2 className="h-3.5 w-3.5" /> Clear work log
+            </button>
           </div>
-          <div ref={terminalHostRef} className="h-[440px] min-h-[300px] w-full bg-slate-950 p-2" aria-label="Live autonomous run output" />
+          <div ref={terminalHostRef} className="h-[300px] min-h-[240px] w-full bg-slate-950 p-2" aria-label="Live coding agent work log" />
           <div className="flex items-start gap-2 border-t border-slate-800 bg-slate-900 px-4 py-3 text-[10px] leading-relaxed text-slate-400">
             <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
-            <p>Monitor-only console. The loop may queue one isolated GitHub review-branch coding task; changing main, production deployment and protected runtime changes remain in their reviewed, owner-confirmed workflows.</p>
+            <p>The work log is monitor-only. Code is changed only on an isolated review branch; protected settings and production deployment still require the exact confirmation returned by the audited workflow.</p>
           </div>
         </section>
 
         <aside className="min-h-0 overflow-hidden rounded-2xl border border-slate-800 bg-slate-900">
           <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
             <div className="flex items-center gap-2 text-xs font-black"><History className="h-4 w-4 text-indigo-300" /> Recent runs</div>
-            <button type="button" onClick={() => void refreshHistory()} disabled={historyLoading} aria-label="Refresh run history" className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-50">
+            <button type="button" onClick={() => void refreshHistory()} disabled={historyLoading} aria-label="Refresh work history" className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-50">
               <RefreshCw className={`h-4 w-4 ${historyLoading ? 'animate-spin' : ''}`} />
             </button>
           </div>
           <div className="max-h-[620px] space-y-2 overflow-y-auto p-3">
-            {!historyLoading && recentRuns.length === 0 && <p className="p-4 text-center text-xs text-slate-500">No autonomous runs yet.</p>}
+            {!historyLoading && recentRuns.length === 0 && <p className="p-4 text-center text-xs text-slate-500">No coding-agent work yet.</p>}
             {recentRuns.map((item) => (
               <button
                 key={item.id}

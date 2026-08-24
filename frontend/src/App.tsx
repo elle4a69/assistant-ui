@@ -244,7 +244,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
               }`}
             >
               <SquareTerminal className="w-3.5 h-3.5" />
-              Agent Runner
+              Coding Agent
             </button>
             <button
               onClick={() => navigateTo('chat', '/chat')}
@@ -332,7 +332,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
       <main className={`${isEmbeddedBooking ? 'flex flex-col overflow-visible' : 'flex-1 flex flex-col overflow-hidden pb-16 sm:pb-0'}`}>
         {view === 'agent' && <SmsTriageDashboard />}
         {view === 'runner' && (
-          <Suspense fallback={<div className="flex flex-1 items-center justify-center bg-slate-950 text-sm font-bold text-slate-400">Loading Agent Runner…</div>}>
+          <Suspense fallback={<div className="flex flex-1 items-center justify-center bg-slate-950 text-sm font-bold text-slate-400">Loading Coding Agent…</div>}>
             <AgentConsole />
           </Suspense>
         )}
@@ -352,7 +352,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
           <div className="flex w-full items-center justify-around px-1 overflow-x-auto">
             {[
               { id: 'agent', label: 'Console', icon: <UserCheck className="w-4.5 h-4.5" />, action: () => navigateTo('agent', '/') },
-              { id: 'runner', label: 'Runner', icon: <SquareTerminal className="w-4.5 h-4.5" />, action: () => navigateTo('runner', '/agent-console') },
+              { id: 'runner', label: 'Agent', icon: <SquareTerminal className="w-4.5 h-4.5" />, action: () => navigateTo('runner', '/agent-console') },
               { id: 'chat', label: 'Messages', icon: <MessagesSquare className="w-4.5 h-4.5" />, action: () => navigateTo('chat', '/chat') },
               { id: 'customer', label: 'SMS Sim', icon: <Smartphone className="w-4.5 h-4.5" />, action: () => navigateTo('customer', '/sim') },
               { id: 'bootcamp', label: 'Camp', icon: <Bot className="w-4.5 h-4.5" />, action: () => navigateTo('bootcamp', '/bootcamp') },

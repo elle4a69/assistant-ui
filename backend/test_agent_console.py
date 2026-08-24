@@ -218,23 +218,194 @@ def test_virtual_terminal_rejects_raw_shell_commands(isolated_agent_database):
 def test_autonomous_virtual_tools_are_explicitly_scoped():
     assert "inspect_system_status" in main.AGENT_CONSOLE_ALLOWED_TOOLS
     assert "start_coding_task" in main.AGENT_CONSOLE_ALLOWED_TOOLS
-    assert "remember_operational_learning" not in main.AGENT_CONSOLE_ALLOWED_TOOLS
-    assert "propose_runtime_change" not in main.AGENT_CONSOLE_ALLOWED_TOOLS
-    assert "execute_runtime_change" not in main.AGENT_CONSOLE_ALLOWED_TOOLS
-    assert "propose_code_deployment" not in main.AGENT_CONSOLE_ALLOWED_TOOLS
-    assert "execute_code_deployment" not in main.AGENT_CONSOLE_ALLOWED_TOOLS
-    assert "research_internet" not in main.AGENT_CONSOLE_ALLOWED_TOOLS
-    assert "inspect_deployments" not in main.AGENT_CONSOLE_ALLOWED_TOOLS
-    assert "inspect_coding_task" not in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "remember_operational_learning" in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "propose_runtime_change" in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "execute_runtime_change" in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "propose_code_deployment" in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "execute_code_deployment" in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "research_internet" in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "inspect_deployments" in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "inspect_coding_task" in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "inspect_code_changes" in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "run_shell" not in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "start_coding_task" in main.AGENT_CONSOLE_CRITICAL_TOOLS
+    assert "execute_code_deployment" in main.AGENT_CONSOLE_CRITICAL_TOOLS
+    assert "execute_runtime_change" in main.AGENT_CONSOLE_CRITICAL_TOOLS
 
 
 def test_agent_prompt_forbids_customer_evidence_in_coding_task_fields():
-    prompt = main.build_agent_system_prompt("[]", 15)
+    prompt = main.build_agent_system_prompt(
+        "[]",
+        15,
+        conversation_context="USER: The earlier repair still fails.",
+        durable_memory='[{"title":"Keep replies concise"}]',
+    )
 
     assert "anonymised engineering defect" in prompt
     assert "Never put a customer name" in prompt
     assert "verbatim/paraphrased customer message" in prompt
     assert "Do not copy an inspect_conversation transcript" in prompt
+    assert "conversational coding agent" in prompt
+    assert "The earlier repair still fails" in prompt
+    assert "Keep replies concise" in prompt
+    assert "Only the current owner message" in prompt
+
+
+def test_agent_run_persists_one_idempotent_owner_chat_turn(isolated_agent_database):
+    request_id = "abababab-abab-4bab-8bab-abababababab"
+    first, created = main._create_agent_run(request_id, "Please repair the failing simulator.")
+    duplicate, duplicate_created = main._create_agent_run(
+        request_id,
+        "Please repair the failing simulator.",
+    )
+
+    assert created is True
+    assert duplicate_created is False
+    assert duplicate.id == first.id
+
+    db = isolated_agent_database()
+    try:
+        messages = db.query(main.OperationsChatMessage).all()
+        assert len(messages) == 1
+        assert messages[0].id == main._agent_console_chat_message_id(first.id, "user")
+        assert messages[0].role == "user"
+        assert messages[0].content == "Please repair the failing simulator."
+    finally:
+        db.close()
+
+
+def test_agent_completion_is_saved_as_the_conversational_reply(isolated_agent_database):
+    run, _created = main._create_agent_run(
+        "acacacac-acac-4cac-8cac-acacacacacac",
+        "Check the repair and report back.",
+    )
+    main._finish_agent_run(
+        run.id,
+        "completed",
+        "The checks passed.",
+        event_type="completed",
+        summary="The checks passed and the repair is ready.",
+    )
+
+    db = isolated_agent_database()
+    try:
+        messages = db.query(main.OperationsChatMessage).order_by(
+            main.OperationsChatMessage.created_at,
+            main.OperationsChatMessage.id,
+        ).all()
+        assert [(item.role, item.content) for item in messages] == [
+            ("user", "Check the repair and report back."),
+            ("assistant", "The checks passed and the repair is ready."),
+        ]
+        assert messages[-1].id == main._agent_console_chat_message_id(run.id, "assistant")
+    finally:
+        db.close()
+
+
+def test_follow_up_automatically_receives_prior_chat_and_durable_memory(
+    isolated_agent_database,
+    monkeypatch,
+):
+    db = isolated_agent_database()
+    try:
+        db.add_all([
+            main.OperationsChatMessage(
+                id="earlier-owner-turn",
+                role="user",
+                content="The booking alert is repeating.",
+            ),
+            main.OperationsChatMessage(
+                id="earlier-agent-turn",
+                role="assistant",
+                content="I repaired the alert deduplication and verified it.",
+            ),
+            main.OperationsMemory(
+                category="preference",
+                title="Keep reports direct",
+                content="Lead with the outcome and avoid unnecessary implementation detail.",
+                evidence="Explicit owner preference.",
+            ),
+        ])
+        db.commit()
+    finally:
+        db.close()
+
+    fake_client = FakeOpenAIClient([
+        AgentStep(
+            thought="I checked the follow-up against the earlier repair.",
+            action="complete",
+            arguments='{"summary":"I retained the earlier context and handled the follow-up."}',
+        ),
+    ])
+    monkeypatch.setattr(main, "openai_client", fake_client)
+    run, _created = main._create_agent_run(
+        "adadadad-adad-4dad-8dad-adadadadadad",
+        "It is still not working.",
+    )
+
+    asyncio.run(main._run_agent_console(run.id, run.objective, 1))
+
+    model_messages = fake_client.completions.calls[0]["messages"]
+    assert "The booking alert is repeating" in model_messages[0]["content"]
+    assert "I repaired the alert deduplication" in model_messages[0]["content"]
+    assert "Keep reports direct" in model_messages[0]["content"]
+    assert "It is still not working" not in model_messages[0]["content"]
+    assert model_messages[1] == {
+        "role": "user",
+        "content": "Current owner message:\nIt is still not working.",
+    }
+
+
+def test_conversation_context_keeps_newest_turns_within_budget(isolated_agent_database):
+    db = isolated_agent_database()
+    try:
+        db.add(main.OperationsChatMessage(
+            id="old-context",
+            role="user",
+            content="OLDEST-CONTEXT " + ("old " * 500),
+            created_at=datetime.utcnow() - timedelta(days=2),
+        ))
+        db.add(main.OperationsChatMessage(
+            id="new-context",
+            role="assistant",
+            content="NEWEST-CONTEXT should survive the bounded retrieval.",
+            created_at=datetime.utcnow() - timedelta(minutes=1),
+        ))
+        db.commit()
+        context = main._build_agent_conversation_context(
+            db,
+            current_run_id="aeaeaeae-aeae-4eae-8eae-aeaeaeaeaeae",
+            max_chars=700,
+        )
+    finally:
+        db.close()
+
+    assert len(context) <= 700
+    assert "NEWEST-CONTEXT" in context
+    assert "OLDEST-CONTEXT" not in context
+
+
+def test_conversation_history_returns_the_latest_two_hundred_in_order(isolated_agent_database):
+    db = isolated_agent_database()
+    try:
+        started_at = datetime.utcnow() - timedelta(hours=1)
+        db.add_all([
+            main.OperationsChatMessage(
+                id=f"history-{index:03d}",
+                role="user" if index % 2 == 0 else "assistant",
+                content=f"Message {index}",
+                created_at=started_at + timedelta(seconds=index),
+            )
+            for index in range(205)
+        ])
+        db.commit()
+        result = main.get_operations_chat_messages(db)
+    finally:
+        db.close()
+
+    assert len(result["messages"]) == 200
+    assert result["messages"][0]["content"] == "Message 5"
+    assert result["messages"][-1]["content"] == "Message 204"
 
 
 def test_one_autonomous_run_cannot_submit_duplicate_coding_tasks(
@@ -720,9 +891,17 @@ def test_orphaned_active_run_is_marked_interrupted(isolated_agent_database):
     try:
         recovered = db.query(main.OperationsAgentRun).filter(main.OperationsAgentRun.id == run_id).one()
         event = db.query(main.OperationsAgentEvent).filter(main.OperationsAgentEvent.run_id == run_id).one()
+        chat = db.query(main.OperationsChatMessage).order_by(
+            main.OperationsChatMessage.created_at,
+            main.OperationsChatMessage.id,
+        ).all()
         assert recovered.status == "interrupted"
         assert event.event_type == "error"
         assert json.loads(event.meta)["code"] == "server_restarted"
+        assert [(item.role, item.content) for item in chat] == [
+            ("user", "A run interrupted by a process restart."),
+            ("assistant", "The web process restarted before this orchestration run finished."),
+        ]
     finally:
         db.close()
 

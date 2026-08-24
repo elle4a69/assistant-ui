@@ -8847,23 +8847,44 @@ AGENT_CONSOLE_TERMINAL_STATUSES = {
     "completed", "cancelled", "failed", "step_limit", "interrupted",
 }
 # This is deliberately explicit. New Operations AI tools never become
-# autonomous merely because they were added to the wider assistant catalog.
-# Commands here are read-only except for one audited, idempotent queue action
-# that can create an isolated review-branch coding task. Runtime changes,
-# proposals, main-branch promotion and deployments are never autonomous.
+# available merely because they were added to the wider assistant catalog.
+# Mutating tools below retain their existing audited proposal, exact owner
+# confirmation, idempotency and review-branch enforcement.
 AGENT_CONSOLE_ALLOWED_TOOLS = frozenset({
     "diagnose_message_handling",
+    "execute_code_deployment",
+    "execute_runtime_change",
     "inspect_conversation",
+    "inspect_code_changes",
+    "inspect_coding_runner",
+    "inspect_coding_task",
+    "inspect_deployments",
     "inspect_recent_failures",
     "inspect_sms_accounts",
     "inspect_system_status",
+    "propose_code_deployment",
+    "propose_runtime_change",
     "recall_operational_memory",
+    "remember_operational_learning",
+    "research_internet",
+    "start_coding_task",
+})
+AGENT_CONSOLE_CRITICAL_TOOLS = frozenset({
+    "execute_code_deployment",
+    "execute_runtime_change",
+    "propose_code_deployment",
+    "propose_runtime_change",
+    "remember_operational_learning",
     "start_coding_task",
 })
 AGENT_RUNS_DIR = Path(PERSIST_DIR) / "agent-runs"
 AGENT_CONSOLE_HISTORY_LIMIT = 50
 AGENT_CONSOLE_HISTORY_DAYS = 30
 AGENT_CONSOLE_WORKSPACE_LIMIT_BYTES = 16 * 1024 * 1024
+AGENT_CONSOLE_CONTEXT_MAX_CHARS = 18_000
+AGENT_CONSOLE_MEMORY_MAX_CHARS = 6_000
+AGENT_CONSOLE_CONTEXT_MESSAGE_LIMIT = 60
+AGENT_CONSOLE_CONTEXT_LEGACY_RUN_LIMIT = 12
 AGENT_CONSOLE_ACTION_TIMEOUT_SECONDS = 30
 AGENT_CONSOLE_CODING_SUBMISSION_RESERVED_SECONDS = 7
 _agent_start_lock = threading.Lock()
@@ -8940,6 +8961,135 @@ def _serialize_agent_event(event: OperationsAgentEvent) -> Dict[str, Any]:
         if key not in frame:
             frame[key] = value
     return frame
+
+
+def _agent_console_chat_message_id(run_id: str, role: str) -> str:
+    """Return a stable chat-row ID so websocket retries cannot duplicate turns."""
+
+    if role not in {"user", "assistant"}:
+        raise AgentConsoleError("Agent conversation roles must be user or assistant.")
+    return f"agent-console:{role}:{run_id}"
+
+
+def _record_agent_chat_message(
+    db: Session,
+    run: OperationsAgentRun,
+    role: str,
+    content: Any,
+) -> OperationsChatMessage:
+    message_id = _agent_console_chat_message_id(run.id, role)
+    existing = db.query(OperationsChatMessage).filter(OperationsChatMessage.id == message_id).first()
+    if existing:
+        return existing
+    clean_content = sanitize_console_text(content, limit=8_000 if role == "user" else 4_000).strip()
+    if not clean_content:
+        clean_content = "The run ended without a usable response." if role == "assistant" else "Continue the task."
+    message = OperationsChatMessage(
+        id=message_id,
+        role=role,
+        content=clean_content,
+        created_at=datetime.utcnow(),
+    )
+    db.add(message)
+    return message
+
+
+def _bounded_context_section(
+    heading: str,
+    entries_newest_first: List[str],
+    max_chars: int,
+) -> str:
+    """Keep the newest complete entries and render them chronologically."""
+
+    budget = max(0, int(max_chars))
+    if not entries_newest_first or budget <= len(heading) + 1:
+        return ""
+    selected: List[str] = []
+    used = len(heading) + 1
+    for entry in entries_newest_first:
+        clean_entry = sanitize_console_text(entry, limit=4_000).strip()
+        if not clean_entry:
+            continue
+        required = len(clean_entry) + 1
+        if used + required > budget:
+            continue
+        selected.append(clean_entry)
+        used += required
+    if not selected:
+        return ""
+    rendered = f"{heading}\n" + "\n".join(reversed(selected))
+    return rendered[:budget]
+
+
+def _build_agent_conversation_context(
+    db: Session,
+    current_run_id: str,
+    *,
+    max_chars: int = AGENT_CONSOLE_CONTEXT_MAX_CHARS,
+) -> str:
+    """Load bounded recent chat plus pre-integration autonomous outcomes."""
+
+    budget = max(0, min(AGENT_CONSOLE_CONTEXT_MAX_CHARS, int(max_chars)))
+    current_user_id = _agent_console_chat_message_id(current_run_id, "user")
+    chat_rows = (
+        db.query(OperationsChatMessage)
+        .filter(OperationsChatMessage.id != current_user_id)
+        .order_by(OperationsChatMessage.created_at.desc(), OperationsChatMessage.id.desc())
+        .limit(AGENT_CONSOLE_CONTEXT_MESSAGE_LIMIT)
+        .all()
+    )
+    chat_entries = [
+        f"{'Owner' if row.role == 'user' else 'Assistant'}: {row.content}"
+        for row in chat_rows
+        if row.role in {"user", "assistant"}
+    ]
+    conversation_budget = max(192, int(budget * 0.82))
+    conversation = _bounded_context_section(
+        "Recent authenticated conversation:",
+        chat_entries,
+        conversation_budget,
+    )
+
+    legacy_runs = (
+        db.query(OperationsAgentRun)
+        .filter(
+            OperationsAgentRun.id != current_run_id,
+            OperationsAgentRun.status.in_(AGENT_CONSOLE_TERMINAL_STATUSES),
+        )
+        .order_by(OperationsAgentRun.updated_at.desc(), OperationsAgentRun.id.desc())
+        .limit(AGENT_CONSOLE_CONTEXT_LEGACY_RUN_LIMIT)
+        .all()
+    )
+    legacy_entries = []
+    for old_run in legacy_runs:
+        represented = db.query(OperationsChatMessage.id).filter(
+            OperationsChatMessage.id == _agent_console_chat_message_id(old_run.id, "assistant")
+        ).first()
+        if represented:
+            continue
+        outcome = old_run.final_summary or old_run.error or old_run.status
+        legacy_entries.append(f"Owner: {old_run.objective}\nAssistant: {outcome}")
+    remaining = budget - len(conversation) - (2 if conversation else 0)
+    legacy = _bounded_context_section(
+        "Earlier autonomous run outcomes:",
+        legacy_entries,
+        remaining,
+    )
+    return "\n\n".join(section for section in (legacy, conversation) if section)[:budget]
+
+
+def _load_agent_console_context(run_id: str) -> tuple[str, str]:
+    db = SessionLocal()
+    try:
+        ensure_operations_owner_working_style(db)
+        conversation = _build_agent_conversation_context(db, run_id)
+        memory = sanitize_console_text(
+            build_operations_ai_memory_context(db, limit=20),
+            limit=AGENT_CONSOLE_MEMORY_MAX_CHARS,
+        )[:AGENT_CONSOLE_MEMORY_MAX_CHARS]
+        return conversation, memory
+    finally:
+        db.close()
 
 
 def _append_agent_event(
@@ -9091,10 +9241,13 @@ def _finish_agent_run(
             run = db.query(OperationsAgentRun).filter(OperationsAgentRun.id == run_id).first()
             if not run or run.status in AGENT_CONSOLE_TERMINAL_STATUSES:
                 return
+            _record_agent_chat_message(db, run, "user", run.objective)
             run.status = status_value
             run.completed_at = datetime.utcnow()
             run.final_summary = sanitize_console_text(summary, limit=4_000) if summary else None
             run.error = sanitize_console_text(error, limit=2_000) if error else None
+            conversational_reply = run.final_summary or sanitize_console_text(message, limit=4_000) or run.error
+            _record_agent_chat_message(db, run, "assistant", conversational_reply)
             _append_agent_event(
                 db,
                 run,
@@ -9119,9 +9272,11 @@ def _interrupt_orphaned_agent_runs(db: Session) -> None:
     for run in active_runs:
         if run.id in _agent_run_tasks:
             continue
+        _record_agent_chat_message(db, run, "user", run.objective)
         run.status = "interrupted"
         run.error = "The web process restarted before this orchestration run finished."
         run.completed_at = datetime.utcnow()
+        _record_agent_chat_message(db, run, "assistant", run.error)
         _append_agent_event(
             db,
             run,
@@ -9168,9 +9323,11 @@ def _interrupt_agent_run_if_orphaned(run_id: str) -> None:
     try:
         run = db.query(OperationsAgentRun).filter(OperationsAgentRun.id == run_id).first()
         if run and run.status in AGENT_CONSOLE_ACTIVE_STATUSES and run.id not in _agent_run_tasks:
+            _record_agent_chat_message(db, run, "user", run.objective)
             run.status = "interrupted"
             run.error = "The web process restarted before this orchestration run finished."
             run.completed_at = datetime.utcnow()
+            _record_agent_chat_message(db, run, "assistant", run.error)
             _append_agent_event(
                 db,
                 run,
@@ -9199,6 +9356,9 @@ def _create_agent_run(request_id: str, objective: str) -> tuple[OperationsAgentR
                 OperationsAgentRun.request_id == canonical_request_id
             ).first()
             if existing:
+                _record_agent_chat_message(db, existing, "user", existing.objective)
+                db.commit()
+                db.refresh(existing)
                 db.expunge(existing)
                 return existing, False
 
@@ -9218,6 +9378,7 @@ def _create_agent_run(request_id: str, objective: str) -> tuple[OperationsAgentR
             )
             db.add(run)
             db.flush()
+            _record_agent_chat_message(db, run, "user", clean_objective)
             _append_agent_event(
                 db,
                 run,
@@ -9440,7 +9601,7 @@ def _agent_model_step(messages: List[Dict[str, str]], timeout_seconds: float = 3
         else client
     )
     response = request_client.beta.chat.completions.parse(
-        model=os.getenv("OPS_AGENT_AUTONOMOUS_MODEL", "gpt-4o-mini"),
+        model=os.getenv("OPS_AGENT_AUTONOMOUS_MODEL", "gpt-5.6-terra"),
         messages=messages,
         response_format=AgentStep,
         max_completion_tokens=700,
@@ -9570,13 +9731,25 @@ def _agent_execute_action(
 
 async def _run_agent_console(run_id: str, objective: str, max_steps: int) -> None:
     tool_catalog = compact_tool_catalog(OPERATIONS_TOOL_SCHEMAS, set(AGENT_CONSOLE_ALLOWED_TOOLS))
-    messages: List[Dict[str, str]] = [
-        {"role": "system", "content": build_agent_system_prompt(tool_catalog, max_steps)},
-        {"role": "user", "content": f"Master objective:\n{objective}"},
-    ]
     loop = asyncio.get_running_loop()
     deadline = loop.time() + agent_console_total_timeout_seconds()
     try:
+        conversation_context, durable_memory = await asyncio.to_thread(
+            _load_agent_console_context,
+            run_id,
+        )
+        messages: List[Dict[str, str]] = [
+            {
+                "role": "system",
+                "content": build_agent_system_prompt(
+                    tool_catalog,
+                    max_steps,
+                    conversation_context=conversation_context,
+                    durable_memory=durable_memory,
+                ),
+            },
+            {"role": "user", "content": f"Current owner message:\n{objective}"},
+        ]
         await asyncio.to_thread(_agent_record_running, run_id)
         for step_number in range(1, max_steps + 1):
             if await _agent_stop_before_next_operation(run_id):
@@ -9624,11 +9797,10 @@ async def _run_agent_console(run_id: str, objective: str, max_steps: int) -> Non
 
             if await _agent_stop_before_next_operation(run_id):
                 return
-            coding_submission = (
-                _agent_virtual_tool_name(step.action, step.arguments) == "start_coding_task"
-            )
+            virtual_tool_name = _agent_virtual_tool_name(step.action, step.arguments)
+            critical_operation = virtual_tool_name in AGENT_CONSOLE_CRITICAL_TOOLS
             if (
-                coding_submission
+                critical_operation
                 and deadline - loop.time() < AGENT_CONSOLE_CODING_SUBMISSION_RESERVED_SECONDS
             ):
                 raise asyncio.TimeoutError
@@ -9639,12 +9811,13 @@ async def _run_agent_console(run_id: str, objective: str, max_steps: int) -> Non
                 _agent_public_action_label(step.action, step.arguments),
                 step.action,
             )
-            cancelled_during_submission = False
+            cancelled_during_critical_operation = False
             try:
-                # Only explicit read-only virtual operations, one idempotent
-                # review-branch queue action, and isolated bounded scratch I/O
-                # reach this boundary. The queue action has a five-second DB
-                # deadline and no production/runtime authority.
+                # Only explicit virtual operations and isolated bounded scratch
+                # I/O reach this boundary. Every mutating operations tool keeps
+                # its own proposal, exact-owner-confirmation and idempotency
+                # checks. Coding queue submission also has a five-second DB
+                # deadline and can create only an isolated review branch.
                 remaining_seconds = deadline - loop.time()
                 if remaining_seconds <= 0:
                     raise asyncio.TimeoutError
@@ -9660,8 +9833,8 @@ async def _run_agent_console(run_id: str, objective: str, max_steps: int) -> Non
                     step.arguments,
                     objective,
                 )
-                if coding_submission:
-                    action_result, cancelled_during_submission = await _await_critical_agent_future(
+                if critical_operation:
+                    action_result, cancelled_during_critical_operation = await _await_critical_agent_future(
                         action_future
                     )
                     label, observation, stream = action_result
@@ -9685,7 +9858,7 @@ async def _run_agent_console(run_id: str, objective: str, max_steps: int) -> Non
                 observation,
                 stream,
             )
-            if cancelled_during_submission:
+            if cancelled_during_critical_operation:
                 raise asyncio.CancelledError
             if await _agent_stop_before_next_operation(run_id):
                 return
@@ -9722,7 +9895,7 @@ async def _run_agent_console(run_id: str, objective: str, max_steps: int) -> Non
         ))
         raise
     except Exception as exc:
-        logger.exception("Autonomous Operations Console run failed")
+        logger.exception("Conversational Operations Coding Agent run failed")
         await asyncio.to_thread(
             _finish_agent_run,
             run_id,
@@ -9916,7 +10089,7 @@ async def operations_agent_websocket(websocket: WebSocket):
         if not agent_console_enabled():
             await websocket.send_json({
                 "type": "error", "code": "console_unavailable",
-                "message": "The autonomous Operations Console is not configured.", "retryable": False,
+                "message": "The Operations Coding Agent is not configured.", "retryable": False,
             })
             await websocket.close(code=1013)
             return
@@ -9985,10 +10158,11 @@ def claim_operations_worker_task(
 def get_operations_chat_messages(db: Session = Depends(get_db)):
     messages = (
         db.query(OperationsChatMessage)
-        .order_by(OperationsChatMessage.created_at.asc(), OperationsChatMessage.id.asc())
+        .order_by(OperationsChatMessage.created_at.desc(), OperationsChatMessage.id.desc())
         .limit(200)
         .all()
     )
+    messages.reverse()
     return {"messages": [serialize_operations_chat_message(item) for item in messages]}
 
 
