@@ -5,7 +5,8 @@ const VOLUME_KEY = 'assistant-ui-incoming-alarm-volume';
 const THREAD_SNAPSHOT_KEY = 'assistant-ui-customer-arrival-alarm-snapshot';
 const ARRIVAL_SESSION_SNAPSHOT_KEY = 'assistant-ui-arrival-session-alarm-snapshot';
 const ARRIVAL_SOUND_ENABLED_KEY = 'assistant-ui-arrival-session-sound-enabled';
-const BOOKING_SNAPSHOT_KEY = 'assistant-ui-booking-alarm-snapshot';
+const BOOKING_SEEN_KEY = 'assistant-ui-booking-alarm-seen-v2';
+const MAX_SEEN_BOOKINGS = 5000;
 
 export interface IncomingAlarmSettings {
   enabled: boolean;
@@ -158,20 +159,89 @@ export async function playBookingAlarm(durationMs = 30000) {
   }, durationMs + 200);
 }
 
-export function processBookingSnapshot(bookings: CalendarBooking[]): CalendarBooking[] {
-  const snapshot = bookings.map((booking) => booking.id);
-  let previous: string[] | null = null;
-  try {
-    const raw = localStorage.getItem(BOOKING_SNAPSHOT_KEY);
-    previous = raw ? JSON.parse(raw) as string[] : null;
-  } catch {
-    previous = null;
-  }
-  localStorage.setItem(BOOKING_SNAPSHOT_KEY, JSON.stringify(snapshot));
-  if (!previous) return [];
+interface SeenBookings {
+  ids: string[];
+  fingerprints: string[];
+}
 
-  const previousIds = new Set(previous);
-  return bookings.filter((booking) => !previousIds.has(booking.id));
+let seenBookingsFallback: SeenBookings | null = null;
+
+function bookingFingerprint(booking: CalendarBooking): string {
+  const normalizeText = (value: string | null | undefined) => (
+    String(value || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase()
+  );
+  const normalizeTime = (value: string | null | undefined) => {
+    const timestamp = Date.parse(String(value || ''));
+    return Number.isFinite(timestamp) ? String(timestamp) : normalizeText(value);
+  };
+  return [
+    normalizeText(booking.customerPhone).replace(/\s+/g, ''),
+    normalizeText(booking.summary),
+    normalizeTime(booking.startTime),
+    normalizeTime(booking.endTime),
+  ].join('|');
+}
+
+function readSeenBookings(): SeenBookings | null {
+  try {
+    const raw = localStorage.getItem(BOOKING_SEEN_KEY);
+    if (!raw) return seenBookingsFallback;
+    const parsed = JSON.parse(raw) as Partial<SeenBookings>;
+    if (!Array.isArray(parsed.ids) || !Array.isArray(parsed.fingerprints)) return seenBookingsFallback;
+    const state = {
+      ids: parsed.ids.filter((value): value is string => typeof value === 'string'),
+      fingerprints: parsed.fingerprints.filter((value): value is string => typeof value === 'string'),
+    };
+    seenBookingsFallback = state;
+    return state;
+  } catch {
+    return seenBookingsFallback;
+  }
+}
+
+function writeSeenBookings(state: SeenBookings) {
+  const bounded = {
+    ids: state.ids.slice(-MAX_SEEN_BOOKINGS),
+    fingerprints: state.fingerprints.slice(-MAX_SEEN_BOOKINGS),
+  };
+  seenBookingsFallback = bounded;
+  try {
+    localStorage.setItem(BOOKING_SEEN_KEY, JSON.stringify(bounded));
+  } catch {
+    // The in-memory fallback still prevents repeats during this app session.
+  }
+}
+
+export function processBookingSnapshot(bookings: CalendarBooking[]): CalendarBooking[] {
+  const previous = readSeenBookings();
+  const previousIds = new Set(previous?.ids || []);
+  const previousFingerprints = new Set(previous?.fingerprints || []);
+  const allIds = new Set(previousIds);
+  const allFingerprints = new Set(previousFingerprints);
+  const newFingerprints = new Set<string>();
+  const newlyCreated: CalendarBooking[] = [];
+
+  bookings.forEach((booking) => {
+    const id = String(booking.id || '').trim();
+    const fingerprint = bookingFingerprint(booking);
+    const wasSeen = (id && previousIds.has(id)) || previousFingerprints.has(fingerprint);
+    const startTimestamp = Date.parse(String(booking.startTime || ''));
+    const isUpcoming = Number.isFinite(startTimestamp) && startTimestamp > Date.now();
+    const isScheduled = !booking.status || booking.status === 'scheduled';
+
+    if (id) allIds.add(id);
+    allFingerprints.add(fingerprint);
+    if (!previous || wasSeen || !isUpcoming || !isScheduled || newFingerprints.has(fingerprint)) return;
+
+    newFingerprints.add(fingerprint);
+    newlyCreated.push(booking);
+  });
+
+  writeSeenBookings({
+    ids: Array.from(allIds),
+    fingerprints: Array.from(allFingerprints),
+  });
+  return newlyCreated;
 }
 
 function readPreviousSnapshot(): Record<string, string> | null {
