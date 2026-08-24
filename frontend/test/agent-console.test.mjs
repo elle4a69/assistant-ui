@@ -81,6 +81,30 @@ test('terminal chunks strip dangerous controls before xterm rendering', () => {
   assert.equal(cleaned.includes('\u009b'), false);
 });
 
+test('structured terminal results are rendered as readable text instead of raw JSON', () => {
+  const formatted = protocol.formatAgentTerminalMessage(
+    '$ ops inspect_system_status\n'
+      + '{"status":"ok","service":"assistant-ui","checks":[{"name":"database","healthy":true}],"warnings":[]}',
+  );
+
+  assert.equal(formatted, [
+    'Result: Inspect system status',
+    'Status: ok',
+    'Service: assistant-ui',
+    'Checks:',
+    '  1.',
+    '    Name: database',
+    '    Healthy: Yes',
+    'Warnings:',
+    '  None',
+  ].join('\n'));
+  assert.doesNotMatch(formatted, /[{}"]|"status"/);
+  assert.equal(
+    protocol.formatAgentTerminalMessage('$ read main:notes.txt\nplain text output'),
+    '$ read main:notes.txt\nplain text output',
+  );
+});
+
 test('Agent Runner is monitor-only, responsive and cleans up browser resources', () => {
   assert.match(viewSource, /from '@xterm\/xterm'/);
   assert.match(viewSource, /from '@xterm\/addon-fit'/);
@@ -94,6 +118,7 @@ test('Agent Runner is monitor-only, responsive and cleans up browser resources',
   assert.match(viewSource, /reconnectAttemptRef\.current >= 4/);
   assert.match(viewSource, /cancelRequestedRef\.current = true/);
   assert.match(viewSource, /shouldResendAgentCancellation\(mode, cancelRequestedRef\.current/);
+  assert.match(viewSource, /formatAgentTerminalMessage\(frame\.message\)/);
   assert.match(viewSource, /socket\.send\(JSON\.stringify\(\{ type: 'cancel', runId: options\.runId \}\)\)/);
   assert.match(viewSource, /type:\s*'cancel'/);
   assert.match(viewSource, /sessionStorage/);

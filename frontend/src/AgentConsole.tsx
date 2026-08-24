@@ -17,6 +17,7 @@ import {
 import { listAgentConsoleRuns, type AgentConsoleRun } from './api';
 import {
   buildAgentWebSocketUrl,
+  formatAgentTerminalMessage,
   isRunAcknowledgementFrame,
   nextAgentConsoleState,
   parseAgentConsoleFrame,
@@ -139,7 +140,10 @@ export default function AgentConsole() {
     if (frame.message) {
       if (frame.type !== 'terminal') setStatusMessage(frame.message);
       if (frame.type === 'terminal') {
-        writeConsole(frame.message, frame.stream === 'stderr' ? '\x1b[1;31m' : '\x1b[0;37m');
+        writeConsole(
+          formatAgentTerminalMessage(frame.message),
+          frame.stream === 'stderr' ? '\x1b[1;31m' : '\x1b[0;37m',
+        );
       } else if (frame.type === 'completed') {
         writeConsole(`✓ ${frame.message}`, '\x1b[1;32m');
       } else if (frame.type === 'error') {
