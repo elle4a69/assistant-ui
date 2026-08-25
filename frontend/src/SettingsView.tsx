@@ -121,6 +121,8 @@ export default function SettingsView() {
   const [savingMessageDisplay, setSavingMessageDisplay] = useState(false);
   const [clearingPendingDrafts, setClearingPendingDrafts] = useState(false);
   const [clearingReviewTags, setClearingReviewTags] = useState(false);
+  const [catchUpLookbackDays, setCatchUpLookbackDays] = useState(3);
+  const [savingCatchUpWindow, setSavingCatchUpWindow] = useState(false);
   const [incomingAlarmEnabled, setIncomingAlarmEnabledState] = useState(() => getIncomingAlarmSettings().enabled);
   const [incomingAlarmVolume, setIncomingAlarmVolumeState] = useState(() => getIncomingAlarmSettings().volume);
   const [testingIncomingAlarm, setTestingIncomingAlarm] = useState(false);
@@ -234,6 +236,7 @@ export default function SettingsView() {
       setUserPrompt(settingsData.userPrompt);
       setHasGoogleCreds(settingsData.hasGoogleCredentials);
       setShowMessageAvatars(settingsData.showMessageAvatars !== false);
+      setCatchUpLookbackDays(settingsData.catchUpLookbackDays ?? 3);
       setSettingsConnectionError(false);
 
     } catch (err) {
@@ -356,6 +359,21 @@ export default function SettingsView() {
       triggerBanner('error', 'Failed to clear review tags.');
     } finally {
       setClearingReviewTags(false);
+    }
+  };
+
+  const handleSaveCatchUpWindow = async () => {
+    const nextValue = Math.min(30, Math.max(1, Math.round(catchUpLookbackDays || 1)));
+    setCatchUpLookbackDays(nextValue);
+    setSavingCatchUpWindow(true);
+    try {
+      await updateSettings({ catchUpLookbackDays: nextValue });
+      triggerBanner('success', `Catch-up will only consider messages from the last ${nextValue} day${nextValue === 1 ? '' : 's'}.`);
+    } catch (err) {
+      console.error(err);
+      triggerBanner('error', 'Failed to save the catch-up window.');
+    } finally {
+      setSavingCatchUpWindow(false);
     }
   };
 
@@ -1084,6 +1102,36 @@ export default function SettingsView() {
                   {clearingReviewTags ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
                   {clearingReviewTags ? 'Clearing…' : 'Clear review tags'}
                 </button>
+              </div>
+
+              <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100">
+                <div className="flex items-start gap-3 min-w-0">
+                  <RefreshCw className="w-4 h-4 text-indigo-600 mt-0.5 shrink-0" />
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-slate-800">Catch-up window</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Refresh only considers unanswered messages from this many days ago. Older messages are skipped and create no drafts.</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <input
+                    type="number"
+                    min="1"
+                    max="30"
+                    value={catchUpLookbackDays}
+                    onChange={(event) => setCatchUpLookbackDays(Number(event.target.value))}
+                    aria-label="Catch-up window in days"
+                    className="w-16 rounded-lg border border-slate-300 px-2 py-2 text-center text-xs font-bold text-slate-800"
+                  />
+                  <span className="text-[10px] font-semibold text-slate-500">days</span>
+                  <button
+                    type="button"
+                    disabled={savingCatchUpWindow}
+                    onClick={handleSaveCatchUpWindow}
+                    className="rounded-lg border border-indigo-200 bg-white px-3 py-2 text-[10px] font-bold text-indigo-700 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
+                  >
+                    {savingCatchUpWindow ? 'Saving…' : 'Save'}
+                  </button>
+                </div>
               </div>
 
               <div className="p-4 space-y-4">

@@ -114,6 +114,27 @@ def test_catch_up_returns_none_when_only_drafts_or_disabled_threads_remain():
     assert find_oldest_catch_up_candidate(db) is None
 
 
+def test_catch_up_skips_messages_older_than_configured_lookback(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.utcnow()
+    make_thread(db, "too-old", "+2011")
+    add_message(db, "too-old-message", "too-old", "customer", now - timedelta(days=2))
+    make_thread(db, "recent", "+2012")
+    add_message(db, "recent-message", "recent", "customer", now - timedelta(hours=4))
+    db.commit()
+    monkeypatch.setattr(main, "load_message_ui_settings", lambda: {
+        "showMessageAvatars": True, "catchUpLookbackDays": 1,
+    })
+
+    thread, message = find_oldest_catch_up_candidate(db)
+
+    assert thread.id == "recent"
+    assert message.id == "recent-message"
+    db.close()
+
+
 def test_new_inbound_restores_only_automatic_taken_over_state(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -200,3 +221,4 @@ def test_catch_up_endpoint_creates_one_draft_without_dispatch(monkeypatch):
         "outcome": "complete",
         "remaining": 0,
     }
+

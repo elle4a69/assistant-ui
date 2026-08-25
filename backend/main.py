@@ -4656,7 +4656,7 @@ def has_active_explicit_takeover(db: Session, thread_id: str) -> bool:
 
 
 def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
-    """Return unanswered conversations, excluding only genuine operator control."""
+    """Return unanswered conversations inside the configured catch-up window."""
     ranked_messages = db.query(
         Message.id.label("message_id"),
         Message.thread_id.label("thread_id"),
@@ -4708,9 +4708,15 @@ def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
             if message_id:
                 explicitly_missed.add(message_id)
 
-    cutoff = datetime.utcnow() - timedelta(minutes=3)
+    catch_up_after = datetime.utcnow() - timedelta(
+        days=load_message_ui_settings()["catchUpLookbackDays"]
+    )
+    settling_cutoff = datetime.utcnow() - timedelta(minutes=3)
     candidates = []
     for thread, latest in rows:
+        # Do not turn historical inbound messages into fresh catch-up work.
+        if latest.at < catch_up_after:
+            continue
         # A taken-over state is genuine only when an operator explicitly used
         # Take over. Draft approval/discard/cleanup historically set the same
         # state automatically and must not strand later customer messages.
@@ -4720,7 +4726,7 @@ def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
         retry_after_clear = any(
             cleared_at >= latest.at for cleared_at in cleared_events.get(thread.id, [])
         )
-        if latest.id in explicitly_missed or latest.at <= cutoff or retry_after_clear:
+        if latest.id in explicitly_missed or latest.at <= settling_cutoff or retry_after_clear:
             candidates.append((thread, latest))
     return sorted(candidates, key=lambda item: (item[1].at, item[1].id))
 
@@ -6833,6 +6839,7 @@ class SettingsUpdateInput(BaseModel):
     autoReplyGlobalEnabled: Optional[bool] = None
     trainingModeEnabled: Optional[bool] = None
     showMessageAvatars: Optional[bool] = None
+    catchUpLookbackDays: Optional[int] = Field(default=None, ge=1, le=30)
 
 
 class OperationsChatInput(BaseModel):
@@ -6857,19 +6864,31 @@ class OperationsRealtimeTurnInput(BaseModel):
 
 
 MESSAGE_UI_SETTINGS_PATH = os.path.join(DATA_DIR, "message_ui_settings.json")
+DEFAULT_CATCH_UP_LOOKBACK_DAYS = 3
 
 
-def load_message_ui_settings() -> dict[str, bool]:
+def load_message_ui_settings() -> Dict[str, Any]:
+    defaults = {
+        "showMessageAvatars": True,
+        "catchUpLookbackDays": DEFAULT_CATCH_UP_LOOKBACK_DAYS,
+    }
     if not os.path.exists(MESSAGE_UI_SETTINGS_PATH):
-        return {"showMessageAvatars": True}
+        return defaults
     try:
         with open(MESSAGE_UI_SETTINGS_PATH, "r", encoding="utf-8") as handle:
             saved = json.load(handle)
-        if isinstance(saved, dict) and "showMessageAvatars" in saved:
-            return {"showMessageAvatars": bool(saved["showMessageAvatars"])}
+        if isinstance(saved, dict):
+            try:
+                lookback_days = int(saved.get("catchUpLookbackDays", DEFAULT_CATCH_UP_LOOKBACK_DAYS))
+            except (TypeError, ValueError):
+                lookback_days = DEFAULT_CATCH_UP_LOOKBACK_DAYS
+            return {
+                "showMessageAvatars": bool(saved.get("showMessageAvatars", True)),
+                "catchUpLookbackDays": min(30, max(1, lookback_days)),
+            }
     except Exception:
         pass
-    return {"showMessageAvatars": True}
+    return defaults
 
 
 def serialize_operations_chat_message(message: OperationsChatMessage) -> Dict[str, str]:
@@ -10689,6 +10708,7 @@ def get_settings():
         "autoReplyGlobalEnabled": AUTO_REPLY_GLOBAL_ENABLED,
         "trainingModeEnabled": TRAINING_MODE_ENABLED,
         "showMessageAvatars": load_message_ui_settings()["showMessageAvatars"],
+        "catchUpLookbackDays": load_message_ui_settings()["catchUpLookbackDays"],
     }
 
 
@@ -10728,11 +10748,16 @@ def update_settings(payload: SettingsUpdateInput):
         except Exception as e:
             print(f"Failed to save training mode state: {e}")
 
-    if payload.showMessageAvatars is not None:
+    if payload.showMessageAvatars is not None or payload.catchUpLookbackDays is not None:
         try:
             os.makedirs(os.path.dirname(MESSAGE_UI_SETTINGS_PATH), exist_ok=True)
+            message_ui_settings = load_message_ui_settings()
+            if payload.showMessageAvatars is not None:
+                message_ui_settings["showMessageAvatars"] = payload.showMessageAvatars
+            if payload.catchUpLookbackDays is not None:
+                message_ui_settings["catchUpLookbackDays"] = payload.catchUpLookbackDays
             with open(MESSAGE_UI_SETTINGS_PATH, "w", encoding="utf-8") as handle:
-                json.dump({"showMessageAvatars": payload.showMessageAvatars}, handle, indent=2)
+                json.dump(message_ui_settings, handle, indent=2)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Failed to save message UI settings: {exc}")
 

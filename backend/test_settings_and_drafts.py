@@ -54,8 +54,14 @@ def test_avatar_setting_can_be_saved_as_false(monkeypatch, tmp_path):
     result = main.update_settings(SettingsUpdateInput(showMessageAvatars=False))
 
     assert result == {"status": "success"}
-    assert main.load_message_ui_settings() == {"showMessageAvatars": False}
-    assert json.loads(settings_path.read_text(encoding="utf-8")) == {"showMessageAvatars": False}
+    assert main.load_message_ui_settings() == {
+        "showMessageAvatars": False,
+        "catchUpLookbackDays": main.DEFAULT_CATCH_UP_LOOKBACK_DAYS,
+    }
+    assert json.loads(settings_path.read_text(encoding="utf-8")) == {
+        "showMessageAvatars": False,
+        "catchUpLookbackDays": main.DEFAULT_CATCH_UP_LOOKBACK_DAYS,
+    }
 
 
 def test_legacy_first_contact_settings_migrate_to_tori_only(monkeypatch, tmp_path):

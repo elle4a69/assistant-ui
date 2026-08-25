@@ -544,6 +544,7 @@ export interface SystemSettings {
   autoReplyGlobalEnabled?: boolean;
   trainingModeEnabled?: boolean;
   showMessageAvatars?: boolean;
+  catchUpLookbackDays?: number;
 }
 
 export interface KnowledgeFile {
@@ -703,7 +704,7 @@ export async function getSettings(): Promise<SystemSettings> {
   return response.json();
 }
 
-export async function updateSettings(settings: { openaiApiKey?: string; systemPrompt?: string; userPrompt?: string; autoReplyGlobalEnabled?: boolean; trainingModeEnabled?: boolean; showMessageAvatars?: boolean }): Promise<{ status: string }> {
+export async function updateSettings(settings: { openaiApiKey?: string; systemPrompt?: string; userPrompt?: string; autoReplyGlobalEnabled?: boolean; trainingModeEnabled?: boolean; showMessageAvatars?: boolean; catchUpLookbackDays?: number }): Promise<{ status: string }> {
   const response = await apiFetch(`${API_BASE}/api/settings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
