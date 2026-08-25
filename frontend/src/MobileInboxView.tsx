@@ -23,6 +23,7 @@ import {
   catchUpMissedMessage,
   approveDraft,
   discardDraft,
+  updateDraft,
   respondToInformationRequest,
   acknowledgeThreadArrival,
   Message,
@@ -77,6 +78,9 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const [catchingUp, setCatchingUp] = useState(false)
   const [notice, setNotice] = useState('')
   const [reviewingDraftId, setReviewingDraftId] = useState<string | null>(null)
+  const [editingDraftId, setEditingDraftId] = useState<string | null>(null)
+  const [editingDraftText, setEditingDraftText] = useState('')
+  const [savingDraft, setSavingDraft] = useState(false)
   const [requestedInformation, setRequestedInformation] = useState('')
   const [submittingInformation, setSubmittingInformation] = useState(false)
   const [error, setError] = useState('')
@@ -348,6 +352,23 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     } finally {
       reviewingDraftRef.current = null
       setReviewingDraftId(null)
+    }
+  }
+
+  const saveDraftEdit = async (messageId: string) => {
+    const text = editingDraftText.trim()
+    if (!text || savingDraft) return
+    setSavingDraft(true)
+    setError('')
+    try {
+      await updateDraft(messageId, text)
+      setEditingDraftId(null)
+      setEditingDraftText('')
+      await loadThread()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Draft could not be updated')
+    } finally {
+      setSavingDraft(false)
     }
   }
 
@@ -668,7 +689,16 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                       }`}
                     >
                       {isDraft && <p className="mb-1 text-[9px] font-black uppercase tracking-widest text-amber-700">Draft—not sent</p>}
-                      <p className="whitespace-pre-wrap break-words text-[15px] leading-snug">{message.text}</p>
+                      {isDraft && editingDraftId === message.id ? (
+                        <textarea
+                          value={editingDraftText}
+                          onChange={event => setEditingDraftText(event.target.value)}
+                          className="min-h-24 w-full rounded-lg border border-amber-300 bg-white p-2 text-[15px] leading-snug text-slate-900"
+                          aria-label="Edit draft reply"
+                        />
+                      ) : (
+                        <p className="whitespace-pre-wrap break-words text-[15px] leading-snug">{message.text}</p>
+                      )}
                       <div className={`mt-1 flex items-center justify-end gap-1 text-[9px] ${
                         incoming ? 'text-slate-400' : isDraft ? 'text-amber-700' : 'text-emerald-100'
                       }`}>
@@ -677,6 +707,34 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                       </div>
                       {isDraft && (
                         <div className="mt-2 flex gap-2 border-t border-amber-200 pt-2">
+                          {editingDraftId === message.id ? (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => { setEditingDraftId(null); setEditingDraftText('') }}
+                                disabled={savingDraft}
+                                className="flex min-h-9 flex-1 items-center justify-center rounded-lg bg-white text-xs font-bold text-slate-600 disabled:opacity-50"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => saveDraftEdit(message.id)}
+                                disabled={savingDraft || !editingDraftText.trim()}
+                                className="flex min-h-9 flex-1 items-center justify-center rounded-lg bg-amber-600 text-xs font-bold text-white disabled:opacity-50"
+                              >
+                                Save edit
+                              </button>
+                            </>
+                          ) : <>
+                          <button
+                            type="button"
+                            onClick={() => { setEditingDraftId(message.id); setEditingDraftText(message.text) }}
+                            disabled={reviewingDraftId === message.id}
+                            className="flex min-h-9 flex-1 items-center justify-center rounded-lg bg-white text-xs font-bold text-slate-600 disabled:opacity-50"
+                          >
+                            Edit
+                          </button>
                           <button
                             type="button"
                             onClick={() => reviewDraft(message.id, 'discard')}
@@ -693,6 +751,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                           >
                             <Check className="h-3.5 w-3.5" /> Send
                           </button>
+                          </>}
                         </div>
                       )}
                     </div>

@@ -165,6 +165,64 @@ def test_clear_review_only_threads_preserves_pending_drafts():
     db.close()
 
 
+def test_edited_draft_is_saved_as_classified_learning_after_approval(monkeypatch, tmp_path):
+    client = FakeLearningClient(lambda kwargs: json.dumps({"classifications": [{
+        "id": json.loads(kwargs["input"])["records"][0]["id"],
+        "scope": "shared",
+        "category": "service_specific",
+        "retrieval_enabled": True,
+    }]}))
+    monkeypatch.setattr(main, "openai_client", client)
+    monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "KNOWLEDGE_CHUNKS", [])
+    db = make_db()
+    add_thread(db, "thread-101")
+    thread = db.query(Thread).filter(Thread.id == "thread-101").one()
+    thread.customer_phone = "locanto_learning_test"
+    now = datetime.utcnow()
+    db.add_all([
+        Message(id="customer-learning", thread_id=thread.id, role="customer", text="Do you offer the natural service?", at=now),
+        Message(id="draft-learning", thread_id=thread.id, role="draft", text="Initial draft", at=now + timedelta(seconds=1)),
+    ])
+    db.commit()
+
+    main.update_draft_message(
+        "draft-learning",
+        main.DraftUpdateInput(text="Yes, natural service is available. Have a look at the service page too."),
+        db,
+    )
+    result = main.approve_draft_message("draft-learning", db)
+
+    saved = json.loads((tmp_path / main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8").strip())
+    assert result["status"] == "success"
+    assert result["learningSaved"] is True
+    assert saved["type"] == "staff_edited_draft"
+    assert saved["retrieval_enabled"] is True
+    assert saved["example_reply"].startswith("Yes, natural service")
+    assert db.query(Message).filter(Message.id == "draft-learning").one().role == "agent"
+    db.close()
+
+
+def test_unedited_draft_is_not_added_to_learning(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
+    db = make_db()
+    add_thread(db, "thread-102")
+    thread = db.query(Thread).filter(Thread.id == "thread-102").one()
+    thread.customer_phone = "locanto_unedited_test"
+    now = datetime.utcnow()
+    db.add_all([
+        Message(id="customer-unedited", thread_id=thread.id, role="customer", text="Hello", at=now),
+        Message(id="draft-unedited", thread_id=thread.id, role="draft", text="Hi there", at=now + timedelta(seconds=1)),
+    ])
+    db.commit()
+
+    result = main.approve_draft_message("draft-unedited", db)
+
+    assert result["learningSaved"] is False
+    assert not (tmp_path / main.LEARNED_INFORMATION_FILENAME).exists()
+    db.close()
+
+
 def test_manual_learning_is_ai_structured_saved_and_reindexed(monkeypatch, tmp_path):
     client = FakeLearningClient([
         json.dumps({

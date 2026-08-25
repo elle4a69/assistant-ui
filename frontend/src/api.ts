@@ -1110,6 +1110,19 @@ export async function approveDraft(messageId: string): Promise<{ status: string 
   return response.json();
 }
 
+export async function updateDraft(messageId: string, text: string): Promise<{ status: string }> {
+  const response = await apiFetch(`${API_BASE}/api/messages/${messageId}/draft`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Failed to update draft message: ${response.statusText}`);
+  }
+  return response.json();
+}
+
 export async function discardDraft(messageId: string): Promise<{ status: string }> {
   const response = await apiFetch(`${API_BASE}/api/messages/${messageId}/discard`, {
     method: 'POST',

@@ -12,6 +12,7 @@ import {
   getFreeBusy,
   approveDraft,
   discardDraft,
+  updateDraft,
   respondToInformationRequest,
   acknowledgeThreadArrival,
   deleteBooking,
@@ -51,12 +52,14 @@ function SmsAssistantThread({
   messages,
   events = [],
   onApproveDraft,
-  onDiscardDraft
+  onDiscardDraft,
+  onEditDraft
 }: {
   messages: Message[];
   events?: any[];
   onApproveDraft?: (messageId: string) => void;
   onDiscardDraft?: (messageId: string) => void;
+  onEditDraft?: (messageId: string, text: string) => void;
 }) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -130,6 +133,17 @@ function SmsAssistantThread({
                 <p className="whitespace-pre-wrap font-medium leading-relaxed mt-0.5">{m.text}</p>
                 {isDraft && onApproveDraft && onDiscardDraft && (
                   <div className="flex items-center gap-2 mt-2 pt-2 border-t border-amber-200/50 justify-end">
+                    {onEditDraft && (
+                      <button
+                        onClick={() => {
+                          const edited = window.prompt('Edit draft reply', m.text);
+                          if (edited !== null && edited.trim() && edited.trim() !== m.text) onEditDraft(m.id, edited.trim());
+                        }}
+                        className="px-2.5 py-1 text-[9px] font-extrabold bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 rounded-md transition-colors cursor-pointer"
+                      >
+                        Edit
+                      </button>
+                    )}
                     <button
                       onClick={() => onDiscardDraft(m.id)}
                       className="px-2.5 py-1 text-[9px] font-extrabold bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-md transition-colors cursor-pointer"
@@ -161,7 +175,8 @@ function CustomThreadWrapper({
   onSendReply,
   isSendDisabled,
   onApproveDraft,
-  onDiscardDraft
+  onDiscardDraft,
+  onEditDraft
 }: {
   messages: Message[];
   events?: any[];
@@ -169,6 +184,7 @@ function CustomThreadWrapper({
   isSendDisabled: boolean;
   onApproveDraft?: (messageId: string) => void;
   onDiscardDraft?: (messageId: string) => void;
+  onEditDraft?: (messageId: string, text: string) => void;
 }) {
   const convertedMessages = useMemo(() => {
     return messages.map((m) => {
@@ -206,6 +222,7 @@ function CustomThreadWrapper({
           events={events}
           onApproveDraft={onApproveDraft}
           onDiscardDraft={onDiscardDraft}
+          onEditDraft={onEditDraft}
         />
       </div>
     </AssistantRuntimeProvider>
@@ -524,6 +541,16 @@ export default function SmsTriageDashboard() {
       await Promise.all([fetchThreadsList(), fetchThreadDetail(selectedThreadId, true)]);
     } catch (err) {
       alert('Failed to discard draft message');
+    }
+  };
+
+  const handleEditDraft = async (messageId: string, text: string) => {
+    if (!selectedThreadId) return;
+    try {
+      await updateDraft(messageId, text);
+      await fetchThreadDetail(selectedThreadId, true);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to update draft message');
     }
   };
 
@@ -978,6 +1005,7 @@ export default function SmsTriageDashboard() {
                     isSendDisabled={!isReplyEnabled || sendingReply}
                     onApproveDraft={handleApproveDraft}
                     onDiscardDraft={handleDiscardDraft}
+                    onEditDraft={handleEditDraft}
                   />
                 )}
 
@@ -1128,3 +1156,4 @@ export default function SmsTriageDashboard() {
     </div>
   );
 }
+

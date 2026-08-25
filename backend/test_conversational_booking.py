@@ -281,7 +281,7 @@ def test_proposal_fails_closed_when_live_calendar_cannot_be_verified(tmp_path, m
     db.close()
 
 
-def test_live_reply_flow_proposes_then_confirms_on_the_next_customer_turn(tmp_path, monkeypatch):
+def test_live_reply_flow_books_immediately_when_details_are_complete(tmp_path, monkeypatch):
     service = {"id": "service", "name": "Service", "duration": 30, "price": 100}
     (tmp_path / "services.json").write_text(json.dumps([service]), encoding="utf-8")
     monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
@@ -333,7 +333,7 @@ def test_live_reply_flow_proposes_then_confirms_on_the_next_customer_turn(tmp_pa
             },
             "proposal-call",
         )]),
-        FakeResponse(output_text="Service for Example Customer at 2:00 PM, 30 minutes. Is that correct?"),
+        FakeResponse(output_text="All good, see you then."),
     ])
     monkeypatch.setattr(main, "openai_client", proposal_client)
 
@@ -343,36 +343,6 @@ def test_live_reply_flow_proposes_then_confirms_on_the_next_customer_turn(tmp_pa
         first_customer.text,
         first_customer.provider_message_id,
         first_customer.at,
-        dispatch_sms=False,
-    )
-
-    db.refresh(thread)
-    assert booked is False
-    assert thread.pending_booking is not None
-    assert calendar.created == []
-
-    confirmation = Message(
-        id="confirmation-message",
-        thread_id=thread.id,
-        role="customer",
-        text="Yes, that's correct",
-        provider_message_id="confirmation-provider-id",
-        at=main.datetime.utcnow() + timedelta(seconds=1),
-    )
-    db.add(confirmation)
-    db.commit()
-    confirmation_client = SequenceClient([
-        FakeResponse(output=[FakeFunctionCall("confirm_booking", {}, "confirmation-call")]),
-        FakeResponse(output_text="Confirmed. Your Service booking is all set for 2:00 PM."),
-    ])
-    monkeypatch.setattr(main, "openai_client", confirmation_client)
-
-    booked, _ = run_sms_reply_logic(
-        db,
-        thread.id,
-        confirmation.text,
-        confirmation.provider_message_id,
-        confirmation.at,
         dispatch_sms=False,
     )
 
@@ -388,9 +358,8 @@ def test_live_reply_flow_proposes_then_confirms_on_the_next_customer_turn(tmp_pa
     assert confirmation_reply is not None
     assert "When you arrive, tap:" in confirmation_reply.text
     assert "/a/" in confirmation_reply.text
-    assert "Pending conversational booking proposal" in json.dumps(
-        confirmation_client.calls[0]["input"]
-    )
+    assert "Is that correct" not in confirmation_reply.text
+    assert len(proposal_client.calls) == 3
     db.close()
 
 
@@ -498,7 +467,7 @@ def test_live_reply_flow_can_discover_then_propose_in_separate_tool_rounds(tmp_p
             },
             "proposal-call",
         )]),
-        FakeResponse(output_text="Service for Example Customer at 2:00 PM for 60 minutes. Is that correct?"),
+        FakeResponse(output_text="All good, see you then."),
     ])
     monkeypatch.setattr(main, "openai_client", client)
 
@@ -512,12 +481,11 @@ def test_live_reply_flow_can_discover_then_propose_in_separate_tool_rounds(tmp_p
     )
 
     db.refresh(thread)
-    assert booked is False
-    assert thread.pending_booking is not None
-    assert json.loads(thread.pending_booking)["start_time"] == start.isoformat()
+    assert booked is True
+    assert thread.pending_booking is None
     assert len(client.calls) == 3
     assert all("tools" in call for call in client.calls[:2])
-    assert calendar.created == []
+    assert len(calendar.created) == 1
     db.close()
 
 
@@ -823,3 +791,4 @@ def test_calendar_only_validator_requires_a_fresh_lookup():
     assert main.validate_calendar_only_reply(
         "I have an opening at 3pm.", live_lookup_succeeded=True,
     ) is None
+

@@ -2078,6 +2078,46 @@ def save_manual_learning(
     return entry
 
 
+def save_edited_draft_learning(db: Session, thread: Thread, draft: Message) -> Optional[Dict[str, Any]]:
+    """Turn a staff-edited draft into safely classified reusable guidance.
+
+    The classifier is the gatekeeper: appointment details, current availability,
+    names and other customer-specific material are retained only as quarantined
+    audit knowledge and are never supplied to a later customer conversation.
+    """
+    customer_message = db.query(Message).filter(
+        Message.thread_id == thread.id,
+        Message.role == "customer",
+        Message.at <= draft.at,
+    ).order_by(Message.at.desc(), Message.id.desc()).first()
+    if not customer_message:
+        return None
+    now = datetime.utcnow().isoformat() + "Z"
+    entry = {
+        "id": f"edited-draft-{draft.id}",
+        "type": "staff_edited_draft",
+        "topic": "Staff-approved customer response",
+        "applies_when": customer_message.text.strip()[:1000],
+        "instruction": "Use the approved response only when its facts are durable and relevant.",
+        "example_reply": draft.text.strip(),
+        "question": customer_message.text.strip(),
+        "owner_information": draft.text.strip(),
+        "text": (
+            f"Customer question: {customer_message.text.strip()}\n"
+            f"Staff-approved reply: {draft.text.strip()}"
+        ),
+        "created_at": now,
+        "updated_at": now,
+    }
+    entry.update(
+        classify_knowledge_entries([entry]).get(
+            entry["id"], _quarantined_knowledge_classification()
+        )
+    )
+    _upsert_learned_information_entry(entry)
+    return entry
+
+
 def find_pending_information_request(
     db: Session,
     thread_id: str,
@@ -2593,6 +2633,17 @@ class ReplyInput(BaseModel):
             raise ValueError("Reply text is required.")
         return self
 
+
+class DraftUpdateInput(BaseModel):
+    text: str = Field(min_length=1, max_length=1600)
+
+    @model_validator(mode="after")
+    def clean_draft(self):
+        self.text = self.text.strip()
+        if not self.text:
+            raise ValueError("Draft text is required.")
+        return self
+
 class NoteInput(BaseModel):
     agentId: str
     text: str
@@ -3078,9 +3129,8 @@ def propose_conversational_booking(
         "status": "awaiting_confirmation",
         "proposal": proposal,
         "instruction": (
-            "Present the service, date, time, and customer name, then ask them to confirm. "
-            "Present the duration only when show_duration is true. "
-            "Do not say it is booked or confirmed yet."
+            "The application will immediately re-check the live calendar before creating this booking. "
+            "After confirmed, send a short natural confirmation without recapping the appointment."
         ),
     }
 
@@ -3089,15 +3139,23 @@ def confirm_conversational_booking(
     db: Session,
     thread: Thread,
     customer_confirmation: str,
+    *,
+    proposal_override: Optional[Dict[str, Any]] = None,
+    require_customer_confirmation: bool = True,
 ) -> tuple[Dict[str, Any], bool]:
-    """Execute the saved proposal only after a later explicit customer confirmation."""
-    if not is_explicit_booking_confirmation(customer_confirmation):
+    """Create a booking from a validated proposal and re-check live availability.
+
+    The standard legacy path confirms a stored proposal on a later customer turn.
+    A complete service/time/name request can use a supplied proposal on the same
+    turn; it still goes through the identical immediate calendar re-check.
+    """
+    if require_customer_confirmation and not is_explicit_booking_confirmation(customer_confirmation):
         return {
             "status": "rejected",
             "reason": "The customer's latest message was not an explicit confirmation.",
         }, False
     try:
-        proposal = json.loads(thread.pending_booking or "")
+        proposal = proposal_override or json.loads(thread.pending_booking or "")
         proposed_at = datetime.fromisoformat(proposal["created_at"])
         start = parse_business_datetime(proposal["start_time"])
         duration = int(proposal["duration"])
@@ -4142,9 +4200,9 @@ def run_sms_reply_logic(
                     "type": "function",
                     "name": "propose_booking",
                     "description": (
-                        "Validate and save a booking proposal after the customer has supplied an exact "
-                        "service, offered start time, and name. This does not create a booking. After this "
-                        "tool succeeds, present all returned details and ask the customer to confirm them. "
+                        "Validate a booking after the customer has supplied an exact service, offered start "
+                        "time, and first name. In a live reply, a successful call completes the booking after "
+                        "one final live-calendar check. Reply with a short natural confirmation, not a recap. "
                         "Use the exact Booking service ID from the live services context."
                     ),
                     "parameters": {
@@ -4211,13 +4269,11 @@ def run_sms_reply_logic(
                 "\n\nConversational booking rule: complete the booking entirely in this conversation. "
                 "Use the booking discovery tools for the current time, services, and live availability; "
                 "never invent a service or time. "
-                "First gather the customer's name, exact service, and exact offered time. Call "
-                "propose_booking, then present the complete service, date, time, name, and any notes and "
-                "ask whether everything is correct. Include duration only when show_duration is true. "
-                "Only after the customer's next message "
-                "explicitly confirms that summary may you call confirm_booking. Never ask the customer "
-                "to visit a form or webpage. Never claim a booking is confirmed unless confirm_booking "
-                "returns confirmed or already_confirmed."
+                "Once the customer has supplied their first name, exact service, and exact offered time, "
+                "call propose_booking. A successful live call completes the booking: do not recap the service "
+                "or ask a second confirmation question. Reply only with a short, informal confirmation such "
+                "as 'All good, see you tomorrow.' Never ask the customer to visit a form or webpage. "
+                "Never claim a booking is confirmed unless propose_booking reports confirmed or already_confirmed."
             )
             if draft_only:
                 instructions += (
@@ -4358,7 +4414,24 @@ def run_sms_reply_logic(
                                 notes=args.get("notes"),
                             )
                             if tool_result.get("status") == "awaiting_confirmation":
-                                booking_proposal_candidate = json.dumps(tool_result["proposal"])
+                                if TRAINING_MODE_ENABLED or draft_only:
+                                    # Review-only modes must never create a real booking.
+                                    booking_proposal_candidate = json.dumps(tool_result["proposal"])
+                                else:
+                                    tool_result, confirmed_now = confirm_conversational_booking(
+                                        db,
+                                        thread,
+                                        "",
+                                        proposal_override=tool_result["proposal"],
+                                        require_customer_confirmation=False,
+                                    )
+                                    booking_confirmed = booking_confirmed or confirmed_now
+                                    if confirmed_now:
+                                        booking_arrival_link = (
+                                            tool_result.get("booking", {}).get("arrival_link")
+                                            if isinstance(tool_result.get("booking"), dict)
+                                            else None
+                                        )
                     elif tool_call.name == "confirm_booking":
                         if not pending_booking_at_turn_start:
                             tool_result = {
@@ -10883,6 +10956,20 @@ def approve_draft_message(message_id: str, db: Session = Depends(get_db)):
         if not thread:
             raise HTTPException(status_code=404, detail="Thread not found.")
 
+        edited_events = db.query(ThreadEvent).filter(
+            ThreadEvent.thread_id == thread.id,
+            ThreadEvent.type == "draft-edited",
+        ).all()
+        was_edited = False
+        for event_item in edited_events:
+            try:
+                event_meta = json.loads(event_item.meta or "{}")
+            except (TypeError, json.JSONDecodeError):
+                event_meta = {}
+            if isinstance(event_meta, dict) and event_meta.get("message_id") == message_id:
+                was_edited = True
+                break
+
         if not thread.customer_phone.startswith("locanto_"):
             dispatch_result = mobilemessage_service.send_sms(
                 thread.customer_phone,
@@ -10915,8 +11002,60 @@ def approve_draft_message(message_id: str, db: Session = Depends(get_db)):
             at=datetime.utcnow(),
         )
         db.add(approval_event)
+        learning_saved = False
+        if was_edited:
+            try:
+                learning = save_edited_draft_learning(db, thread, msg)
+                if learning:
+                    db.add(ThreadEvent(
+                        id=str(uuid.uuid4()),
+                        thread_id=thread.id,
+                        type="approved-draft-learning-saved",
+                        agent_id="manual-approval",
+                        meta=json.dumps({
+                            "message_id": message_id,
+                            "learning_id": learning["id"],
+                            "retrieval_enabled": bool(learning.get("retrieval_enabled")),
+                            "category": learning.get("category"),
+                        }),
+                        at=datetime.utcnow(),
+                    ))
+                    learning_saved = True
+            except Exception as exc:
+                # Learning must never prevent a staff-approved reply from sending.
+                print(f"Edited draft learning was not saved: {exc}")
         db.commit()
-        return {"status": "success", "duplicate": False}
+        return {"status": "success", "duplicate": False, "learningSaved": learning_saved}
+
+
+@app.patch("/api/messages/{message_id}/draft")
+def update_draft_message(
+    message_id: str,
+    payload: DraftUpdateInput,
+    db: Session = Depends(get_db),
+):
+    msg = db.query(Message).filter(Message.id == message_id).first()
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found.")
+    if msg.role != "draft":
+        raise HTTPException(status_code=400, detail="Only draft messages can be edited.")
+    thread = db.query(Thread).filter(Thread.id == msg.thread_id).first()
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found.")
+    updated_text = sanitize_outgoing_urls(payload.text.strip())
+    if not updated_text:
+        raise HTTPException(status_code=422, detail="Draft text is required.")
+    msg.text = updated_text
+    db.add(ThreadEvent(
+        id=str(uuid.uuid4()),
+        thread_id=thread.id,
+        type="draft-edited",
+        agent_id="manual-edit",
+        meta=json.dumps({"message_id": message_id}),
+        at=datetime.utcnow(),
+    ))
+    db.commit()
+    return {"status": "success", "message": {"id": msg.id, "text": msg.text}}
 
 
 @app.post("/api/messages/{message_id}/discard")
