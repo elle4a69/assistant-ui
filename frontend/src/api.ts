@@ -1134,6 +1134,23 @@ export async function clearPendingDrafts(): Promise<ClearPendingDraftsResult> {
   return response.json();
 }
 
+export interface ClearReviewOnlyThreadsResult {
+  status: string;
+  clearedThreads: number;
+  draftReviewThreads: number;
+}
+
+export async function clearReviewOnlyThreads(): Promise<ClearReviewOnlyThreadsResult> {
+  const response = await apiFetch(`${API_BASE}/api/messages/review/pending`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Failed to clear review tags: ${response.statusText}`);
+  }
+  return response.json();
+}
+
 export interface OperationsChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -1263,3 +1280,4 @@ export async function listAgentConsoleRuns(limit = 12): Promise<{
   }
   return response.json();
 }
+

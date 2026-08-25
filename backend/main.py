@@ -10949,6 +10949,50 @@ def clear_pending_draft_messages(db: Session = Depends(get_db)):
     }
 
 
+@app.delete("/api/messages/review/pending")
+def clear_review_only_threads(db: Session = Depends(get_db)):
+    """Remove stale review markers without deleting unsent drafts or sending SMS.
+
+    A thread can be marked for review either because it has a real draft awaiting a
+    person, or because a previous AI attempt failed closed.  This action only clears
+    the latter, preserving every draft for the existing draft-management workflow.
+    """
+    draft_thread_ids = {
+        thread_id
+        for (thread_id,) in db.query(Message.thread_id)
+        .filter(Message.role == "draft")
+        .distinct()
+        .all()
+    }
+    review_only_threads = db.query(Thread).filter(
+        Thread.state == "needs-review",
+        ~Thread.id.in_(draft_thread_ids),
+    ).all()
+    if not review_only_threads:
+        return {"status": "success", "clearedThreads": 0, "draftReviewThreads": len(draft_thread_ids)}
+
+    cleared_at = datetime.utcnow()
+    for thread in review_only_threads:
+        thread.state = "auto-reply"
+        thread.pending_slots = None
+        thread.updated_at = cleared_at
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread.id,
+            type="review-status-cleared",
+            agent_id="bulk-review-clear",
+            meta=json.dumps({"reason": "review-only bulk clear"}),
+            at=cleared_at,
+        ))
+
+    db.commit()
+    return {
+        "status": "success",
+        "clearedThreads": len(review_only_threads),
+        "draftReviewThreads": len(draft_thread_ids),
+    }
+
+
 @app.post("/api/settings/learnings")
 def create_manual_learning(payload: ManualLearningInput):
     structured = generate_manual_learning(payload.topic, payload.guidance)
@@ -12316,3 +12360,4 @@ if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
 
 # Trigger reload: Aug 2 18:01
+

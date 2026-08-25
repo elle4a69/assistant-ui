@@ -133,6 +133,32 @@ def test_clear_pending_drafts_removes_all_drafts_and_updates_threads():
     db.close()
 
 
+def test_clear_review_only_threads_preserves_pending_drafts():
+    db = make_db()
+    add_thread(db, "thread-review-only")
+    add_thread(db, "thread-with-draft")
+    add_thread(db, "thread-auto", state="auto-reply")
+    db.add_all([
+        Message(id="draft-keep", thread_id="thread-with-draft", role="draft", text="Review me", at=datetime.utcnow()),
+        Message(id="customer-auto", thread_id="thread-auto", role="customer", text="Keep state", at=datetime.utcnow()),
+    ])
+    db.commit()
+
+    result = main.clear_review_only_threads(db)
+
+    assert result == {"status": "success", "clearedThreads": 1, "draftReviewThreads": 1}
+    assert db.query(Message).filter(Message.id == "draft-keep").count() == 1
+    assert db.query(Thread).filter(Thread.id == "thread-review-only").one().state == "auto-reply"
+    assert db.query(Thread).filter(Thread.id == "thread-with-draft").one().state == "needs-review"
+    assert db.query(Thread).filter(Thread.id == "thread-auto").one().state == "auto-reply"
+    event = db.query(ThreadEvent).filter(ThreadEvent.type == "review-status-cleared").one()
+    assert event.thread_id == "thread-review-only"
+    assert main.clear_review_only_threads(db) == {
+        "status": "success", "clearedThreads": 0, "draftReviewThreads": 1,
+    }
+    db.close()
+
+
 def test_manual_learning_is_ai_structured_saved_and_reindexed(monkeypatch, tmp_path):
     client = FakeLearningClient([
         json.dumps({
@@ -193,3 +219,4 @@ def test_manual_learning_saves_nothing_for_invalid_ai_json(monkeypatch, tmp_path
 
     assert exc_info.value.status_code == 502
     assert not (tmp_path / main.LEARNED_INFORMATION_FILENAME).exists()
+
