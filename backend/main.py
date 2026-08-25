@@ -3143,6 +3143,7 @@ def confirm_conversational_booking(
     *,
     proposal_override: Optional[Dict[str, Any]] = None,
     require_customer_confirmation: bool = True,
+    send_confirmation: bool = True,
 ) -> tuple[Dict[str, Any], bool]:
     """Create a booking from a validated proposal and re-check live availability.
 
@@ -3217,6 +3218,65 @@ def confirm_conversational_booking(
     )
     proposal["arrival_link"] = _arrival_public_link(arrival_token)
     proposal["arrival_session_id"] = arrival_session.id
+
+    if send_confirmation:
+        template_path = os.path.join(PROMPTS_DIR, "sms_confirmation_template.txt")
+        template = (
+            "Hi {name}, your booking for {service} on {time} is confirmed!\n\n"
+            "When you arrive, tap: {arrival_link}"
+        )
+        if os.path.exists(template_path):
+            try:
+                with open(template_path, "r", encoding="utf-8") as handle:
+                    template = handle.read()
+            except OSError:
+                pass
+        provider_name = "Anonymous" if thread.sms_account_key == "secondary" else "Tori"
+        confirmation_text = render_template_variables(template, {
+            **get_business_variable_values(),
+            "name": proposal["customer_name"],
+            "service": proposal["service_name"],
+            "provider": provider_name,
+            "time": start.strftime("%A, %b %d at %I:%M %p"),
+            "arrival_link": proposal["arrival_link"],
+        })
+        if "{arrival_link}" not in template:
+            confirmation_text = f"{confirmation_text.rstrip()}\n\nWhen you arrive, tap: {proposal['arrival_link']}"
+        confirmation_message = Message(
+            id=str(uuid.uuid4()),
+            thread_id=thread.id,
+            role="agent",
+            text=confirmation_text,
+            at=datetime.utcnow(),
+        )
+        dispatch_result = mobilemessage_service.send_sms(
+            thread.customer_phone,
+            confirmation_text,
+            idempotency_key=confirmation_message.id,
+            account_key=thread.sms_account_key,
+        )
+        delivery_failure = mobilemessage_service.delivery_error(dispatch_result)
+        if dispatch_result.get("status") == "skipped" or (
+            delivery_failure and "skipped" in str(delivery_failure).lower()
+        ):
+            delivery_failure = None
+        if delivery_failure:
+            confirmation_message.role = "draft"
+            thread.state = "needs-review"
+        db.add(confirmation_message)
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread.id,
+            type="booking-confirmation-delivery-failed" if delivery_failure else "booking-confirmation-sent",
+            agent_id="system",
+            meta=json.dumps({
+                "booking_id": str(booking_id),
+                **({"reason": delivery_failure[:500]} if delivery_failure else {}),
+            }),
+            at=datetime.utcnow(),
+        ))
+        proposal["booking_confirmation_handled"] = True
+        proposal["booking_confirmation_sent"] = not bool(delivery_failure)
 
     thread.pending_booking = None
     thread.pending_slots = None
@@ -4058,6 +4118,7 @@ def run_sms_reply_logic(
         
     booking_confirmed = False
     booking_arrival_link: Optional[str] = None
+    booking_system_confirmation_handled = False
     slots_presented = False
     history_msgs = (
         db.query(Message)
@@ -4090,6 +4151,7 @@ def run_sms_reply_logic(
             db,
             thread,
             effective_body,
+            send_confirmation=dispatch_sms,
         )
         booking_confirmed = booking_confirmed or confirmed_now
         if confirmed_now:
@@ -4097,6 +4159,11 @@ def run_sms_reply_logic(
                 confirmation_result.get("booking", {}).get("arrival_link")
                 if isinstance(confirmation_result.get("booking"), dict)
                 else None
+            )
+            booking_system_confirmation_handled = bool(
+                confirmation_result.get("booking", {}).get("booking_confirmation_handled")
+                if isinstance(confirmation_result.get("booking"), dict)
+                else False
             )
 
     # Step 1: Read only the knowledge and Settings catalogue allowed for this account.
@@ -4444,6 +4511,7 @@ def run_sms_reply_logic(
                                         "",
                                         proposal_override=tool_result["proposal"],
                                         require_customer_confirmation=False,
+                                        send_confirmation=dispatch_sms,
                                     )
                                     booking_confirmed = booking_confirmed or confirmed_now
                                     if confirmed_now:
@@ -4451,6 +4519,11 @@ def run_sms_reply_logic(
                                             tool_result.get("booking", {}).get("arrival_link")
                                             if isinstance(tool_result.get("booking"), dict)
                                             else None
+                                        )
+                                        booking_system_confirmation_handled = bool(
+                                            tool_result.get("booking", {}).get("booking_confirmation_handled")
+                                            if isinstance(tool_result.get("booking"), dict)
+                                            else False
                                         )
                     elif tool_call.name == "confirm_booking":
                         if not pending_booking_at_turn_start:
@@ -4463,6 +4536,7 @@ def run_sms_reply_logic(
                                 db,
                                 thread,
                                 effective_body,
+                                send_confirmation=dispatch_sms,
                             )
                             booking_confirmed = booking_confirmed or confirmed_now
                             if confirmed_now:
@@ -4470,6 +4544,11 @@ def run_sms_reply_logic(
                                     tool_result.get("booking", {}).get("arrival_link")
                                     if isinstance(tool_result.get("booking"), dict)
                                     else None
+                                )
+                                booking_system_confirmation_handled = bool(
+                                    tool_result.get("booking", {}).get("booking_confirmation_handled")
+                                    if isinstance(tool_result.get("booking"), dict)
+                                    else False
                                 )
                     elif tool_call.name == "signal_customer_arrival":
                         arrival_recorded = record_customer_arrival_event(
@@ -4547,6 +4626,13 @@ def run_sms_reply_logic(
         ))
         db.commit()
         return False, False
+
+    # The saved booking-confirmation template is the only customer-facing
+    # confirmation for a completed booking. It carries the configured address
+    # and arrival-link wording; do not follow it with an AI-generated duplicate.
+    if booking_system_confirmation_handled:
+        db.commit()
+        return booking_confirmed, slots_presented
 
     if booking_confirmed and booking_arrival_link and assistant_reply and booking_arrival_link not in assistant_reply:
         assistant_reply = f"{assistant_reply.rstrip()}\n\nWhen you arrive, tap: {booking_arrival_link}"

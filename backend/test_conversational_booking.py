@@ -157,7 +157,9 @@ def test_proposal_then_later_confirmation_books_without_a_web_form(tmp_path, mon
     assert calendar.created == []
     thread.pending_booking = json.dumps(proposal_result["proposal"])
 
-    confirmation_result, confirmed = confirm_conversational_booking(db, thread, "Yes, please")
+    confirmation_result, confirmed = confirm_conversational_booking(
+        db, thread, "Yes, please", send_confirmation=False,
+    )
 
     assert confirmed is True
     assert confirmation_result["status"] == "confirmed"
@@ -782,6 +784,43 @@ def test_stored_availability_is_discarded_and_cannot_be_sent_without_live_lookup
     assert db.query(Message).filter(Message.role.in_(["system", "draft"])).count() == 0
     failure = db.query(main.ThreadEvent).filter(main.ThreadEvent.type == "ai-reply-failed").one()
     assert "fresh live calendar lookup" in json.loads(failure.meta)["reason"]
+    db.close()
+
+
+def test_conversational_booking_uses_saved_system_confirmation_template(tmp_path, monkeypatch):
+    service = {"id": "service", "name": "Service", "duration": 30, "price": 100}
+    (tmp_path / "services.json").write_text(json.dumps([service]), encoding="utf-8")
+    (tmp_path / "sms_confirmation_template.txt").write_text(
+        "Address: {address}\n{name} — {service} — {time}\n{arrival_link}",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "PROMPTS_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "get_business_variable_values", lambda: {"address": "Example Address"})
+    monkeypatch.setattr(main, "load_working_hours", lambda: [
+        {"day": day, "enabled": True, "open": "00:00", "close": "23:59"}
+        for day in main.DAY_NAMES
+    ])
+    calendar = FakeCalendar()
+    monkeypatch.setattr(main, "calendar_service", calendar)
+    sent = []
+    monkeypatch.setattr(main.mobilemessage_service, "send_sms", lambda *args, **kwargs: sent.append((args, kwargs)) or {"status": "success"})
+    db = make_db()
+    thread = add_thread(db)
+    start = (current_business_time() + timedelta(days=2)).replace(hour=14, minute=0, second=0, microsecond=0)
+    proposal = propose_conversational_booking(
+        thread, service_id="service", start_time=start.isoformat(), customer_name="Example Customer", notes=None,
+    )
+    thread.pending_booking = json.dumps(proposal["proposal"])
+
+    result, confirmed = confirm_conversational_booking(db, thread, "yes")
+
+    assert confirmed is True
+    assert result["booking"]["booking_confirmation_handled"] is True
+    assert len(sent) == 1
+    assert "Example Address" in sent[0][0][1]
+    assert "/a/" in sent[0][0][1]
+    assert db.query(Message).filter(Message.role == "agent").count() == 1
     db.close()
 
 
