@@ -12,6 +12,7 @@ from main import (
     Base,
     Message,
     Thread,
+    booking_availability_error,
     confirm_conversational_booking,
     current_business_time,
     is_explicit_booking_confirmation,
@@ -239,7 +240,10 @@ def test_availability_is_rechecked_after_confirmation(tmp_path, monkeypatch):
     result, confirmed = confirm_conversational_booking(db, thread, "yes")
 
     assert confirmed is False
-    assert result == {"status": "rejected", "reason": "That time is no longer available."}
+    assert result == {
+        "status": "rejected",
+        "reason": "That time needs a 15-minute gap before and after another booking.",
+    }
     assert calendar.created == []
     assert thread.pending_booking is None
     db.close()
@@ -785,6 +789,24 @@ def test_stored_availability_is_discarded_and_cannot_be_sent_without_live_lookup
     failure = db.query(main.ThreadEvent).filter(main.ThreadEvent.type == "ai-reply-failed").one()
     assert "fresh live calendar lookup" in json.loads(failure.meta)["reason"]
     db.close()
+
+
+def test_booking_requires_thirty_minutes_notice_and_fifteen_minute_buffer(monkeypatch):
+    now = main.parse_business_datetime("2026-08-12T10:00:00+10:00")
+    monkeypatch.setattr(main, "current_business_time", lambda: now)
+    monkeypatch.setattr(main, "load_working_hours", lambda: [
+        {"day": day, "enabled": True, "open": "00:00", "close": "23:59"}
+        for day in main.DAY_NAMES
+    ])
+    calendar = FakeCalendar()
+    monkeypatch.setattr(main, "calendar_service", calendar)
+
+    assert booking_availability_error(now + timedelta(minutes=29), 30) == "Bookings need at least 30 minutes' notice."
+    candidate = now + timedelta(hours=2)
+    calendar.busy = [{"start": candidate - timedelta(minutes=40), "end": candidate - timedelta(minutes=10)}]
+    assert booking_availability_error(candidate, 30) == "That time needs a 15-minute gap before and after another booking."
+    calendar.busy = [{"start": candidate + timedelta(minutes=40), "end": candidate + timedelta(minutes=70)}]
+    assert booking_availability_error(candidate, 30) == "That time needs a 15-minute gap before and after another booking."
 
 
 def test_conversational_booking_uses_saved_system_confirmation_template(tmp_path, monkeypatch):

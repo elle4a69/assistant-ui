@@ -39,7 +39,7 @@ def test_suite_exposes_current_time_services_and_day_shortcuts():
     assert suite.services()["services"][0]["id"] == "7"
     assert suite.times_today("7")["date"] == "2026-08-12"
     assert suite.times_tomorrow("7")["date"] == "2026-08-13"
-    assert provider.searches[0][1] == now
+    assert provider.searches[0][1] == now + timedelta(minutes=30)
     assert provider.searches[1][1] == datetime(2026, 8, 13, 0, 0, tzinfo=TZ)
 
 
@@ -84,7 +84,6 @@ def test_legacy_adapter_uses_service_duration_hours_and_busy_slots():
     )
 
     assert [slot["start_time"] for slot in slots] == [
-        "2026-08-12T09:30:00+10:00",
         "2026-08-12T09:45:00+10:00",
         "2026-08-12T10:00:00+10:00",
     ]
@@ -122,8 +121,6 @@ def test_one_hour_booking_requires_four_consecutive_fifteen_minute_increments():
     )
 
     assert [item["start_time"] for item in times] == [
-        "2026-08-13T13:00:00+10:00",
-        "2026-08-13T14:15:00+10:00",
         "2026-08-13T14:30:00+10:00",
         "2026-08-13T14:45:00+10:00",
         "2026-08-13T15:00:00+10:00",
@@ -135,6 +132,26 @@ def test_one_hour_booking_requires_four_consecutive_fifteen_minute_increments():
             for item in times
         )
     )
+
+
+def test_legacy_adapter_requires_a_fifteen_minute_gap_on_both_sides():
+    busy_start = datetime(2026, 8, 12, 10, 0, tzinfo=TZ)
+    provider = LegacyCalendarDiscoveryProvider(
+        services_loader=lambda: [{"id": "service", "name": "Service", "duration": 30}],
+        working_hours_loader=lambda: [{"day": "Wednesday", "enabled": True, "open": "09:00", "close": "12:00"}],
+        busy_slots_loader=lambda start, end: [{"start": busy_start, "end": busy_start + timedelta(minutes=30)}],
+        timezone_name=TIMEZONE,
+    )
+
+    slots = provider.search_availability(
+        "service", datetime(2026, 8, 12, 9, 0, tzinfo=TZ), datetime(2026, 8, 12, 12, 0, tzinfo=TZ), 20,
+    )
+
+    starts = [item["start_time"] for item in slots]
+    assert "2026-08-12T09:30:00+10:00" not in starts  # ends 15 minutes before the existing booking
+    assert "2026-08-12T10:30:00+10:00" not in starts  # starts immediately after it
+    assert "2026-08-12T09:15:00+10:00" in starts
+    assert "2026-08-12T10:45:00+10:00" in starts
 
 
 def test_execute_returns_safe_error_for_unknown_service():
@@ -149,3 +166,4 @@ def test_execute_returns_safe_error_for_unknown_service():
     result = suite.execute("get_times_today", {"service_id": "missing"})
 
     assert result == {"status": "unavailable", "reason": "That service is not available."}
+
