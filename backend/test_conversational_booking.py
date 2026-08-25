@@ -100,6 +100,7 @@ def add_thread(db):
     "confirm it please",
     "go ahead",
     "book it",
+    "Yep looks good to me",
 ])
 def test_explicit_confirmation_phrases(message):
     assert is_explicit_booking_confirmation(message) is True
@@ -781,6 +782,56 @@ def test_stored_availability_is_discarded_and_cannot_be_sent_without_live_lookup
     assert db.query(Message).filter(Message.role.in_(["system", "draft"])).count() == 0
     failure = db.query(main.ThreadEvent).filter(main.ThreadEvent.type == "ai-reply-failed").one()
     assert "fresh live calendar lookup" in json.loads(failure.meta)["reason"]
+    db.close()
+
+
+def test_explicit_confirmation_of_a_legacy_pending_booking_writes_without_model_tool(tmp_path, monkeypatch):
+    service = {"id": "service", "name": "Service", "duration": 30, "price": 100}
+    (tmp_path / "services.json").write_text(json.dumps([service]), encoding="utf-8")
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "load_working_hours", lambda: [
+        {"day": day, "enabled": True, "open": "00:00", "close": "23:59"}
+        for day in main.DAY_NAMES
+    ])
+    calendar = FakeCalendar()
+    monkeypatch.setattr(main, "calendar_service", calendar)
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
+    db = make_db()
+    thread = add_thread(db)
+    start = (current_business_time() + timedelta(days=2)).replace(
+        hour=14, minute=0, second=0, microsecond=0,
+    )
+    proposal = propose_conversational_booking(
+        thread,
+        service_id="service",
+        start_time=start.isoformat(),
+        customer_name="Example Customer",
+        notes=None,
+    )
+    thread.pending_booking = json.dumps(proposal["proposal"])
+    confirmation = Message(
+        id="legacy-confirmation-message",
+        thread_id=thread.id,
+        role="customer",
+        text="Yep, looks good to me",
+        provider_message_id="legacy-confirmation-provider",
+        at=main.datetime.utcnow(),
+    )
+    db.add(confirmation)
+    db.commit()
+    monkeypatch.setattr(main, "openai_client", SequenceClient([
+        FakeResponse(output_text="All good, see you then."),
+    ]))
+
+    booked, _ = run_sms_reply_logic(
+        db, thread.id, confirmation.text, confirmation.provider_message_id,
+        confirmation.at, dispatch_sms=False,
+    )
+
+    db.refresh(thread)
+    assert booked is True
+    assert thread.pending_booking is None
+    assert len(calendar.created) == 1
     db.close()
 
 

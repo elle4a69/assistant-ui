@@ -3012,7 +3012,8 @@ def is_explicit_booking_confirmation(message: str) -> bool:
     return bool(re.fullmatch(
         r"(?:yes|yep|yeah|correct|confirmed?|go ahead|book it|please book it|"
         r"yes please|yes that's correct|yes that is correct|that's correct|that is correct|"
-        r"yes confirm it|confirm it please)",
+        r"yes confirm it|confirm it please|yep looks good|yep looks good to me|"
+        r"yes looks good|yes looks good to me|looks good|looks good to me)",
         normalized,
     ))
 
@@ -4078,6 +4079,25 @@ def run_sms_reply_logic(
     live_calendar_lookup_succeeded = False
     # Historic offered times are not evidence for a later customer message.
     thread.pending_slots = None
+
+    # A customer has already explicitly authorised this exact, previously shown
+    # proposal. Do not make the calendar write depend on the language model
+    # choosing the confirm_booking tool: re-check and create it deterministically.
+    # This is only for legacy/pending proposals; new complete requests are handled
+    # directly when propose_booking succeeds below.
+    if pending_booking_at_turn_start and is_explicit_booking_confirmation(effective_body):
+        confirmation_result, confirmed_now = confirm_conversational_booking(
+            db,
+            thread,
+            effective_body,
+        )
+        booking_confirmed = booking_confirmed or confirmed_now
+        if confirmed_now:
+            booking_arrival_link = (
+                confirmation_result.get("booking", {}).get("arrival_link")
+                if isinstance(confirmation_result.get("booking"), dict)
+                else None
+            )
 
     # Step 1: Read only the knowledge and Settings catalogue allowed for this account.
     if booking_or_availability_turn:
