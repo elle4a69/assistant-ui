@@ -287,7 +287,7 @@ export async function listThreads(params: ListThreadsParams = {}): Promise<Threa
 export interface CatchUpResult {
   processed: boolean;
   threadId?: string;
-  outcome: 'draft' | 'information-request' | 'complete';
+  outcome: 'sent' | 'information-request' | 'complete';
   remaining: number;
 }
 

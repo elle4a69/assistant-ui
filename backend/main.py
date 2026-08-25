@@ -6290,7 +6290,7 @@ def get_threads(
 
 @app.post("/api/threads/catch-up")
 def catch_up_missed_messages(db: Session = Depends(get_db)):
-    """Draft one oldest unanswered conversation per call; never dispatch externally."""
+    """Send one safe AI reply for the oldest unanswered recent conversation."""
     if not AUTO_REPLY_GLOBAL_ENABLED:
         raise HTTPException(status_code=409, detail="Turn AI on before catching up missed messages.")
 
@@ -6307,8 +6307,8 @@ def catch_up_missed_messages(db: Session = Depends(get_db)):
             customer_message.text,
             customer_message.provider_message_id or "catch-up",
             customer_message.at,
-            dispatch_sms=False,
-            draft_only=True,
+            dispatch_sms=True,
+            draft_only=False,
         )
     except Exception as exc:
         db.rollback()
@@ -6338,7 +6338,7 @@ def catch_up_missed_messages(db: Session = Depends(get_db)):
     latest = db.query(Message).filter(Message.thread_id == thread_id).order_by(
         Message.at.desc(), Message.id.desc()
     ).first()
-    outcome = "draft" if latest and latest.role == "draft" else "information-request"
+    outcome = "sent" if latest and latest.role in {"agent", "system"} else "information-request"
     return {
         "processed": True,
         "threadId": thread_id,

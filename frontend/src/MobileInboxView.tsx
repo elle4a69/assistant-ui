@@ -302,7 +302,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     setCatchingUp(true)
     setNotice('Checking missed messages…')
     setError('')
-    let drafts = 0
+    let sent = 0
     let informationRequests = 0
     try {
       // Keep memory bounded by processing one model request at a time, while
@@ -314,9 +314,9 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
         const result = await catchUpMissedMessage()
         remaining = result.remaining
         if (!result.processed) break
-        if (result.outcome === 'draft') drafts += 1
+        if (result.outcome === 'sent') sent += 1
         if (result.outcome === 'information-request') informationRequests += 1
-        setNotice(`Catch-up: ${drafts} draft${drafts === 1 ? '' : 's'}, ${informationRequests} information request${informationRequests === 1 ? '' : 's'}, ${remaining} remaining`)
+        setNotice(`Catch-up: ${sent} sent, ${informationRequests} information request${informationRequests === 1 ? '' : 's'}, ${remaining} remaining`)
         if ((processed + 1) % 5 === 0) await loadThreads()
         await new Promise(resolve => window.setTimeout(resolve, 750))
         reachedSafetyLimit = processed === safetyLimit - 1 && remaining > 0
@@ -324,7 +324,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
       setNotice(
         reachedSafetyLimit
           ? `Catch-up paused after ${safetyLimit} conversations for safety. Click refresh again to continue.`
-          : `Catch-up complete: ${drafts} draft${drafts === 1 ? '' : 's'}, ${informationRequests} information request${informationRequests === 1 ? '' : 's'}`,
+          : `Catch-up complete: ${sent} sent, ${informationRequests} information request${informationRequests === 1 ? '' : 's'}`,
       )
       await loadThreads()
     } catch (err) {
@@ -783,3 +783,4 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     </div>
   )
 }
+

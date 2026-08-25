@@ -172,7 +172,7 @@ def test_new_inbound_restores_only_automatic_taken_over_state(monkeypatch):
     db.close()
 
 
-def test_catch_up_endpoint_creates_one_draft_without_dispatch(monkeypatch):
+def test_catch_up_endpoint_sends_one_reply_for_recent_message(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     db = sessionmaker(bind=engine)()
@@ -194,14 +194,14 @@ def test_catch_up_endpoint_creates_one_draft_without_dispatch(monkeypatch):
     def fake_reply(db_arg, thread_id, body, provider_message_id, received_at, **kwargs):
         calls.append(kwargs)
         db_arg.add(Message(
-            id="generated-draft",
+            id="generated-reply",
             thread_id=thread_id,
-            role="draft",
-            text="Safe draft",
+            role="agent",
+            text="Safe reply",
             at=received_at + timedelta(seconds=1),
         ))
         thread = db_arg.query(Thread).filter(Thread.id == thread_id).first()
-        thread.state = "needs-review"
+        thread.state = "auto-reply"
         db_arg.commit()
         return False, False
 
@@ -212,10 +212,10 @@ def test_catch_up_endpoint_creates_one_draft_without_dispatch(monkeypatch):
     assert result == {
         "processed": True,
         "threadId": "waiting",
-        "outcome": "draft",
+        "outcome": "sent",
         "remaining": 0,
     }
-    assert calls == [{"dispatch_sms": False, "draft_only": True}]
+    assert calls == [{"dispatch_sms": True, "draft_only": False}]
     assert catch_up_missed_messages(db) == {
         "processed": False,
         "outcome": "complete",
