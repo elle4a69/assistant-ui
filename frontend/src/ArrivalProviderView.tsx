@@ -42,13 +42,17 @@ export default function ArrivalProviderView() {
 
   useEffect(() => {
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 2000);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void refresh();
+    }, 6000);
     return () => window.clearInterval(timer);
   }, [refresh]);
 
   useEffect(() => {
     void refreshSelected();
-    const timer = window.setInterval(() => void refreshSelected(), 1200);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void refreshSelected();
+    }, 3000);
     return () => window.clearInterval(timer);
   }, [refreshSelected]);
 
@@ -133,3 +137,4 @@ export default function ArrivalProviderView() {
     </div>
   );
 }
+

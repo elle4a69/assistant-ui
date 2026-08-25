@@ -33,8 +33,9 @@ import {
 import { formatMessageTimestamp } from './messageTimestamp'
 import { dismissArrivalPushNotification, stopIncomingAlarm } from './incomingMessageAlarm'
 
-const POLL_THREADS_MS = 5000
-const POLL_MESSAGES_MS = 3000
+const POLL_THREADS_MS = 10_000
+const POLL_MESSAGES_MS = 6_000
+const BACKGROUND_POLL_MS = 30_000
 
 function formatListTime(value: string) {
   const date = new Date(value)
@@ -180,8 +181,13 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     let active = true
     let timeout: number | undefined
     const poll = async () => {
-      await loadThreads()
-      if (active) timeout = window.setTimeout(poll, POLL_THREADS_MS)
+      if (document.visibilityState === 'visible') await loadThreads()
+      if (active) {
+        timeout = window.setTimeout(
+          poll,
+          document.visibilityState === 'visible' ? POLL_THREADS_MS : BACKGROUND_POLL_MS,
+        )
+      }
     }
     void poll()
     return () => {
@@ -222,8 +228,13 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     let active = true
     let timeout: number | undefined
     const poll = async () => {
-      await loadThread()
-      if (active) timeout = window.setTimeout(poll, POLL_MESSAGES_MS)
+      if (document.visibilityState === 'visible') await loadThread()
+      if (active) {
+        timeout = window.setTimeout(
+          poll,
+          document.visibilityState === 'visible' ? POLL_MESSAGES_MS : BACKGROUND_POLL_MS,
+        )
+      }
     }
     void poll()
     return () => {

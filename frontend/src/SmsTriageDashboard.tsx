@@ -415,8 +415,8 @@ export default function SmsTriageDashboard() {
     let active = true;
     let timeout: number | undefined;
     const poll = async () => {
-      await fetchThreadsList();
-      if (active) timeout = window.setTimeout(poll, 4000);
+      if (document.visibilityState === 'visible') await fetchThreadsList();
+      if (active) timeout = window.setTimeout(poll, document.visibilityState === 'visible' ? 8000 : 30000);
     };
     void poll();
     return () => {
@@ -435,8 +435,8 @@ export default function SmsTriageDashboard() {
     let active = true;
     let timeout: number | undefined;
     const poll = async (isSilent: boolean) => {
-      await fetchThreadDetail(selectedThreadId, isSilent);
-      if (active) timeout = window.setTimeout(() => void poll(true), 4000);
+      if (document.visibilityState === 'visible') await fetchThreadDetail(selectedThreadId, isSilent);
+      if (active) timeout = window.setTimeout(() => void poll(true), document.visibilityState === 'visible' ? 6000 : 30000);
     };
     void poll(false);
     return () => {
@@ -450,7 +450,9 @@ export default function SmsTriageDashboard() {
     let interval: any;
     if (dashboardTab === 'calendar') {
       fetchCalendarData();
-      interval = setInterval(fetchCalendarData, 4000);
+      interval = setInterval(() => {
+        if (document.visibilityState === 'visible') void fetchCalendarData();
+      }, 15000);
     }
     return () => {
       if (interval) clearInterval(interval);

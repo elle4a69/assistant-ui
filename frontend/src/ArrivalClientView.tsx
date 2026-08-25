@@ -75,7 +75,9 @@ export default function ArrivalClientView() {
   useEffect(() => {
     if (checkingInvite) return;
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 1500);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void refresh();
+    }, 4000);
     return () => window.clearInterval(timer);
   }, [checkingInvite, refresh]);
 
@@ -192,3 +194,4 @@ export default function ArrivalClientView() {
     </main>
   );
 }
+

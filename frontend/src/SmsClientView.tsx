@@ -80,8 +80,8 @@ export default function SmsClientView() {
     let active = true;
     let timeout: number | undefined;
     const poll = async () => {
-      await fetchThreadsAndSync();
-      if (active) timeout = window.setTimeout(poll, 4000);
+      if (document.visibilityState === 'visible') await fetchThreadsAndSync();
+      if (active) timeout = window.setTimeout(poll, document.visibilityState === 'visible' ? 8000 : 30000);
     };
     void poll();
     return () => {
@@ -100,8 +100,8 @@ export default function SmsClientView() {
     let active = true;
     let timeout: number | undefined;
     const poll = async () => {
-      await fetchThreadMessages();
-      if (active) timeout = window.setTimeout(poll, 4000);
+      if (document.visibilityState === 'visible') await fetchThreadMessages();
+      if (active) timeout = window.setTimeout(poll, document.visibilityState === 'visible' ? 6000 : 30000);
     };
     void poll();
     return () => {
@@ -443,3 +443,4 @@ export default function SmsClientView() {
     </div>
   );
 }
+
