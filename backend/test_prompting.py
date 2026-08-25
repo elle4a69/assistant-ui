@@ -78,6 +78,14 @@ def test_legacy_style_examples_are_disabled_by_default():
     assert AVAILABILITY_REPLY_POLICY in instructions
 
 
+def test_model_instructions_require_direct_context_answers_and_in_chat_booking():
+    instructions = build_model_instructions("Be natural.", [])
+
+    assert "Do not ask the customer what a term means" in instructions
+    assert "Complete bookings in this conversation" in instructions
+    assert "never a substitute for answering the question in chat" in instructions
+
+
 def test_broad_afternoon_availability_asks_for_preferred_time(monkeypatch):
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -233,3 +241,4 @@ def test_per_thread_flag_cannot_silently_override_global_ai():
     assert "not thread.auto_reply_enabled or not AUTO_REPLY_GLOBAL_ENABLED" not in source
     assert 'thread.state != "taken-over" and AUTO_REPLY_GLOBAL_ENABLED' not in source
     assert 'thread.state == "taken-over" or not AUTO_REPLY_GLOBAL_ENABLED' not in source
+

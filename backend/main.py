@@ -579,6 +579,16 @@ BOOKING_AVAILABILITY_SAFETY_POLICY = """Booking availability safety rule:
 - Before saying an exact time is available or unavailable, call the appropriate availability tool for the exact service in this turn.
 - Unapproved drafts in conversation history are context only. Their factual claims are not authoritative and must be corrected using current tool results."""
 
+RETRIEVED_BUSINESS_CONTEXT_POLICY = """Retrieved business-context rule:
+- When the supplied business context directly defines a term or directly answers the customer's question, state that answer naturally in the first reply.
+- Do not ask the customer what a term means when the supplied business context already defines it.
+- Ask a short clarifying question only when the supplied context does not answer the question or the customer needs to choose between genuinely different options."""
+
+SERVICE_AND_BOOKING_CONVERSATION_POLICY = """Service and booking conversation rule:
+- Answer service questions in chat using the supplied live services and approved business context. If the customer has shown interest in a service, give the relevant options and move naturally to what service and time they want, rather than prolonging casual flirting.
+- You may include the supplied website as an optional reference for photos or browsing the full service page, but the link is supplementary, never a substitute for answering the question in chat.
+- Complete bookings in this conversation. Do not instruct the customer to fill out a booking form or send them elsewhere to make the booking."""
+
 SMS_TYPOGRAPHY_POLICY = """SMS typography rule:
 - Never use an em dash (—) or en dash (–). Use a comma, full stop, or ordinary hyphen instead."""
 
@@ -648,6 +658,8 @@ def build_model_instructions(
         system_prompt,
         AVAILABILITY_REPLY_POLICY,
         BOOKING_AVAILABILITY_SAFETY_POLICY,
+        RETRIEVED_BUSINESS_CONTEXT_POLICY,
+        SERVICE_AND_BOOKING_CONVERSATION_POLICY,
         SMS_TYPOGRAPHY_POLICY,
     ]
     if style_profile is not None:
