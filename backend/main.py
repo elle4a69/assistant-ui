@@ -418,6 +418,7 @@ class SMSExampleIndex:
                 "full_intent": str(intent),
                 "user_text": user_text,
                 "reply_text": reply_text,
+                "scope": str(record.get("scope", "internal")).strip().lower(),
             }
             loaded_examples.append(example_item)
 
@@ -443,7 +444,11 @@ class SMSExampleIndex:
         print(f"[BM25] Loaded & validated {len(self.examples)} approved intent examples from {path}.")
 
     def search(
-        self, query: str, intent: Optional[str] = None, limit: int = 3
+        self,
+        query: str,
+        intent: Optional[str] = None,
+        limit: int = 3,
+        account_key: str = "primary",
     ) -> list[tuple[str, str]]:
         if not self.examples:
             return []
@@ -485,6 +490,8 @@ class SMSExampleIndex:
         # Filter by minimum relevance score threshold (0.5) and strict intent filtering
         candidates: list[tuple[float, int]] = []
         for doc_id, base_score in scores.items():
+            if self.examples[doc_id].get("scope") not in {"shared", account_key}:
+                continue
             ex_intent = self.examples[doc_id]["intent"]
             # Strict intent filtering: Never return cross-intent examples
             if target_intent is not None:
@@ -636,13 +643,16 @@ def get_style_examples(
     intent: Optional[str] = None,
     limit: int = 3,
     render_variables: bool = True,
+    account_key: str = "primary",
 ) -> list[tuple[str, str]]:
     """Return style examples matching query & intent within budget limits, with business variables rendered."""
     if not STYLE_EXAMPLES_ENABLED or example_index is None:
         return []
     if intent is None:
         intent = classify_query_intent(query)
-    raw_examples = example_index.search(query, intent=intent, limit=limit)
+    raw_examples = example_index.search(
+        query, intent=intent, limit=limit, account_key=account_key
+    )
     if render_variables:
         return render_style_examples(raw_examples, get_business_variable_values())
     return raw_examples
@@ -1809,7 +1819,7 @@ def generate_information_request_content(
             **get_business_variable_values(),
             "current_time": current_business_time().strftime("%A %d %B %Y, %I:%M %p %Z"),
         }),
-        get_style_examples(customer_message.text),
+        get_style_examples(customer_message.text, account_key=thread.sms_account_key),
         STYLE_PROFILE_STORE.get_applied(),
     )
     instructions += (
@@ -4370,7 +4380,9 @@ def run_sms_reply_logic(
                 },
             ]
             
-            examples = [] if booking_or_availability_turn else get_style_examples(effective_body)
+            examples = [] if booking_or_availability_turn else get_style_examples(
+                effective_body, account_key=thread.sms_account_key
+            )
             instructions = build_model_instructions(
                 system_prompt_rendered,
                 examples,
@@ -12122,7 +12134,9 @@ def handle_locanto_message(payload: LocantoMessagePayload, db: Session = Depends
                 "slots": slots_str,
             })
 
-            examples = get_style_examples(payload.messageSnippet)
+            examples = get_style_examples(
+                payload.messageSnippet, account_key=thread.sms_account_key
+            )
             instructions = build_model_instructions(
                 system_prompt_rendered,
                 examples,
