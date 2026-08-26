@@ -214,7 +214,7 @@ export default function SettingsView() {
       primary: { enabled: false, cooldownDays: 30, delaySeconds: 0, message: '' },
       secondary: { enabled: false, cooldownDays: 30, delaySeconds: 0, message: '' }
     },
-    labels: { primary: 'Tori', secondary: 'Anonymous' }
+    labels: { primary: 'Line 1', secondary: 'Line 2' }
   });
   const [savingFirstContact, setSavingFirstContact] = useState(false);
 

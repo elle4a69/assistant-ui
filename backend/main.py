@@ -1489,24 +1489,61 @@ def search_knowledge(query: str, limit: int = 5, account_key: str = "primary") -
     return "\n\n".join(output_parts)
 
 
+LINE_SERVICE_FILENAMES = {"primary": "line_1_services.json", "secondary": "line_2_services.json"}
+
+def _line_services_path(account_key: str) -> str:
+    return os.path.join(DATA_DIR, LINE_SERVICE_FILENAMES[account_key])
+
+def _service_line_key(service: Dict[str, Any]) -> str:
+    explicit = str(service.get("lineKey") or service.get("smsAccountKey") or "").strip().lower()
+    if explicit in FIRST_CONTACT_ACCOUNT_KEYS:
+        return explicit
+    return "secondary" if "anonymous" in str(service.get("name", "")).lower() else "primary"
+
+def _read_service_catalogue(path: str) -> List[Dict[str, Any]]:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return []
+    return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+
+def _ensure_line_service_catalogues() -> None:
+    if all(os.path.exists(_line_services_path(key)) for key in FIRST_CONTACT_ACCOUNT_KEYS):
+        return
+    legacy = _read_service_catalogue(os.path.join(DATA_DIR, "services.json"))
+    if not legacy:
+        return
+    grouped = {key: [] for key in FIRST_CONTACT_ACCOUNT_KEYS}
+    for service in legacy:
+        key = _service_line_key(service)
+        grouped[key].append({**service, "lineKey": key})
+    os.makedirs(DATA_DIR, exist_ok=True)
+    for key, services in grouped.items():
+        path = _line_services_path(key)
+        if not os.path.exists(path):
+            temporary = f"{path}.tmp"
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump(services, handle, indent=2)
+            os.replace(temporary, path)
+
+def load_line_services(account_key: str) -> List[Dict[str, Any]]:
+    if account_key not in FIRST_CONTACT_ACCOUNT_KEYS:
+        return []
+    _ensure_line_service_catalogues()
+    return _read_service_catalogue(_line_services_path(account_key))
+
+def load_all_line_services() -> List[Dict[str, Any]]:
+    return [service for key in FIRST_CONTACT_ACCOUNT_KEYS for service in load_line_services(key)]
+
 def get_live_services_context(account_key: str = "primary") -> str:
     """Read the current Settings service catalogue for every AI reply.
 
     This intentionally avoids a cache: saving Settings should affect the very next
     conversation without a restart or a separate knowledge-base upload.
     """
-    services_path = os.path.join(DATA_DIR, "services.json")
-    if not os.path.exists(services_path):
-        return ""
-
-    try:
-        with open(services_path, "r", encoding="utf-8") as handle:
-            services = json.load(handle)
-    except Exception as exc:
-        print(f"Failed to load live services for AI context: {exc}")
-        return ""
-
-    if not isinstance(services, list) or not services:
+    services = load_line_services(account_key)
+    if not services:
         return ""
 
     rendered = ["[Live services and prices from Settings]"]
@@ -3033,14 +3070,8 @@ def is_explicit_booking_rejection(message: str) -> bool:
 
 
 def get_service_for_booking(service_id: str) -> Optional[Dict[str, Any]]:
-    services_path = os.path.join(DATA_DIR, "services.json")
-    try:
-        with open(services_path, "r", encoding="utf-8") as handle:
-            services = json.load(handle)
-    except (OSError, ValueError):
-        return None
     return next((
-        service for service in services
+        service for service in load_all_line_services()
         if isinstance(service, dict) and service.get("id") == service_id
     ), None)
 
@@ -3850,14 +3881,8 @@ def load_working_hours():
 
 
 def load_booking_services() -> List[Dict[str, Any]]:
-    """Load the legacy service catalogue for the booking adapter."""
-    services_path = os.path.join(DATA_DIR, "services.json")
-    try:
-        with open(services_path, "r", encoding="utf-8") as handle:
-            services = json.load(handle)
-    except (OSError, ValueError):
-        return []
-    return services if isinstance(services, list) else []
+    """Load both line catalogues for booking infrastructure, never AI context."""
+    return load_all_line_services()
 
 
 def get_booking_tool_suite() -> BookingToolSuite:
@@ -11029,7 +11054,7 @@ def get_first_contact_autoresponder():
     return {
         **accounts["primary"],
         "accounts": accounts,
-        "labels": {"primary": "Tori", "secondary": "Anonymous"},
+        "labels": {"primary": "Line 1", "secondary": "Line 2"},
     }
 
 @app.post("/api/settings/first-contact-autoresponder")
@@ -11502,6 +11527,7 @@ class ServiceItem(BaseModel):
     price: int
     duration: int
     showDuration: Optional[bool] = True
+    lineKey: Literal["primary", "secondary"] = "primary"
 
 class ServicesListInput(BaseModel):
     services: List[ServiceItem]
@@ -11530,24 +11556,23 @@ class ManualBookingInput(BaseModel):
 
 @app.get("/api/services")
 def get_services():
-    services_path = os.path.join(DATA_DIR, "services.json")
-    if os.path.exists(services_path):
-        try:
-            with open(services_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return []
+    return load_all_line_services()
 
 
 @app.post("/api/services")
 def save_services(payload: ServicesListInput):
-    services_path = os.path.join(DATA_DIR, "services.json")
     try:
-        os.makedirs(os.path.dirname(services_path), exist_ok=True)
-        services_dict = [item.model_dump() for item in payload.services]
-        with open(services_path, "w", encoding="utf-8") as f:
-            json.dump(services_dict, f, indent=2)
+        grouped = {key: [] for key in FIRST_CONTACT_ACCOUNT_KEYS}
+        for item in payload.services:
+            service = item.model_dump()
+            grouped[service["lineKey"]].append(service)
+        os.makedirs(DATA_DIR, exist_ok=True)
+        for key, services in grouped.items():
+            path = _line_services_path(key)
+            temporary = f"{path}.tmp"
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump(services, handle, indent=2)
+            os.replace(temporary, path)
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save services: {e}")
@@ -11737,11 +11762,7 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
         sms_account_key = provider["sms_account_key"]
         start_dt = parse_business_datetime(payload.startTime)
         
-        services_path = os.path.join(DATA_DIR, "services.json")
-        services = []
-        if os.path.exists(services_path):
-            with open(services_path, "r", encoding="utf-8") as f:
-                services = json.load(f)
+        services = load_line_services(sms_account_key)
                 
         service = None
         for s in services:

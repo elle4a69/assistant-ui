@@ -41,15 +41,23 @@ def test_catalogue_context_exposes_only_customer_visible_details(tmp_path, monke
     assert "Duration: 75 minutes" not in context
 
 
-def test_secondary_account_receives_shared_services_but_not_primary_knowledge_or_state(tmp_path, monkeypatch):
+def test_secondary_account_receives_only_its_line_services_and_not_primary_knowledge_or_state(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
-    write_services(tmp_path)
+    (tmp_path / "line_1_services.json").write_text(json.dumps([{
+        "id": "line-1", "name": "Line 1 Service", "description": "Line 1 only.",
+        "price": 320, "duration": 60, "showDuration": True, "lineKey": "primary",
+    }]), encoding="utf-8")
+    (tmp_path / "line_2_services.json").write_text(json.dumps([{
+        "id": "line-2", "name": "Line 2 Service", "description": "Line 2 only.",
+        "price": 250, "duration": 60, "showDuration": True, "lineKey": "secondary",
+    }]), encoding="utf-8")
     monkeypatch.setattr(main, "KNOWLEDGE_CHUNKS", [{
         "source": "primary-only.txt", "type": "text", "text": "Tori-only knowledge",
         "scope": "primary", "retrieval_enabled": True,
     }])
 
-    assert "Scalp Care" in main.get_live_services_context("secondary")
+    assert "Line 2 Service" in main.get_live_services_context("secondary")
+    assert "Line 1 Service" not in main.get_live_services_context("secondary")
     assert "Tori-only knowledge" not in main.build_business_context("Tori", account_key="secondary")
 
     engine = create_engine("sqlite:///:memory:")
@@ -114,8 +122,8 @@ def test_secondary_account_receives_shared_services_but_not_primary_knowledge_or
     messages = db.query(Message).filter(Message.thread_id == thread.id).order_by(Message.at).all()
     assert [message.text for message in messages] == ["Hello Anonymous", "Hello from Anonymous."]
     assert "Tori-only knowledge" not in str(calls[0]["input"])
-    assert "Scalp Care" in str(calls[0]["input"])
-    assert "Relaxation Session" in str(calls[0]["input"])
+    assert "Line 2 Service" in str(calls[0]["input"])
+    assert "Line 1 Service" not in str(calls[0]["input"])
     assert "Tori" not in calls[0]["instructions"]
     assert "Anonymous" in calls[0]["instructions"]
     db.close()
@@ -158,3 +166,4 @@ def test_ai_knowledge_classifier_tags_generic_entries_and_quarantines_availabili
     assert result["availability"]["retrieval_enabled"] is False
     assert result["service"]["category"] == "service_specific"
     assert result["service"]["retrieval_enabled"] is True
+
