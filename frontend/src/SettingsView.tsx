@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 34148)
-Total output lines: 2538
-
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   getSettings,
@@ -997,7 +994,875 @@ export default function SettingsView() {
             <a href="https://sequence-converted-causing-mat.trycloudflare.com" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:text-indigo-850 hover:underline break-all font-semibold">
               https://sequence-converted-causing-mat.trycloudflare.com
             </a>
-            <a href="https://app.mobilemessage.com.au/" target="_blank…14148 tokens truncated…ation ? 'bg-indigo-600' : 'bg-slate-300'}`}
+            <a href="https://app.mobilemessage.com.au/" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:text-indigo-850 hover:underline break-all font-semibold">
+              https://app.mobilemessage.com.au/
+            </a>
+          </div>
+        </div>
+
+        {/* Banner Alert */}
+        {banner && (
+          <div
+            className={`p-3.5 rounded-lg border text-xs font-semibold flex items-center gap-2.5 shadow-sm transition-all duration-355 ${
+              banner.type === 'success'
+                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                : 'bg-rose-50 text-rose-800 border-rose-200'
+            }`}
+          >
+            {banner.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            ) : (
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            )}
+            <span>{banner.message}</span>
+          </div>
+        )}
+
+        {loadingSettings && (
+          <div className="rounded-lg border border-indigo-100 bg-indigo-50 px-3 py-2 text-[10px] font-semibold text-indigo-700 flex items-center gap-2">
+            <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Refreshing saved settings...
+          </div>
+        )}
+        {settingsConnectionError && (
+          <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+              <span><strong>Production settings are temporarily unavailable in this page.</strong> Saved values have not been erased. Retry before editing or saving.</span>
+            </div>
+            <button
+              type="button"
+              onClick={loadAllSettings}
+              className="rounded-lg border border-rose-300 bg-white px-3 py-1.5 text-[10px] font-bold text-rose-800 hover:bg-rose-100 cursor-pointer shrink-0"
+            >
+              Retry connection
+            </button>
+          </div>
+        )}
+        <OperationsAIChat />
+        <div className="grid grid-cols-1 gap-6">
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+              <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                  <BellRing className="w-4.5 h-4.5" />
+                </div>
+                <div>
+                  <h2 className="font-bold text-slate-800 text-sm">Device Alerts &amp; Display</h2>
+                  <p className="text-[10px] text-slate-500 mt-0.5">Choose how this portal behaves and sounds.</p>
+                </div>
+              </div>
+
+              <div className="p-4 flex items-center justify-between gap-4 border-b border-slate-100">
+                <div className="flex items-center gap-3 min-w-0">
+                  <MessageSquare className="w-4 h-4 text-slate-500 shrink-0" />
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-slate-800">Message avatars</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Show the circular avatar beside each conversation.</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={showMessageAvatars}
+                  aria-label="Show message avatars"
+                  disabled={savingMessageDisplay}
+                  onClick={handleMessageAvatarToggle}
+                  className={`relative h-6 w-11 shrink-0 rounded-full border-none p-0 transition-colors cursor-pointer disabled:opacity-50 ${showMessageAvatars ? 'bg-indigo-600' : 'bg-slate-300'}`}
+                >
+                  <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${showMessageAvatars ? 'translate-x-5' : 'translate-x-0'}`} />
+                </button>
+              </div>
+
+              <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100">
+                <div className="flex items-start gap-3 min-w-0">
+                  <Trash2 className="w-4 h-4 text-rose-600 mt-0.5 shrink-0" />
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-slate-800">Clear pending AI drafts</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Remove every unsent AI reply currently waiting for approval.</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={clearingPendingDrafts}
+                  onClick={handleClearPendingDrafts}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-2 text-[10px] font-bold text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer shrink-0"
+                >
+                  {clearingPendingDrafts ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                  {clearingPendingDrafts ? 'Clearing…' : 'Clear all drafts'}
+                </button>
+              </div>
+
+              <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100">
+                <div className="flex items-start gap-3 min-w-0">
+                  <RefreshCw className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-slate-800">Clear review tags</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Remove stale review markers that do not have a pending draft. No messages are sent.</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={clearingReviewTags}
+                  onClick={handleClearReviewTags}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-amber-200 bg-white px-3 py-2 text-[10px] font-bold text-amber-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer shrink-0"
+                >
+                  {clearingReviewTags ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                  {clearingReviewTags ? 'Clearing…' : 'Clear review tags'}
+                </button>
+              </div>
+
+              <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100">
+                <div className="flex items-start gap-3 min-w-0">
+                  <RefreshCw className="w-4 h-4 text-indigo-600 mt-0.5 shrink-0" />
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-slate-800">Catch-up window</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Refresh only considers unanswered messages from this many days ago. Older messages are skipped and create no drafts.</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <input
+                    type="number"
+                    min="1"
+                    max="30"
+                    value={catchUpLookbackDays}
+                    onChange={(event) => setCatchUpLookbackDays(Number(event.target.value))}
+                    aria-label="Catch-up window in days"
+                    className="w-16 rounded-lg border border-slate-300 px-2 py-2 text-center text-xs font-bold text-slate-800"
+                  />
+                  <span className="text-[10px] font-semibold text-slate-500">days</span>
+                  <button
+                    type="button"
+                    disabled={savingCatchUpWindow}
+                    onClick={handleSaveCatchUpWindow}
+                    className="rounded-lg border border-indigo-200 bg-white px-3 py-2 text-[10px] font-bold text-indigo-700 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
+                  >
+                    {savingCatchUpWindow ? 'Saving…' : 'Save'}
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-4 space-y-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex items-start gap-3 min-w-0">
+                    <BellRing className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-slate-800">Customer arrival air-raid siren</p>
+                      <p className="text-[10px] text-slate-500 mt-0.5">Sounds only when the customer says they have arrived. This setting applies only to this browser on this device.</p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={incomingAlarmEnabled}
+                    aria-label="Customer arrival siren on this device"
+                    onClick={handleIncomingAlarmToggle}
+                    className={`relative h-6 w-11 shrink-0 rounded-full border-none p-0 transition-colors cursor-pointer ${incomingAlarmEnabled ? 'bg-amber-500' : 'bg-slate-300'}`}
+                  >
+                    <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${incomingAlarmEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
+                  </button>
+                </div>
+
+                <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:pl-7">
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
+                    <Volume2 className="w-4 h-4 text-slate-500 shrink-0" />
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      value={incomingAlarmVolume}
+                      onChange={(event) => handleIncomingAlarmVolume(Number(event.target.value))}
+                      aria-label="Customer arrival siren volume"
+                      className="w-full accent-amber-500"
+                    />
+                    <span className="text-[10px] font-bold text-slate-600 w-9 text-right">{incomingAlarmVolume}%</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleTestIncomingAlarm}
+                    className={`px-3 py-2 rounded-lg text-xs font-bold cursor-pointer border ${testingIncomingAlarm ? 'bg-red-50 text-red-700 border-red-200' : 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'}`}
+                  >
+                    {testingIncomingAlarm ? 'Stop Siren' : 'Test Siren'}
+                  </button>
+                </div>
+                <p className="text-[10px] text-slate-500 sm:pl-7">The device's physical volume and browser tab sound permission still control the maximum loudness.</p>
+              </div>
+            </div>
+            
+            {/* Business Variables Section */}
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+              <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <BookOpen className="w-5 h-5 text-indigo-600" />
+                  <div>
+                    <h2 className="font-bold text-slate-800 text-sm">Business Variables</h2>
+                    <p className="text-[10px] text-slate-500 mt-0.5">See every available token here, then open Manage Variables only when you need to edit values.</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowVariableEditor((current) => !current)}
+                  className="flex items-center gap-1.5 bg-white hover:bg-slate-50 text-indigo-700 border border-indigo-200 text-xs px-3 py-2 rounded-lg font-bold cursor-pointer shrink-0"
+                >
+                  {showVariableEditor ? <X className="w-3.5 h-3.5" /> : <Edit className="w-3.5 h-3.5" />}
+                  {showVariableEditor ? 'Close Editor' : 'Manage Variables'}
+                </button>
+              </div>
+              <div className="p-5 flex flex-col gap-4">
+                <div className="rounded-lg border border-indigo-100 bg-indigo-50/60 p-3 text-[10px] leading-relaxed text-indigo-900">
+                  Non-empty business values are supplied to the AI automatically. Click any token below to copy it for a prompt or confirmation template.
+                </div>
+
+                <div>
+                  <h3 className="text-[10px] font-bold uppercase tracking-wide text-slate-500 mb-2">Built-in application tokens</h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {BUILT_IN_TEMPLATE_VARIABLES.map((variable) => (
+                      <button
+                        key={variable.key}
+                        type="button"
+                        onClick={() => copyVariableToken(variable.key)}
+                        className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-left hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer"
+                      >
+                        <span className="min-w-0">
+                          <span className="block text-[11px] font-semibold text-slate-700">{variable.label}</span>
+                          <span className="block text-[9px] text-slate-400">{variable.scope}</span>
+                        </span>
+                        <code className="text-[10px] font-bold text-indigo-700 shrink-0">{copiedVariableToken === variable.key ? 'Copied' : `{${variable.key}}`}</code>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <h3 className="text-[10px] font-bold uppercase tracking-wide text-slate-500 mb-2">Business detail tokens</h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {businessVariables.map((variable) => (
+                      <button
+                        key={variable.key}
+                        type="button"
+                        onClick={() => copyVariableToken(variable.key)}
+                        className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-left hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer"
+                      >
+                        <span className="flex items-center gap-2 min-w-0">
+                          <span className={`h-2 w-2 rounded-full shrink-0 ${variable.value.trim() ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+                          <span className="min-w-0">
+                            <span className="flex items-center gap-1.5">
+                              <span className="block truncate text-[11px] font-semibold text-slate-700">{variable.label}</span>
+                              <span className="text-[9px] font-mono text-slate-400">({variable.key})</span>
+                            </span>
+                            <span className="block text-[9px] text-slate-400 truncate">{variable.description || (variable.value.trim() ? 'Value saved' : 'No value set')}</span>
+                          </span>
+                        </span>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <span className={`text-[8px] font-bold uppercase px-1.5 py-0.5 rounded ${variable.required || variable.required_status === 'required' ? 'bg-amber-100 text-amber-800 border border-amber-200' : 'bg-slate-100 text-slate-600 border border-slate-200'}`}>
+                            {variable.required || variable.required_status === 'required' ? 'Required' : 'Optional'}
+                          </span>
+                          <code className="text-[10px] font-bold text-indigo-700">{copiedVariableToken === variable.key ? 'Copied' : (variable.token || `{${variable.key}}`)}</code>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {showVariableEditor && (
+                  <div className="mt-1 rounded-xl border border-indigo-200 bg-slate-50 p-3 sm:p-4 flex flex-col gap-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <h3 className="text-xs font-bold text-slate-800">Manage business details</h3>
+                        <p className="text-[9px] text-slate-500 mt-0.5">Changes take effect after Save Variables.</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={addBusinessVariable}
+                        className="flex items-center gap-1 rounded-lg border border-indigo-200 bg-white px-2.5 py-1.5 text-[10px] font-bold text-indigo-700 hover:bg-indigo-50 cursor-pointer"
+                      >
+                        <Plus className="w-3 h-3" /> Add custom
+                      </button>
+                    </div>
+                    {businessVariables.map((variable, index) => (
+                      <div key={`${variable.key}-${index}`} className="grid grid-cols-1 lg:grid-cols-[minmax(140px,0.8fr)_minmax(150px,0.9fr)_minmax(220px,1.6fr)_32px] gap-2 items-start rounded-lg border border-slate-200 bg-white p-2.5">
+                        <input
+                          aria-label="Variable label"
+                          value={variable.label}
+                          onChange={(event) => updateBusinessVariable(index, 'label', event.target.value)}
+                          className="w-full text-xs border border-slate-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          placeholder="Display label"
+                        />
+                        <div className="flex items-center rounded-lg border border-slate-300 bg-white focus-within:ring-2 focus-within:ring-indigo-500">
+                          <span className="pl-2 text-xs font-mono text-slate-400">{'{'}</span>
+                          <input
+                            aria-label="Variable token"
+                            value={variable.key}
+                            onChange={(event) => updateBusinessVariable(index, 'key', event.target.value)}
+                            className="min-w-0 flex-1 border-0 bg-transparent py-2 text-xs font-mono focus:outline-none"
+                            placeholder="variable_name"
+                          />
+                          <span className="pr-2 text-xs font-mono text-slate-400">{'}'}</span>
+                        </div>
+                        <input
+                          aria-label="Variable value"
+                          value={variable.value}
+                          onChange={(event) => updateBusinessVariable(index, 'value', event.target.value)}
+                          className="w-full text-xs border border-slate-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          placeholder="Business value"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => removeBusinessVariable(index)}
+                          title={`Remove ${variable.label || variable.key}`}
+                          className="h-8 w-8 flex items-center justify-center rounded-lg text-slate-500 hover:text-rose-600 hover:bg-rose-50 cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                    <div className="pt-2 border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <p className="text-[9px] text-slate-500">Keys use lowercase letters, numbers, and underscores.</p>
+                      <button
+                        type="button"
+                        onClick={handleSaveBusinessVariables}
+                        disabled={savingBusinessVariables}
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-4 py-2 rounded-lg font-bold cursor-pointer disabled:opacity-50"
+                      >
+                        {savingBusinessVariables ? 'Saving...' : 'Save Variables'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* OpenAI Configuration Section */}
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+              <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
+                <Cpu className="w-5 h-5 text-indigo-600" />
+                <h2 className="font-bold text-slate-800 text-sm">OpenAI Agent & Prompt Configuration</h2>
+              </div>
+              <form onSubmit={handleSaveSettings} className="p-5 flex flex-col gap-4">
+                
+                {/* API Key */}
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <Key className="w-3.5 h-3.5 text-slate-400" /> OpenAI API Key
+                  </label>
+                  <input
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder="sk-..."
+                    className="w-full text-xs bg-slate-50 border border-slate-300 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white"
+                  />
+                  <p className="text-[10px] text-slate-400">Values are masked by default. Updates write to backend .env variables.</p>
+                </div>
+
+
+                {/* System Prompt */}
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <Terminal className="w-3.5 h-3.5 text-slate-400" /> System Instruction Prompt
+                  </label>
+                  <textarea
+                    value={systemPrompt}
+                    onChange={(e) => setSystemPrompt(e.target.value)}
+                    rows={8}
+                    className="w-full text-xs font-mono bg-slate-900 text-slate-200 border border-slate-805 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                  <p className="text-[10px] text-slate-400">Defines constraints, timezone rules, persona, and response formatting. Business variable tokens can be used here.</p>
+                </div>
+
+                {/* User Prompt */}
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <FileText className="w-3.5 h-3.5 text-slate-400" /> User Template Prompt
+                  </label>
+                  <textarea
+                    value={userPrompt}
+                    onChange={(e) => setUserPrompt(e.target.value)}
+                    rows={4}
+                    className="w-full text-xs font-mono bg-slate-900 text-slate-200 border border-slate-805 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                  <p className="text-[10px] text-slate-400">Keep the live injection tokens <code className="bg-slate-200 text-slate-750 px-1 rounded font-bold">{"{message}"}</code>, <code className="bg-slate-200 text-slate-750 px-1 rounded font-bold">{"{knowledge}"}</code>, and <code className="bg-slate-200 text-slate-750 px-1 rounded font-bold">{"{slots}"}</code>. Business variable tokens are also supported.</p>
+                </div>
+
+                <div className="pt-2 border-t border-slate-100 flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={savingSettings}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-4 py-2 rounded-lg font-bold shadow-sm transition-all cursor-pointer disabled:opacity-50 border border-transparent font-sans"
+                  >
+                    {savingSettings ? 'Saving Configurations...' : 'Save Configurations'}
+                  </button>
+                </div>
+
+              </form>
+            </div>
+
+            {/* Local RAG Section */}
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+              <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
+                <FileText className="w-5 h-5 text-indigo-600" />
+                <div>
+                  <h2 className="font-bold text-slate-800 text-sm">Learned Material &amp; Knowledge Documents</h2>
+                  <p className="text-[10px] text-slate-500 mt-0.5">Teach a situation directly or manage the underlying Local RAG files.</p>
+                </div>
+              </div>
+              <div className="p-5 flex flex-col gap-5">
+
+                <form onSubmit={handleCreateLearning} className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-4 flex flex-col gap-3">
+                  <div className="flex items-start gap-2.5">
+                    <div className="mt-0.5 h-8 w-8 rounded-lg bg-indigo-100 text-indigo-700 flex items-center justify-center shrink-0">
+                      <BookOpen className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="text-xs font-bold text-indigo-950">Add learned guidance</h3>
+                      <p className="text-[10px] leading-relaxed text-indigo-800 mt-0.5">
+                        Write rough notes in your own words. The AI will turn them into a reusable instruction and only add an example reply when your notes actually provide wording.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3">
+                    <div className="flex flex-col gap-1.5">
+                      <label htmlFor="learning-topic" className="text-[10px] font-bold uppercase tracking-wider text-slate-600">Topic or situation</label>
+                      <input
+                        id="learning-topic"
+                        value={learningTopic}
+                        onChange={(event) => setLearningTopic(event.target.value)}
+                        maxLength={500}
+                        placeholder="e.g. Customer asks to change their existing booking time"
+                        className="w-full rounded-lg border border-slate-300 bg-white p-2.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <label htmlFor="learning-guidance" className="text-[10px] font-bold uppercase tracking-wider text-slate-600">What should the AI do or say?</label>
+                      <textarea
+                        id="learning-guidance"
+                        value={learningGuidance}
+                        onChange={(event) => setLearningGuidance(event.target.value)}
+                        rows={5}
+                        maxLength={6000}
+                        placeholder="Describe the action, rule, or suggested wording. It can be messy; the AI will structure it without adding new facts."
+                        className="w-full resize-y rounded-lg border border-slate-300 bg-white p-2.5 text-xs leading-relaxed text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                      <p className="text-[9px] text-slate-500">Procedures and policies are saved as instructions. Exact wording is saved as an example only when you supply it.</p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 border-t border-indigo-100 pt-3">
+                    <span className="text-[9px] font-semibold text-indigo-700">Nothing is saved if the AI cannot structure it safely.</span>
+                    <button
+                      type="submit"
+                      disabled={savingLearning || !learningTopic.trim() || !learningGuidance.trim()}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-transparent bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-45 cursor-pointer shrink-0"
+                    >
+                      {savingLearning ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                      {savingLearning ? 'Structuring...' : 'Add to learned material'}
+                    </button>
+                  </div>
+
+                  {lastSavedLearning && (
+                    <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-[10px] text-emerald-950">
+                      <div className="flex items-center gap-1.5 font-bold mb-1.5">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> Last learning added
+                      </div>
+                      <p><strong>Topic:</strong> {lastSavedLearning.topic}</p>
+                      <p className="mt-1"><strong>Applies when:</strong> {lastSavedLearning.applies_when}</p>
+                      <p className="mt-1"><strong>Instruction:</strong> {lastSavedLearning.instruction}</p>
+                      {lastSavedLearning.example_reply && (
+                        <p className="mt-1"><strong>Example reply:</strong> {lastSavedLearning.example_reply}</p>
+                      )}
+                    </div>
+                  )}
+                </form>
+                
+                {/* List of files */}
+                <div>
+                  <h3 className="text-xs font-bold text-slate-700 mb-2 font-sans">Files loaded in /backend/knowledge/</h3>
+                  <div className="border border-slate-200 rounded-lg divide-y divide-slate-150 overflow-hidden bg-slate-50">
+                    {loadingFiles ? (
+                      <div className="p-4 text-center text-xs text-slate-400">
+                        Retrieving knowledge files...
+                      </div>
+                    ) : knowledgeFiles.length === 0 ? (
+                      <div className="p-4 text-center text-xs text-slate-400">
+                        No files uploaded yet. Add FAQs or training sheets.
+                      </div>
+                    ) : (
+                      knowledgeFiles.map((file) => (
+                        <div key={file.name} className="p-3 flex justify-between items-center text-xs font-sans hover:bg-slate-100 transition-colors">
+                          <span className="font-medium text-slate-700 flex items-center gap-1.5">
+                            <File className="w-3.5 h-3.5 text-slate-400" />
+                            {file.name}
+                            <span className="text-[9px] text-slate-400 font-semibold bg-slate-200 px-1.5 py-0.5 rounded ml-1.5">
+                              {formatSize(file.sizeBytes)}
+                            </span>
+                          </span>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={() => handleOpenEdit(file)}
+                              title="Edit or moderate document"
+                              className="p-1 hover:bg-slate-200 rounded text-slate-600 hover:text-indigo-600 cursor-pointer transition-colors"
+                            >
+                              <Edit className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteFile(file.name)}
+                              title="Delete document"
+                              className="p-1 hover:bg-rose-100 rounded text-slate-650 hover:text-rose-650 cursor-pointer transition-colors"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {/* Upload knowledge file */}
+                <div className="flex flex-col gap-2">
+                  <label className="text-xs font-bold text-slate-700 font-sans">Upload Knowledge File (.jsonl, .txt)</label>
+                  <div className="border-2 border-dashed border-slate-300 rounded-xl p-6 bg-slate-50 hover:bg-slate-100/50 transition-colors flex flex-col items-center justify-center gap-2 cursor-pointer relative">
+                    <input
+                      type="file"
+                      accept=".txt,.jsonl"
+                      onChange={handleKnowledgeUpload}
+                      disabled={uploadingKnowledge}
+                      className="absolute inset-0 opacity-0 w-full h-full cursor-pointer"
+                    />
+                    <UploadCloud className="w-8 h-8 text-slate-400" />
+                    <span className="text-xs font-semibold text-slate-650 font-sans">
+                      {uploadingKnowledge ? 'Uploading file...' : 'Click or Drag File Here to Upload'}
+                    </span>
+                    <span className="text-[9px] text-slate-400 font-sans">Supported formats: Text (.txt) or JSON Lines (.jsonl)</span>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
+            {/* Google Calendar Section */}
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+              <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
+                <Calendar className="w-5 h-5 text-indigo-650" />
+                <h2 className="font-bold text-slate-800 text-sm">Google Calendar Account Integration</h2>
+              </div>
+              <div className="p-5 flex flex-col gap-5">
+                
+                {/* Status indicator */}
+                <div className="flex items-center justify-between p-3.5 rounded-lg bg-slate-50 border border-slate-200 text-xs font-sans">
+                  <span className="font-semibold text-slate-700">Calendar Bind Mode:</span>
+                  {hasGoogleCreds ? (
+                    <span className="bg-emerald-100 text-emerald-800 px-3 py-1 rounded-full font-bold flex items-center gap-1.5 border border-emerald-200 text-[10px] font-sans">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-650" />
+                      Active Google Calendar Connection
+                    </span>
+                  ) : (
+                    <span className="bg-slate-200 text-slate-700 px-3 py-1 rounded-full font-bold flex items-center gap-1.5 border border-slate-350 text-[10px] font-sans">
+                      <AlertCircle className="w-3.5 h-3.5 text-slate-500" />
+                      SQLite Database Fallback Mode
+                    </span>
+                  )}
+                </div>
+
+                {/* Upload credentials uploader */}
+                <div className="flex flex-col gap-2">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1 font-sans">
+                    Upload GCP Service Account JSON key
+                  </label>
+                  <div className="border-2 border-dashed border-slate-300 rounded-xl p-6 bg-slate-50 hover:bg-slate-100/50 transition-colors flex flex-col items-center justify-center gap-2 cursor-pointer relative">
+                    <input
+                      type="file"
+                      accept=".json"
+                      onChange={handleCredentialsUpload}
+                      disabled={uploadingCreds}
+                      className="absolute inset-0 opacity-0 w-full h-full cursor-pointer"
+                    />
+                    <UploadCloud className="w-8 h-8 text-slate-400" />
+                    <span className="text-xs font-semibold text-slate-650 font-sans">
+                      {uploadingCreds ? 'Uploading credentials...' : 'Click to Upload JSON Key File'}
+                    </span>
+                    <span className="text-[9px] text-slate-400 font-sans">Overwrites backend service_account.json to bind active calendar connection.</span>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
+            {/* Services Configuration Card */}
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
+              <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
+                <Sliders className="w-5 h-5 text-indigo-650" />
+                <h2 className="font-bold text-slate-800 text-sm">Services & Booking Configuration</h2>
+              </div>
+              
+              <div className="p-5 flex flex-col gap-6 font-sans">
+                
+                {/* SMS Template Section */}
+                <div className="flex flex-col gap-2.5 pb-5 border-b border-slate-150">
+                  <div>
+                    <h3 className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
+                      <FileText className="w-3.5 h-3.5 text-indigo-650" />
+                      Booking SMS Confirmation Template
+                    </h3>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Customize the SMS sent after scheduling. Booking tokens: <code>{`{name}`}</code>, <code>{`{service}`}</code>, and <code>{`{time}`}</code>. Saved business variable tokens also work, such as <code>{`{street_address}`}</code>.</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <textarea
+                      value={smsTemplate}
+                      onChange={(e) => setSmsTemplate(e.target.value)}
+                      rows={2}
+                      className="flex-1 font-mono text-[11px] p-2.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                    <button
+                      onClick={handleSaveSmsTemplate}
+                      disabled={savingSmsTemplate}
+                      className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs px-4 py-2 rounded-lg shadow-sm transition-all cursor-pointer h-fit self-end shrink-0"
+                    >
+                      {savingSmsTemplate ? 'Saving...' : 'Save Template'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-3 pb-5 border-b border-slate-150">
+                  <div>
+                    <h3 className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
+                      <BellRing className="w-3.5 h-3.5 text-amber-600" />
+                      Automatic Booking Reminder
+                    </h3>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Send one reminder before each booking from its selected provider SMS line. Tokens include <code>{`{name}`}</code>, <code>{`{service}`}</code>, <code>{`{time}`}</code>, <code>{`{date}`}</code>, <code>{`{provider}`}</code> and all saved business variables.</p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-4">
+                    <label className="flex items-center gap-2 text-xs font-bold text-slate-700">
+                      <input type="checkbox" checked={bookingReminder.enabled} onChange={event => setBookingReminder(current => ({ ...current, enabled: event.target.checked }))} className="h-4 w-4 accent-indigo-600" />
+                      Enabled
+                    </label>
+                    <label className="flex items-center gap-2 text-xs font-bold text-slate-700">
+                      Send
+                      <input type="number" min={5} max={10080} value={bookingReminder.minutesBefore} onChange={event => setBookingReminder(current => ({ ...current, minutesBefore: Math.max(5, Number(event.target.value) || 60) }))} className="w-20 rounded-lg border border-slate-300 px-2 py-1.5 text-xs" />
+                      minutes before
+                    </label>
+                  </div>
+                  <textarea value={bookingReminder.template} onChange={event => setBookingReminder(current => ({ ...current, template: event.target.value }))} rows={3} className="w-full font-mono text-[11px] p-2.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                  <button onClick={handleSaveBookingReminder} disabled={savingBookingReminder || !bookingReminder.template.trim()} className="self-end rounded-lg bg-amber-500 px-4 py-2 text-xs font-bold text-slate-950 hover:bg-amber-400 disabled:opacity-50">
+                    {savingBookingReminder ? 'Saving...' : 'Save Reminder'}
+                  </button>
+                </div>
+
+                {/* Services List Section */}
+                <div className="flex flex-col gap-4">
+                  <div>
+                    <h3 className="font-bold text-slate-800 text-xs">Manage Service Items</h3>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Assign every service to Line 1 or Line 2. Only that line's AI can use it in a customer reply.</p>
+                  </div>
+
+                  {/* List of services */}
+                  <div className="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 divide-y divide-slate-200 max-h-[250px] overflow-y-auto">
+                    {services.length === 0 ? (
+                      <div className="py-8 text-center text-xs text-slate-400">
+                        No services configured. Use the form below to add.
+                      </div>
+                    ) : (
+                      services.map((srv, index) => {
+                        if (editingServiceId === srv.id) {
+                          return (
+                            <form key={srv.id} onSubmit={handleUpdateService} className="p-3 bg-indigo-50/50 flex flex-col gap-2.5 font-sans">
+                              <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+                                <input
+                                  type="text"
+                                  value={editServiceName}
+                                  onChange={(e) => setEditServiceName(e.target.value)}
+                                  placeholder="Service Name"
+                                  className="text-xs border border-slate-350 rounded p-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white md:col-span-2"
+                                  required
+                                />
+                                <input
+                                  type="number"
+                                  value={editServicePrice}
+                                  onChange={(e) => setEditServicePrice(parseInt(e.target.value) || 0)}
+                                  placeholder="Price ($)"
+                                  className="text-xs border border-slate-355 rounded p-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
+                                  min="1"
+                                  required
+                                />
+                                <input
+                                  type="number"
+                                  value={editServiceDuration}
+                                  onChange={(e) => setEditServiceDuration(parseInt(e.target.value) || 0)}
+                                  placeholder="Duration (mins)"
+                                  className="text-xs border border-slate-355 rounded p-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
+                                  min="5"
+                                  required
+                                />
+                              </div>
+                              <textarea
+                                value={editServiceDesc}
+                                onChange={(e) => setEditServiceDesc(e.target.value)}
+                                placeholder="Service description..."
+                                rows={2}
+                                className="text-xs border border-slate-350 rounded p-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
+                              />
+                              <label className="flex items-center gap-2 text-[10px] font-bold text-slate-650">
+                                Service line
+                                <select
+                                  value={editServiceLineKey}
+                                  onChange={(event) => setEditServiceLineKey(event.target.value as 'primary' | 'secondary')}
+                                  className="rounded border border-slate-300 bg-white px-2 py-1.5 text-xs font-normal"
+                                >
+                                  <option value="primary">Line 1</option>
+                                  <option value="secondary">Line 2</option>
+                                </select>
+                              </label>
+                              <div className="flex items-center justify-between">
+                                <label className="flex items-center gap-2 cursor-pointer select-none">
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditServiceShowDuration(p => !p)}
+                                    className={`relative w-8 h-4 rounded-full transition-colors cursor-pointer ${editServiceShowDuration ? 'bg-indigo-600' : 'bg-slate-300'}`}
+                                  >
+                                    <span className={`absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white shadow-sm transition-transform ${editServiceShowDuration ? 'translate-x-4' : 'translate-x-0'}`} />
+                                  </button>
+                                  <span className="text-[10px] text-slate-650 font-bold select-none">
+                                    {editServiceShowDuration ? 'Show duration on booking form' : 'Hide duration on booking form'}
+                                  </span>
+                                </label>
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={cancelEditService}
+                                    className="px-2.5 py-1 text-[10px] font-bold border border-slate-300 rounded text-slate-600 hover:bg-slate-100 transition-all cursor-pointer bg-white"
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    type="submit"
+                                    className="px-2.5 py-1 text-[10px] font-bold bg-indigo-650 hover:bg-indigo-700 text-white rounded shadow-sm transition-all cursor-pointer"
+                                  >
+                                    Update
+                                  </button>
+                                </div>
+                              </div>
+                            </form>
+                          );
+                        }
+                        return (
+                          <div
+                            key={srv.id}
+                            draggable={editingServiceId !== srv.id}
+                            onDragStart={(e) => handleDragStart(e, index)}
+                            onDragOver={(e) => handleDragOver(e, index)}
+                            onDragEnd={handleDragEnd}
+                            className={`p-3 flex justify-between items-start gap-4 hover:bg-slate-100/50 transition-colors select-none cursor-grab active:cursor-grabbing ${
+                              draggedIndex === index ? 'opacity-40 bg-indigo-50/30 border-y border-dashed border-indigo-200' : ''
+                            }`}
+                          >
+                            <div className="flex items-start gap-2.5">
+                              <GripVertical className="w-4 h-4 text-slate-400 mt-0.5 shrink-0" />
+                              <div className="flex flex-col gap-1">
+                                <span className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
+                                  {srv.name}
+                                  {srv.showDuration !== false && (
+                                    <span className="text-[9px] bg-slate-200 text-slate-650 font-bold px-1.5 py-0.5 rounded">
+                                      {srv.duration} mins
+                                    </span>
+                                  )}
+                                  {srv.showDuration === false && (
+                                    <span className="text-[9px] bg-amber-100 text-amber-700 font-bold px-1.5 py-0.5 rounded border border-amber-200">
+                                      duration hidden
+                                    </span>
+                                  )}
+                                  <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${srv.lineKey === 'secondary' ? 'bg-violet-100 text-violet-700 border-violet-200' : 'bg-sky-100 text-sky-700 border-sky-200'}`}>
+                                    {srv.lineKey === 'secondary' ? 'Line 2' : 'Line 1'}
+                                  </span>
+                                </span>
+                                <span className="text-[10px] text-slate-500 line-clamp-2">{srv.description}</span>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-3 shrink-0">
+                              <span className="font-bold text-slate-800 text-xs flex items-center">
+                                <DollarSign className="w-3.5 h-3.5 text-slate-400 stroke-[2.5]" />
+                                {srv.price}
+                              </span>
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  onClick={() => startEditService(srv)}
+                                  className="p-1 hover:bg-indigo-100 rounded text-indigo-600 transition-colors cursor-pointer"
+                                  title="Edit service"
+                                >
+                                  <Edit className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteService(srv.id)}
+                                  className="p-1 hover:bg-rose-100 rounded text-rose-600 transition-colors cursor-pointer"
+                                  title="Delete service"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  {/* Add Service form */}
+                  <form onSubmit={handleAddService} className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg flex flex-col gap-3">
+                    <h4 className="font-bold text-slate-700 text-xs flex items-center gap-1">
+                      <Plus className="w-3.5 h-3.5 text-slate-400" />
+                      Add New Service
+                    </h4>
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+                      <input
+                        type="text"
+                        value={newServiceName}
+                        onChange={(e) => setNewServiceName(e.target.value)}
+                        placeholder="Service Name (e.g. Full Massage)"
+                        className="text-xs border border-slate-300 rounded p-2 focus:outline-none focus:ring-1 focus:ring-indigo-500 md:col-span-2"
+                        required
+                      />
+                      <input
+                        type="number"
+                        value={newServicePrice}
+                        onChange={(e) => setNewServicePrice(parseInt(e.target.value) || 0)}
+                        placeholder="Price ($)"
+                        className="text-xs border border-slate-300 rounded p-2 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                        min="1"
+                        required
+                      />
+                      <input
+                        type="number"
+                        value={newServiceDuration}
+                        onChange={(e) => setNewServiceDuration(parseInt(e.target.value) || 0)}
+                        placeholder="Duration (mins)"
+                        className="text-xs border border-slate-300 rounded p-2 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                        min="5"
+                        required
+                      />
+                    </div>
+                    <textarea
+                      value={newServiceDesc}
+                      onChange={(e) => setNewServiceDesc(e.target.value)}
+                      placeholder="Service description detailing what's included..."
+                      rows={2}
+                      className="text-xs border border-slate-300 rounded p-2 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    />
+                    <label className="flex items-center gap-2 text-[10px] font-bold text-slate-650">
+                      Service line
+                      <select
+                        value={newServiceLineKey}
+                        onChange={(event) => setNewServiceLineKey(event.target.value as 'primary' | 'secondary')}
+                        className="rounded border border-slate-300 bg-white px-2 py-1.5 text-xs font-normal"
+                      >
+                        <option value="primary">Line 1</option>
+                        <option value="secondary">Line 2</option>
+                      </select>
+                    </label>
+                    <div className="flex items-center justify-between">
+                      {/* Show/hide duration toggle */}
+                      <label className="flex items-center gap-2 cursor-pointer select-none">
+                        <button
+                          type="button"
+                          onClick={() => setNewServiceShowDuration(p => !p)}
+                          className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer ${newServiceShowDuration ? 'bg-indigo-600' : 'bg-slate-300'}`}
                         >
                           <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${newServiceShowDuration ? 'translate-x-4' : 'translate-x-0'}`} />
                         </button>
@@ -1669,5 +2534,4 @@ export default function SettingsView() {
     </div>
   );
 }
-
 
