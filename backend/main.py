@@ -1913,6 +1913,77 @@ def _upsert_learned_information_entry(entry: Dict[str, Any]) -> None:
     load_knowledge_base()
 
 
+def list_learned_information() -> List[Dict[str, Any]]:
+    filepath = os.path.join(KNOWLEDGE_DIR, LEARNED_INFORMATION_FILENAME)
+    if not os.path.exists(filepath):
+        return []
+    records = []
+    with LEARNED_INFORMATION_LOCK, open(filepath, "r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            try:
+                item = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict) and str(item.get("id", "")).strip():
+                records.append(item)
+    return sorted(records, key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
+
+
+def replace_learned_information_entry(entry_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+    filepath = os.path.join(KNOWLEDGE_DIR, LEARNED_INFORMATION_FILENAME)
+    if not os.path.exists(filepath):
+        raise KeyError(entry_id)
+    with LEARNED_INFORMATION_LOCK:
+        retained, updated_entry, found = [], None, 0
+        for raw_line in open(filepath, "r", encoding="utf-8"):
+            try:
+                item = json.loads(raw_line)
+            except json.JSONDecodeError:
+                retained.append(raw_line.rstrip("\n"))
+                continue
+            if not isinstance(item, dict) or item.get("id") != entry_id:
+                retained.append(json.dumps(item, ensure_ascii=False))
+                continue
+            found += 1
+            item.update(updates)
+            item["updated_at"] = datetime.utcnow().isoformat() + "Z"
+            updated_entry = item
+            retained.append(json.dumps(item, ensure_ascii=False))
+        if found != 1 or updated_entry is None:
+            raise KeyError(entry_id)
+        temporary = f"{filepath}.{uuid.uuid4().hex}.tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(retained) + "\n")
+        os.replace(temporary, filepath)
+    load_knowledge_base()
+    return updated_entry
+
+
+def delete_learned_information_entry(entry_id: str) -> None:
+    filepath = os.path.join(KNOWLEDGE_DIR, LEARNED_INFORMATION_FILENAME)
+    if not os.path.exists(filepath):
+        raise KeyError(entry_id)
+    with LEARNED_INFORMATION_LOCK:
+        retained, found = [], 0
+        for raw_line in open(filepath, "r", encoding="utf-8"):
+            try:
+                item = json.loads(raw_line)
+            except json.JSONDecodeError:
+                retained.append(raw_line.rstrip("\n"))
+                continue
+            if isinstance(item, dict) and item.get("id") == entry_id:
+                found += 1
+                continue
+            retained.append(json.dumps(item, ensure_ascii=False))
+        if found != 1:
+            raise KeyError(entry_id)
+        temporary = f"{filepath}.{uuid.uuid4().hex}.tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(retained) + "\n")
+        os.replace(temporary, filepath)
+    load_knowledge_base()
+
+
 KNOWLEDGE_CLASSIFICATION_VERSION = 1
 KNOWLEDGE_SCOPES = {"shared", "primary", "secondary", "internal"}
 KNOWLEDGE_CATEGORIES = {
@@ -2768,6 +2839,20 @@ class ManualLearningInput(BaseModel):
         self.guidance = self.guidance.strip()
         if not self.topic or not self.guidance:
             raise ValueError("Both a topic and guidance are required.")
+        return self
+
+
+class LearnedInformationUpdateInput(BaseModel):
+    topic: str = Field(default="", max_length=500)
+    text: str = Field(min_length=1, max_length=6000)
+    scope: Literal["shared", "primary", "secondary", "internal"]
+
+    @model_validator(mode="after")
+    def clean_entry(self):
+        self.topic = self.topic.strip()
+        self.text = self.text.strip()
+        if not self.text:
+            raise ValueError("Learning text is required.")
         return self
 
 
@@ -11343,6 +11428,29 @@ def create_manual_learning(payload: ManualLearningInput):
     }
 
 
+@app.get("/api/settings/learnings")
+def get_learned_information():
+    return {"entries": list_learned_information()}
+
+
+@app.put("/api/settings/learnings/{entry_id}")
+def update_learned_information(entry_id: str, payload: LearnedInformationUpdateInput):
+    try:
+        entry = replace_learned_information_entry(entry_id, payload.model_dump())
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Learned entry not found.")
+    return {"status": "success", "entry": entry}
+
+
+@app.delete("/api/settings/learnings/{entry_id}")
+def remove_learned_information(entry_id: str):
+    try:
+        delete_learned_information_entry(entry_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Learned entry not found.")
+    return {"status": "success"}
+
+
 @app.post("/api/settings/learnings/classify")
 def classify_learned_information():
     if not openai_client:
@@ -12701,4 +12809,5 @@ if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
 
 # Trigger reload: Aug 2 18:01
+
 

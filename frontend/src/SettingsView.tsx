@@ -7,10 +7,14 @@ import {
   BusinessVariable,
   listKnowledgeFiles,
   createManualLearning,
+  listLearnedInformation,
+  updateLearnedInformation,
+  deleteLearnedInformation,
   uploadKnowledgeFile,
   uploadCredentialsFile,
   KnowledgeFile,
   ManualLearningEntry,
+  LearnedInformationEntry,
   getKnowledgeFile,
   saveKnowledgeFile,
   deleteKnowledgeFile,
@@ -144,6 +148,8 @@ export default function SettingsView() {
   const [learningScope, setLearningScope] = useState<'shared' | 'primary' | 'secondary'>('shared');
   const [savingLearning, setSavingLearning] = useState(false);
   const [lastSavedLearning, setLastSavedLearning] = useState<ManualLearningEntry | null>(null);
+  const [learnedEntries, setLearnedEntries] = useState<LearnedInformationEntry[]>([]);
+  const [editingLearnedId, setEditingLearnedId] = useState<string | null>(null);
 
   // Modal states for File Editor & Moderation
   const [activeEditFile, setActiveEditFile] = useState<string | null>(null);
@@ -263,6 +269,7 @@ export default function SettingsView() {
     } catch (e) { console.error('MobileMessage fetch failed:', e); }
     try { setQaRules(await retryOnce(getQARules)); } catch (e) { console.error('qa rules fetch failed:', e); }
     try { setFirstContactConfig(await retryOnce(getFirstContactAutoresponder)); } catch (e) { console.error('first-contact auto-responder fetch failed:', e); }
+    try { setLearnedEntries(await retryOnce(listLearnedInformation)); } catch (e) { console.error('learned rules fetch failed:', e); }
   }, []);
 
   const fetchKnowledgeFilesList = useCallback(async () => {
@@ -483,12 +490,35 @@ export default function SettingsView() {
       await uploadKnowledgeFile(file);
       triggerBanner('success', `Successfully uploaded knowledge file "${file.name}"`);
       await fetchKnowledgeFilesList();
+      setLearnedEntries(await listLearnedInformation());
     } catch (err) {
       console.error(err);
       triggerBanner('error', `Failed to upload knowledge file "${file.name}"`);
     } finally {
       setUploadingKnowledge(false);
       e.target.value = ''; // clear input
+    }
+  };
+
+  const handleSaveLearnedEntry = async (entry: LearnedInformationEntry) => {
+    try {
+      const saved = await updateLearnedInformation(entry);
+      setLearnedEntries(current => current.map(item => item.id === saved.id ? saved : item));
+      setEditingLearnedId(null);
+      triggerBanner('success', 'Learned rule updated.');
+    } catch (err) {
+      console.error(err); triggerBanner('error', err instanceof Error ? err.message : 'Failed to save learned rule.');
+    }
+  };
+
+  const handleDeleteLearnedEntry = async (id: string) => {
+    if (!window.confirm('Delete this learned rule? This cannot be undone.')) return;
+    try {
+      await deleteLearnedInformation(id);
+      setLearnedEntries(current => current.filter(item => item.id !== id));
+      triggerBanner('success', 'Learned rule deleted.');
+    } catch (err) {
+      console.error(err); triggerBanner('error', err instanceof Error ? err.message : 'Failed to delete learned rule.');
     }
   };
 
@@ -506,6 +536,7 @@ export default function SettingsView() {
       setLearningGuidance('');
       triggerBanner('success', `Learning saved to ${result.filename} and is available to the AI now.`);
       await fetchKnowledgeFilesList();
+      setLearnedEntries(await listLearnedInformation());
     } catch (err) {
       console.error(err);
       triggerBanner(
@@ -964,8 +995,8 @@ export default function SettingsView() {
   };
 
   return (
-    <div className="flex-1 overflow-y-auto bg-slate-50 p-6 font-sans">
-      <div className="max-w-4xl mx-auto flex flex-col gap-6">
+    <div className="flex-1 overflow-y-auto bg-slate-50 p-1 sm:p-3 md:p-6 font-sans">
+      <div className="w-full max-w-none mx-auto flex flex-col gap-2 sm:gap-3 md:gap-6">
         
         {/* Title */}
         <div className="flex justify-between items-center pb-2 border-b border-slate-200">
@@ -1040,9 +1071,20 @@ export default function SettingsView() {
           </div>
         )}
         <OperationsAIChat />
-        <div className="grid grid-cols-1 gap-6">
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-              <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-3">
+        <style>{`@media (max-width: 767px) {
+          details.settings-section > summary { list-style: none; cursor: pointer; }
+          details.settings-section > summary::-webkit-details-marker { display: none; }
+          details.settings-section > summary::after { content: '⌄'; margin-left: auto; font-size: 18px; color: #64748b; transition: transform 150ms ease; }
+          details.settings-section[open] > summary::after { transform: rotate(180deg); }
+        }
+        @media (min-width: 768px) {
+          details.settings-section:not([open]) > :not(summary) { display: block !important; }
+          details.settings-section > summary { cursor: default; list-style: none; }
+          details.settings-section > summary::-webkit-details-marker { display: none; }
+        }`}</style>
+        <div className="grid grid-cols-1 gap-2 sm:gap-3 md:gap-6">
+            <details name="settings-sections" open className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+              <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-3">
                 <div className="w-9 h-9 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
                   <BellRing className="w-4.5 h-4.5" />
                 </div>
@@ -1050,7 +1092,7 @@ export default function SettingsView() {
                   <h2 className="font-bold text-slate-800 text-sm">Device Alerts &amp; Display</h2>
                   <p className="text-[10px] text-slate-500 mt-0.5">Choose how this portal behaves and sounds.</p>
                 </div>
-              </div>
+              </summary>
 
               <div className="p-4 flex items-center justify-between gap-4 border-b border-slate-100">
                 <div className="flex items-center gap-3 min-w-0">
@@ -1186,11 +1228,11 @@ export default function SettingsView() {
                 </div>
                 <p className="text-[10px] text-slate-500 sm:pl-7">The device's physical volume and browser tab sound permission still control the maximum loudness.</p>
               </div>
-            </div>
+            </details>
             
             {/* Business Variables Section */}
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-              <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center justify-between gap-3">
+            <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+              <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
                   <BookOpen className="w-5 h-5 text-indigo-600" />
                   <div>
@@ -1206,8 +1248,8 @@ export default function SettingsView() {
                   {showVariableEditor ? <X className="w-3.5 h-3.5" /> : <Edit className="w-3.5 h-3.5" />}
                   {showVariableEditor ? 'Close Editor' : 'Manage Variables'}
                 </button>
-              </div>
-              <div className="p-5 flex flex-col gap-4">
+              </summary>
+              <div className="p-3 sm:p-5 flex flex-col gap-4">
                 <div className="rounded-lg border border-indigo-100 bg-indigo-50/60 p-3 text-[10px] leading-relaxed text-indigo-900">
                   Non-empty business values are supplied to the AI automatically. Click any token below to copy it for a prompt or confirmation template.
                 </div>
@@ -1329,15 +1371,15 @@ export default function SettingsView() {
                   </div>
                 )}
               </div>
-            </div>
+            </details>
 
             {/* OpenAI Configuration Section */}
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-              <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
+            <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+              <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
                 <Cpu className="w-5 h-5 text-indigo-600" />
                 <h2 className="font-bold text-slate-800 text-sm">OpenAI Agent & Prompt Configuration</h2>
-              </div>
-              <form onSubmit={handleSaveSettings} className="p-5 flex flex-col gap-4">
+              </summary>
+              <form onSubmit={handleSaveSettings} className="p-3 sm:p-5 flex flex-col gap-4">
                 
                 {/* API Key */}
                 <div className="flex flex-col gap-1.5">
@@ -1394,18 +1436,18 @@ export default function SettingsView() {
                 </div>
 
               </form>
-            </div>
+            </details>
 
             {/* Local RAG Section */}
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-              <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
+            <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+              <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
                 <FileText className="w-5 h-5 text-indigo-600" />
                 <div>
                   <h2 className="font-bold text-slate-800 text-sm">Learned Material &amp; Knowledge Documents</h2>
                   <p className="text-[10px] text-slate-500 mt-0.5">Teach a situation directly or manage the underlying Local RAG files.</p>
                 </div>
-              </div>
-              <div className="p-5 flex flex-col gap-5">
+              </summary>
+              <div className="p-3 sm:p-5 flex flex-col gap-5">
 
                 <form onSubmit={handleCreateLearning} className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-4 flex flex-col gap-3">
                   <div className="flex items-start gap-2.5">
@@ -1482,6 +1524,32 @@ export default function SettingsView() {
                     </div>
                   )}
                 </form>
+
+                <div className="rounded-xl border border-slate-200 bg-white">
+                  <div className="border-b border-slate-200 px-3 py-2.5">
+                    <h3 className="text-xs font-bold text-slate-800">Saved learned rules</h3>
+                    <p className="mt-0.5 text-[10px] text-slate-500">Edit the wording or scope, or remove obsolete material.</p>
+                  </div>
+                  <div className="max-h-[420px] divide-y divide-slate-100 overflow-y-auto">
+                    {learnedEntries.length === 0 ? <p className="p-3 text-xs text-slate-500">No learned rules saved yet.</p> : learnedEntries.map(entry => (
+                      <div key={entry.id} className="p-3">
+                        {editingLearnedId === entry.id ? <div className="space-y-2">
+                          <input value={entry.topic || ''} onChange={event => setLearnedEntries(current => current.map(item => item.id === entry.id ? { ...item, topic: event.target.value } : item))} placeholder="Topic" className="w-full rounded border border-slate-300 p-2 text-xs" />
+                          <textarea value={entry.text} onChange={event => setLearnedEntries(current => current.map(item => item.id === entry.id ? { ...item, text: event.target.value } : item))} rows={4} className="w-full rounded border border-slate-300 p-2 text-xs" />
+                          <div className="flex items-center justify-between gap-2">
+                            <select value={entry.scope} onChange={event => setLearnedEntries(current => current.map(item => item.id === entry.id ? { ...item, scope: event.target.value as LearnedInformationEntry['scope'] } : item))} className="rounded border border-slate-300 p-2 text-xs">
+                              <option value="shared">Shared</option><option value="primary">Line 1</option><option value="secondary">Line 2</option><option value="internal">Internal, not used in replies</option>
+                            </select>
+                            <div className="flex gap-2"><button onClick={() => setEditingLearnedId(null)} className="rounded border border-slate-300 px-3 py-1.5 text-xs">Cancel</button><button onClick={() => handleSaveLearnedEntry(entry)} className="rounded bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white">Save</button></div>
+                          </div>
+                        </div> : <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0"><p className="text-xs font-bold text-slate-800">{entry.topic || entry.type}</p><p className="mt-1 whitespace-pre-wrap text-[11px] text-slate-600">{entry.text}</p><p className="mt-1 text-[10px] font-semibold text-indigo-700">{entry.scope === 'primary' ? 'Line 1' : entry.scope === 'secondary' ? 'Line 2' : entry.scope === 'shared' ? 'Shared' : 'Internal'}</p></div>
+                          <div className="flex shrink-0 gap-1"><button onClick={() => setEditingLearnedId(entry.id)} className="rounded p-1.5 text-indigo-600 hover:bg-indigo-50" title="Edit learned rule"><Edit className="h-3.5 w-3.5" /></button><button onClick={() => handleDeleteLearnedEntry(entry.id)} className="rounded p-1.5 text-rose-600 hover:bg-rose-50" title="Delete learned rule"><Trash2 className="h-3.5 w-3.5" /></button></div>
+                        </div>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
                 
                 {/* List of files */}
                 <div>
@@ -1547,15 +1615,15 @@ export default function SettingsView() {
                 </div>
 
               </div>
-            </div>
+            </details>
 
             {/* Google Calendar Section */}
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-              <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
+            <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+              <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
                 <Calendar className="w-5 h-5 text-indigo-650" />
                 <h2 className="font-bold text-slate-800 text-sm">Google Calendar Account Integration</h2>
-              </div>
-              <div className="p-5 flex flex-col gap-5">
+              </summary>
+              <div className="p-3 sm:p-5 flex flex-col gap-5">
                 
                 {/* Status indicator */}
                 <div className="flex items-center justify-between p-3.5 rounded-lg bg-slate-50 border border-slate-200 text-xs font-sans">
@@ -1595,16 +1663,16 @@ export default function SettingsView() {
                 </div>
 
               </div>
-            </div>
+            </details>
 
             {/* Services Configuration Card */}
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
-              <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
+            <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
+              <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
                 <Sliders className="w-5 h-5 text-indigo-650" />
                 <h2 className="font-bold text-slate-800 text-sm">Services & Booking Configuration</h2>
-              </div>
+              </summary>
               
-              <div className="p-5 flex flex-col gap-6 font-sans">
+              <div className="p-3 sm:p-5 flex flex-col gap-6 font-sans">
                 
                 {/* SMS Template Section */}
                 <div className="flex flex-col gap-2.5 pb-5 border-b border-slate-150">
@@ -1952,13 +2020,13 @@ export default function SettingsView() {
                 </div>
 
               </div>
-            </div>
+            </details>
 
         </div>
 
         {/* Working Hours Card */}
-        <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-          <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center justify-between gap-2">
+        <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+          <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <Calendar className="w-5 h-5 text-indigo-600" />
               <h2 className="font-bold text-slate-800 text-sm">Available Hours</h2>
@@ -1970,7 +2038,7 @@ export default function SettingsView() {
             >
               {savingWorkingHours ? 'Saving...' : 'Save Hours'}
             </button>
-          </div>
+          </summary>
 
           <div className="divide-y divide-slate-100">
             {workingHours.length === 0 ? (
@@ -2029,11 +2097,11 @@ export default function SettingsView() {
               ))
             )}
           </div>
-        </div>
+        </details>
 
         {/* MobileMessage SMS Gateway Card */}
-        <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-          <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center justify-between gap-2">
+        <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+          <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <MessageSquare className="w-5 h-5 text-indigo-600" />
               <div>
@@ -2048,7 +2116,7 @@ export default function SettingsView() {
             >
               {savingMmConfig ? 'Saving...' : 'Save Gateway'}
             </button>
-          </div>
+          </summary>
 
           <div className="p-4 flex flex-col gap-4 font-sans text-xs">
             {/* Gateway status — delivery follows the single global AI switch. */}
@@ -2126,11 +2194,11 @@ export default function SettingsView() {
             </div>
 
           </div>
-        </div>
+        </details>
 
         {/* Custom Q&A Rules Card */}
-        <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-          <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center justify-between gap-2">
+        <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+          <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <MessageSquare className="w-5 h-5 text-indigo-600" />
               <h2 className="font-bold text-slate-800 text-sm">Custom Q&A Rules Engine</h2>
@@ -2138,7 +2206,7 @@ export default function SettingsView() {
             <span className="text-[10px] bg-indigo-100 text-indigo-800 font-extrabold px-2 py-0.5 rounded-full">
               {qaRules.length} Active Rules
             </span>
-          </div>
+          </summary>
 
           <div className="p-5 flex flex-col gap-4 font-sans">
             <p className="text-[10px] text-slate-500 -mt-1 leading-normal">
@@ -2222,11 +2290,11 @@ export default function SettingsView() {
             </div>
 
           </div>
-        </div>
+        </details>
 
         {/* First Contact Auto-Responder Card */}
-        <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-          <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-3">
+        <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+          <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-3">
             <div className="flex items-center gap-2">
               <MessageSquare className="w-5 h-5 text-emerald-600" />
               <div>
@@ -2234,7 +2302,7 @@ export default function SettingsView() {
                 <p className="text-[10px] text-slate-500">Each SMS number sends its own fixed greeting before normal AI replies begin.</p>
               </div>
             </div>
-          </div>
+          </summary>
 
           <div className="p-5 flex flex-col gap-5 font-sans">
             {(['primary', 'secondary'] as const).map((key) => {
@@ -2320,7 +2388,7 @@ export default function SettingsView() {
               </button>
             </div>
           </div>
-        </div>
+        </details>
 
         {/* Document Editor & Moderation Modal */}
         {activeEditFile && (
@@ -2544,4 +2612,5 @@ export default function SettingsView() {
     </div>
   );
 }
+
 

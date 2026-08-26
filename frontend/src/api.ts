@@ -697,6 +697,10 @@ export interface ManualLearningEntry {
   scope?: 'shared' | 'primary' | 'secondary';
 }
 
+export interface LearnedInformationEntry extends Omit<ManualLearningEntry, 'scope'> {
+  scope: 'shared' | 'primary' | 'secondary' | 'internal';
+}
+
 export async function getSettings(): Promise<SystemSettings> {
   const response = await apiFetch(`${API_BASE}/api/settings`, { cache: 'no-store' });
   if (!response.ok) {
@@ -799,6 +803,26 @@ export async function createManualLearning(
     throw new Error(payload?.detail || 'The learning could not be structured. Nothing was saved.');
   }
   return response.json();
+}
+
+export async function listLearnedInformation(): Promise<LearnedInformationEntry[]> {
+  const response = await apiFetch(`${API_BASE}/api/settings/learnings`);
+  if (!response.ok) throw new Error('Failed to load learned rules.');
+  return (await response.json()).entries;
+}
+
+export async function updateLearnedInformation(entry: LearnedInformationEntry): Promise<LearnedInformationEntry> {
+  const response = await apiFetch(`${API_BASE}/api/settings/learnings/${encodeURIComponent(entry.id)}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ topic: entry.topic || '', text: entry.text, scope: entry.scope }),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to save learned rule.');
+  return (await response.json()).entry;
+}
+
+export async function deleteLearnedInformation(id: string): Promise<void> {
+  const response = await apiFetch(`${API_BASE}/api/settings/learnings/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to delete learned rule.');
 }
 
 export async function uploadKnowledgeFile(file: File): Promise<{ status: string; filename: string }> {
@@ -1298,4 +1322,5 @@ export async function listAgentConsoleRuns(limit = 12): Promise<{
   }
   return response.json();
 }
+
 
