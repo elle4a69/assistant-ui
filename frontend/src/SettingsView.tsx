@@ -141,6 +141,7 @@ export default function SettingsView() {
   const [uploadingCreds, setUploadingCreds] = useState(false);
   const [learningTopic, setLearningTopic] = useState('');
   const [learningGuidance, setLearningGuidance] = useState('');
+  const [learningScope, setLearningScope] = useState<'shared' | 'primary' | 'secondary'>('shared');
   const [savingLearning, setSavingLearning] = useState(false);
   const [lastSavedLearning, setLastSavedLearning] = useState<ManualLearningEntry | null>(null);
 
@@ -499,7 +500,7 @@ export default function SettingsView() {
 
     setSavingLearning(true);
     try {
-      const result = await createManualLearning(topic, guidance);
+      const result = await createManualLearning(topic, guidance, learningScope);
       setLastSavedLearning(result.entry);
       setLearningTopic('');
       setLearningGuidance('');
@@ -1430,6 +1431,15 @@ export default function SettingsView() {
                         placeholder="e.g. Customer asks to change their existing booking time"
                         className="w-full rounded-lg border border-slate-300 bg-white p-2.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                       />
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <label htmlFor="learning-scope" className="text-[10px] font-bold uppercase tracking-wider text-slate-600">Who can use this learning?</label>
+                      <select id="learning-scope" value={learningScope} onChange={(event) => setLearningScope(event.target.value as 'shared' | 'primary' | 'secondary')} className="w-full rounded-lg border border-slate-300 bg-white p-2.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                        <option value="shared">Both lines, generic information only</option>
+                        <option value="primary">Line 1 only</option>
+                        <option value="secondary">Line 2 only</option>
+                      </select>
+                      <p className="text-[9px] text-slate-500">Service, pricing, identity, page-link, or referral information must be saved to its own line, never shared.</p>
                     </div>
                     <div className="flex flex-col gap-1.5">
                       <label htmlFor="learning-guidance" className="text-[10px] font-bold uppercase tracking-wider text-slate-600">What should the AI do or say?</label>

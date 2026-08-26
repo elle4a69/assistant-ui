@@ -9,7 +9,7 @@ from main import Base, Message, Thread
 
 
 def write_services(tmp_path):
-    (tmp_path / "services.json").write_text(json.dumps([
+    (tmp_path / "line_1_services.json").write_text(json.dumps([
         {
             "id": "private-duration",
             "name": "Scalp Care",
@@ -27,6 +27,11 @@ def write_services(tmp_path):
             "showDuration": True,
         },
     ]), encoding="utf-8")
+    (tmp_path / "line_2_services.json").write_text(json.dumps([{
+        "id": "line-2-only", "name": "Private Line Two Service",
+        "description": "Only offered on Line 2.", "price": 200, "duration": 30,
+        "showDuration": False, "lineKey": "secondary",
+    }]), encoding="utf-8")
 
 
 def test_catalogue_context_exposes_only_customer_visible_details(tmp_path, monkeypatch):
@@ -41,7 +46,7 @@ def test_catalogue_context_exposes_only_customer_visible_details(tmp_path, monke
     assert "Duration: 75 minutes" not in context
 
 
-def test_secondary_account_receives_shared_services_but_not_primary_knowledge_or_state(tmp_path, monkeypatch):
+def test_secondary_account_receives_its_own_services_but_not_primary_knowledge_or_state(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
     write_services(tmp_path)
     monkeypatch.setattr(main, "KNOWLEDGE_CHUNKS", [{
@@ -49,7 +54,9 @@ def test_secondary_account_receives_shared_services_but_not_primary_knowledge_or
         "scope": "primary", "retrieval_enabled": True,
     }])
 
-    assert "Scalp Care" in main.get_live_services_context("secondary")
+    secondary_context = main.get_live_services_context("secondary")
+    assert "Private Line Two Service" in secondary_context
+    assert "Scalp Care" not in secondary_context
     assert "Tori-only knowledge" not in main.build_business_context("Tori", account_key="secondary")
 
     engine = create_engine("sqlite:///:memory:")
@@ -114,8 +121,8 @@ def test_secondary_account_receives_shared_services_but_not_primary_knowledge_or
     messages = db.query(Message).filter(Message.thread_id == thread.id).order_by(Message.at).all()
     assert [message.text for message in messages] == ["Hello Anonymous", "Hello from Anonymous."]
     assert "Tori-only knowledge" not in str(calls[0]["input"])
-    assert "Scalp Care" in str(calls[0]["input"])
-    assert "Relaxation Session" in str(calls[0]["input"])
+    assert "Private Line Two Service" in str(calls[0]["input"])
+    assert "Scalp Care" not in str(calls[0]["input"])
     assert "Tori" not in calls[0]["instructions"]
     assert "Anonymous" in calls[0]["instructions"]
     db.close()

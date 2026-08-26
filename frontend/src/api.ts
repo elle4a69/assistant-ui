@@ -694,6 +694,7 @@ export interface ManualLearningEntry {
   text: string;
   created_at: string;
   updated_at: string;
+  scope?: 'shared' | 'primary' | 'secondary';
 }
 
 export async function getSettings(): Promise<SystemSettings> {
@@ -786,11 +787,12 @@ export async function listKnowledgeFiles(): Promise<KnowledgeFile[]> {
 export async function createManualLearning(
   topic: string,
   guidance: string,
+  scope: 'shared' | 'primary' | 'secondary',
 ): Promise<{ status: string; filename: string; entry: ManualLearningEntry }> {
   const response = await apiFetch(`${API_BASE}/api/settings/learnings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic, guidance }),
+    body: JSON.stringify({ topic, guidance, scope }),
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
