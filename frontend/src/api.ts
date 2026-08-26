@@ -903,6 +903,8 @@ export interface Service {
   price: number;
   duration: number;
   showDuration?: boolean;
+  /** The SMS line whose AI may use this service. */
+  lineKey?: 'primary' | 'secondary';
 }
 
 
@@ -1294,4 +1296,5 @@ export async function listAgentConsoleRuns(limit = 12): Promise<{
   }
   return response.json();
 }
+
 
