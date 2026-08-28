@@ -30,8 +30,11 @@ Base.metadata.create_all(bind=engine)
 
 client = TestClient(app)
 
-def test_services_and_manual_bookings(monkeypatch):
+def test_services_and_manual_bookings(monkeypatch, tmp_path):
     try:
+        monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+        monkeypatch.setattr(main, "PROMPTS_DIR", str(tmp_path / "prompts"))
+        monkeypatch.setattr(main, "booking_availability_error", lambda *_args: None)
         sent_messages = []
         booking_ids = iter(("test-booking-id-primary", "test-booking-id-secondary"))
         monkeypatch.setattr(main.calendar_service, "create_booking", lambda **kwargs: next(booking_ids))
@@ -94,7 +97,7 @@ def test_services_and_manual_bookings(monkeypatch):
             "notes": "Prefers medium pressure."
         }
         response = client.post("/api/calendar/bookings", json=booking_payload)
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         res_data = response.json()
         assert res_data["status"] == "success"
         assert "Alex Jones" in res_data["smsSent"]

@@ -418,7 +418,10 @@ class SMSExampleIndex:
                 "full_intent": str(intent),
                 "user_text": user_text,
                 "reply_text": reply_text,
-                "scope": str(record.get("scope", "internal")).strip().lower(),
+                # The approved corpus predates line scoping and belongs to the
+                # original primary SMS line. New examples can opt in to another
+                # line (or both lines) with an explicit scope.
+                "scope": str(record.get("scope", "primary")).strip().lower(),
             }
             loaded_examples.append(example_item)
 
@@ -12032,6 +12035,9 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
             "arrivalLink": arrival_link,
             "arrivalSessionId": arrival_session.id,
         }
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Booking creation failed: {e}")

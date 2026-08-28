@@ -108,6 +108,28 @@ def test_booking_rejects_invalid_mobile_before_calendar_or_sms():
     db.rollback.assert_not_called()
 
 
+def test_booking_preserves_availability_conflict_status(monkeypatch):
+    db = Mock()
+    payload = main.ManualBookingInput(
+        serviceId="service-one",
+        name="Test Customer",
+        phone="0412 345 678",
+        startTime="2026-08-12T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        main,
+        "booking_availability_error",
+        lambda *_args: "The requested time is unavailable.",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        main.create_manual_booking(payload, db)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "The requested time is unavailable."
+    db.rollback.assert_called_once_with()
+
+
 def test_secondary_account_uses_its_own_credentials_and_sender(monkeypatch):
     configs = {
         "primary": {"username": "one", "password": "p1", "sender": "61400000010", "enabled": True},

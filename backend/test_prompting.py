@@ -150,7 +150,7 @@ def test_style_index_does_not_use_an_unrelated_fallback(tmp_path):
 
 def test_live_service_settings_are_read_without_restart(tmp_path, monkeypatch):
     monkeypatch.setattr("main.DATA_DIR", str(tmp_path))
-    services_path = tmp_path / "services.json"
+    services_path = tmp_path / "line_1_services.json"
     service = {
         "id": "one",
         "name": "Example service",

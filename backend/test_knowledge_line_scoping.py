@@ -30,5 +30,8 @@ def test_style_examples_are_limited_to_the_active_line(tmp_path):
         {"id": "legacy", "review_status": "approved", "intent": "pricing", "incoming": "What is the price?", "reply": "Legacy reply."},
     ]) + "\n", encoding="utf-8")
     index = main.SMSExampleIndex(examples_file, min_score=0)
-    assert index.search("price", intent="pricing", account_key="primary") == [("What is the price?", "Line 1 reply.")]
+    assert index.search("price", intent="pricing", account_key="primary") == [
+        ("What is the price?", "Line 1 reply."),
+        ("What is the price?", "Legacy reply."),
+    ]
     assert index.search("price", intent="pricing", account_key="secondary") == [("What is the price?", "Line 2 reply.")]
