@@ -4394,11 +4394,12 @@ def run_sms_reply_logic(
     })
 
     # Check Q&A Rules first
-    assistant_reply = (
-        match_qa_rule(effective_body)
-        if thread.sms_account_key == "primary"
-        else None
-    )
+    # Keep response handling fail-closed even before a Q&A or model branch runs.
+    # Catch-up calls this function directly, so every path must have a defined
+    # reply value for the validation and failure handling below.
+    assistant_reply: Optional[str] = None
+    if thread.sms_account_key == "primary":
+        assistant_reply = match_qa_rule(effective_body)
     rejected_reply_reason: Optional[str] = None
     if assistant_reply:
         print(f"[QA Rules Match] Trigger matched. Using pre-configured reply.")

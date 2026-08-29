@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta
 
 from sqlalchemy import create_engine
@@ -189,23 +190,32 @@ def test_catch_up_endpoint_sends_one_reply_for_recent_message(monkeypatch):
     ))
     db.commit()
 
-    calls = []
+    model_calls = []
+    sms_calls = []
 
-    def fake_reply(db_arg, thread_id, body, provider_message_id, received_at, **kwargs):
-        calls.append(kwargs)
-        db_arg.add(Message(
-            id="generated-reply",
-            thread_id=thread_id,
-            role="agent",
-            text="Safe reply",
-            at=received_at + timedelta(seconds=1),
-        ))
-        thread = db_arg.query(Thread).filter(Thread.id == thread_id).first()
-        thread.state = "auto-reply"
-        db_arg.commit()
-        return False, False
+    class FakeResponses:
+        def create(self, **kwargs):
+            model_calls.append(kwargs)
+            return type("Response", (), {
+                "output": [],
+                "output_text": "Safe reply",
+            })()
 
-    monkeypatch.setattr(main, "run_sms_reply_logic", fake_reply)
+    monkeypatch.setattr(
+        main,
+        "openai_client",
+        type("Client", (), {"responses": FakeResponses()})(),
+    )
+    monkeypatch.setattr(main, "match_qa_rule", lambda _body: None)
+    monkeypatch.setattr(main, "build_business_context", lambda _body: "")
+    monkeypatch.setattr(main, "get_style_examples", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(main.calendar_service, "get_customer_bookings", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "send_sms",
+        lambda *args, **kwargs: sms_calls.append((args, kwargs)) or {"status": "success"},
+    )
+    monkeypatch.setattr(main.mobilemessage_service, "delivery_error", lambda _result: None)
     monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
 
     result = catch_up_missed_messages(db)
@@ -215,10 +225,54 @@ def test_catch_up_endpoint_sends_one_reply_for_recent_message(monkeypatch):
         "outcome": "sent",
         "remaining": 0,
     }
-    assert calls == [{"dispatch_sms": True, "draft_only": False}]
+    assert len(model_calls) == 1
+    assert sms_calls[0][0][:2] == ("+3001", "Safe reply")
+    assert db.query(Message).filter_by(thread_id="waiting", role="system", text="Safe reply").count() == 1
     assert catch_up_missed_messages(db) == {
         "processed": False,
         "outcome": "complete",
         "remaining": 0,
     }
+    db.close()
+
+
+def test_catch_up_endpoint_converts_ai_name_error_to_information_request(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.utcnow()
+    make_thread(db, "failed", "+3002")
+    add_message(db, "failed-customer", "failed", "customer", now)
+    db.add(ThreadEvent(
+        id="failed-missed-event",
+        thread_id="failed",
+        type="ai-reply-missed",
+        agent_id=None,
+        meta='{"message_id":"failed-customer","reason":"global-ai-off"}',
+        at=now,
+    ))
+    db.commit()
+
+    def fail_with_name_error(*_args, **_kwargs):
+        raise NameError("name 'assistant_reply' is not defined")
+
+    monkeypatch.setattr(main, "run_sms_reply_logic", fail_with_name_error)
+    monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
+
+    result = catch_up_missed_messages(db)
+
+    assert result == {
+        "processed": True,
+        "threadId": "failed",
+        "outcome": "information-request",
+        "remaining": 0,
+    }
+    assert db.get(Thread, "failed").state == "needs-review"
+    event = db.query(ThreadEvent).filter_by(thread_id="failed", type="information-request").one()
+    assert json.loads(event.meta) == {
+        "reason": "Catch-up failed: NameError",
+        "status": "pending",
+        "customer_message_id": "failed-customer",
+    }
+    db.close()
 
