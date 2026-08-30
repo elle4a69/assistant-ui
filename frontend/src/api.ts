@@ -697,8 +697,37 @@ export interface ManualLearningEntry {
   scope?: 'shared' | 'primary' | 'secondary';
 }
 
+export interface SmsLineProfile {
+  displayName: string;
+  providerName: string;
+  informationUrl: string;
+  userPrompt: string;
+}
+
+export async function getSmsLineProfiles(): Promise<Record<'primary' | 'secondary', SmsLineProfile>> {
+  const response = await apiFetch(`${API_BASE}/api/settings/line-profiles`, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`Failed to load line settings: ${response.statusText}`);
+  return (await response.json()).profiles;
+}
+
+export async function saveSmsLineProfiles(profiles: Record<'primary' | 'secondary', SmsLineProfile>): Promise<void> {
+  const response = await apiFetch(`${API_BASE}/api/settings/line-profiles`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(profiles),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || `Failed to save line settings: ${response.statusText}`);
+  }
+}
+
 export interface LearnedInformationEntry extends Omit<ManualLearningEntry, 'scope'> {
   scope: 'shared' | 'primary' | 'secondary' | 'internal';
+  review_status?: 'pending' | 'approved';
+  retrieval_enabled?: boolean;
+  category?: string;
+  review_note?: string;
 }
 
 export async function getSettings(): Promise<SystemSettings> {
@@ -818,6 +847,18 @@ export async function updateLearnedInformation(entry: LearnedInformationEntry): 
   });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to save learned rule.');
   return (await response.json()).entry;
+}
+
+export async function approveLearnedInformation(id: string): Promise<LearnedInformationEntry> {
+  const response = await apiFetch(`${API_BASE}/api/settings/learnings/${encodeURIComponent(id)}/approve`, { method: 'POST' });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to approve learned rule.');
+  return (await response.json()).entry;
+}
+
+export async function moveAllLearnedInformationToReview(): Promise<number> {
+  const response = await apiFetch(`${API_BASE}/api/settings/learnings/move-all-to-review`, { method: 'POST' });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to move learned rules to review.');
+  return (await response.json()).moved;
 }
 
 export async function deleteLearnedInformation(id: string): Promise<void> {

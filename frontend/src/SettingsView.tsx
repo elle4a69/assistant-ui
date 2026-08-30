@@ -9,6 +9,8 @@ import {
   createManualLearning,
   listLearnedInformation,
   updateLearnedInformation,
+  approveLearnedInformation,
+  moveAllLearnedInformationToReview,
   deleteLearnedInformation,
   uploadKnowledgeFile,
   uploadCredentialsFile,
@@ -42,7 +44,10 @@ import {
   FirstContactAutoresponderConfig,
   FirstContactAutoresponderSettings,
   clearPendingDrafts,
-  clearReviewOnlyThreads
+  clearReviewOnlyThreads,
+  getSmsLineProfiles,
+  saveSmsLineProfiles,
+  SmsLineProfile
 } from './api';
 import {
   Key,
@@ -120,6 +125,11 @@ export default function SettingsView() {
   const [apiKey, setApiKey] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
   const [userPrompt, setUserPrompt] = useState('');
+  const [lineProfiles, setLineProfiles] = useState<Record<'primary' | 'secondary', SmsLineProfile>>({
+    primary: { displayName: 'Line 1', providerName: 'Tori', informationUrl: '', userPrompt: '' },
+    secondary: { displayName: 'Line 2', providerName: 'Anonymous', informationUrl: '', userPrompt: '' },
+  });
+  const [savingLineProfiles, setSavingLineProfiles] = useState(false);
   const [hasGoogleCreds, setHasGoogleCreds] = useState(false);
   const [showMessageAvatars, setShowMessageAvatars] = useState(true);
   const [savingMessageDisplay, setSavingMessageDisplay] = useState(false);
@@ -269,6 +279,7 @@ export default function SettingsView() {
     } catch (e) { console.error('MobileMessage fetch failed:', e); }
     try { setQaRules(await retryOnce(getQARules)); } catch (e) { console.error('qa rules fetch failed:', e); }
     try { setFirstContactConfig(await retryOnce(getFirstContactAutoresponder)); } catch (e) { console.error('first-contact auto-responder fetch failed:', e); }
+    try { setLineProfiles(await retryOnce(getSmsLineProfiles)); } catch (e) { console.error('line profile fetch failed:', e); }
     try { setLearnedEntries(await retryOnce(listLearnedInformation)); } catch (e) { console.error('learned rules fetch failed:', e); }
   }, []);
 
@@ -453,10 +464,31 @@ export default function SettingsView() {
     setBusinessVariables((current) => current.filter((_, itemIndex) => itemIndex !== index));
   };
 
-  const copyVariableToken = async (token: string) => {
-    await navigator.clipboard.writeText(`{${token}}`);
+  const [variableInsertTarget, setVariableInsertTarget] = useState<{
+    element: HTMLInputElement | HTMLTextAreaElement;
+    apply: (value: string) => void;
+  } | null>(null);
+
+  const rememberVariableTarget = (apply: (value: string) => void) => (
+    event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>
+  ) => setVariableInsertTarget({ element: event.currentTarget, apply });
+
+  const insertVariableToken = (token: string) => {
+    if (!variableInsertTarget) {
+      triggerBanner('error', 'Tap in a prompt or text field first, then tap the variable.');
+      return;
+    }
+    const { element, apply } = variableInsertTarget;
+    const start = element.selectionStart ?? element.value.length;
+    const end = element.selectionEnd ?? start;
+    const inserted = `{${token}}`;
+    apply(`${element.value.slice(0, start)}${inserted}${element.value.slice(end)}`);
     setCopiedVariableToken(token);
     window.setTimeout(() => setCopiedVariableToken(null), 1800);
+    window.requestAnimationFrame(() => {
+      element.focus();
+      element.setSelectionRange(start + inserted.length, start + inserted.length);
+    });
   };
 
   const handleSaveBusinessVariables = async () => {
@@ -511,6 +543,23 @@ export default function SettingsView() {
     }
   };
 
+  const updateLineProfile = (key: 'primary' | 'secondary', field: keyof SmsLineProfile, value: string) => {
+    setLineProfiles((current) => ({ ...current, [key]: { ...current[key], [field]: value } }));
+  };
+
+  const handleSaveLineProfiles = async () => {
+    setSavingLineProfiles(true);
+    try {
+      await saveSmsLineProfiles(lineProfiles);
+      triggerBanner('success', 'Line-specific customer conversation settings saved.');
+    } catch (err) {
+      console.error(err);
+      triggerBanner('error', err instanceof Error ? err.message : 'Failed to save line-specific settings.');
+    } finally {
+      setSavingLineProfiles(false);
+    }
+  };
+
   const handleDeleteLearnedEntry = async (id: string) => {
     if (!window.confirm('Delete this learned rule? This cannot be undone.')) return;
     try {
@@ -519,6 +568,29 @@ export default function SettingsView() {
       triggerBanner('success', 'Learned rule deleted.');
     } catch (err) {
       console.error(err); triggerBanner('error', err instanceof Error ? err.message : 'Failed to delete learned rule.');
+    }
+  };
+
+  const handleApproveLearnedEntry = async (id: string) => {
+    try {
+      const saved = await approveLearnedInformation(id);
+      setLearnedEntries((current) => current.map((item) => item.id === saved.id ? saved : item));
+      triggerBanner('success', saved.retrieval_enabled ? 'Learned rule approved for its scope.' : 'Approved, but kept out of replies because it contains time-sensitive or unsafe material.');
+    } catch (err) {
+      console.error(err);
+      triggerBanner('error', err instanceof Error ? err.message : 'Failed to approve learned rule.');
+    }
+  };
+
+  const handleMoveAllLearningsToReview = async () => {
+    if (!window.confirm('Move every existing learned rule into the review queue? They will stop being used in AI replies until individually approved.')) return;
+    try {
+      const moved = await moveAllLearnedInformationToReview();
+      setLearnedEntries(await listLearnedInformation());
+      triggerBanner('success', `${moved} learned rule${moved === 1 ? '' : 's'} moved to review.`);
+    } catch (err) {
+      console.error(err);
+      triggerBanner('error', err instanceof Error ? err.message : 'Failed to move learned rules to review.');
     }
   };
 
@@ -534,7 +606,7 @@ export default function SettingsView() {
       setLastSavedLearning(result.entry);
       setLearningTopic('');
       setLearningGuidance('');
-      triggerBanner('success', `Learning saved to ${result.filename} and is available to the AI now.`);
+      triggerBanner('success', `Learning saved to ${result.filename} for review. It is not available to the AI until approved.`);
       await fetchKnowledgeFilesList();
       setLearnedEntries(await listLearnedInformation());
     } catch (err) {
@@ -1251,7 +1323,7 @@ export default function SettingsView() {
               </summary>
               <div className="p-3 sm:p-5 flex flex-col gap-4">
                 <div className="rounded-lg border border-indigo-100 bg-indigo-50/60 p-3 text-[10px] leading-relaxed text-indigo-900">
-                  Non-empty business values are supplied to the AI automatically. Click any token below to copy it for a prompt or confirmation template.
+                  Non-empty business values are supplied to the AI automatically. Tap a prompt first, then tap any token below to insert it at the cursor.
                 </div>
 
                 <div>
@@ -1261,14 +1333,14 @@ export default function SettingsView() {
                       <button
                         key={variable.key}
                         type="button"
-                        onClick={() => copyVariableToken(variable.key)}
+                        onClick={() => insertVariableToken(variable.key)}
                         className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-left hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer"
                       >
                         <span className="min-w-0">
                           <span className="block text-[11px] font-semibold text-slate-700">{variable.label}</span>
                           <span className="block text-[9px] text-slate-400">{variable.scope}</span>
                         </span>
-                        <code className="text-[10px] font-bold text-indigo-700 shrink-0">{copiedVariableToken === variable.key ? 'Copied' : `{${variable.key}}`}</code>
+                          <code className="text-[10px] font-bold text-indigo-700 shrink-0">{copiedVariableToken === variable.key ? 'Inserted' : `{${variable.key}}`}</code>
                       </button>
                     ))}
                   </div>
@@ -1281,7 +1353,7 @@ export default function SettingsView() {
                       <button
                         key={variable.key}
                         type="button"
-                        onClick={() => copyVariableToken(variable.key)}
+                        onClick={() => insertVariableToken(variable.key)}
                         className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-left hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer"
                       >
                         <span className="flex items-center gap-2 min-w-0">
@@ -1298,7 +1370,7 @@ export default function SettingsView() {
                           <span className={`text-[8px] font-bold uppercase px-1.5 py-0.5 rounded ${variable.required || variable.required_status === 'required' ? 'bg-amber-100 text-amber-800 border border-amber-200' : 'bg-slate-100 text-slate-600 border border-slate-200'}`}>
                             {variable.required || variable.required_status === 'required' ? 'Required' : 'Optional'}
                           </span>
-                          <code className="text-[10px] font-bold text-indigo-700">{copiedVariableToken === variable.key ? 'Copied' : (variable.token || `{${variable.key}}`)}</code>
+                          <code className="text-[10px] font-bold text-indigo-700">{copiedVariableToken === variable.key ? 'Inserted' : (variable.token || `{${variable.key}}`)}</code>
                         </div>
                       </button>
                     ))}
@@ -1373,6 +1445,45 @@ export default function SettingsView() {
               </div>
             </details>
 
+            {/* SMS Line Conversation Profiles */}
+            <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+              <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
+                <MessageSquare className="w-5 h-5 text-indigo-600" />
+                <div>
+                  <h2 className="font-bold text-slate-800 text-sm">Line-specific customer conversation</h2>
+                  <p className="text-[10px] text-slate-500">One shared system prompt, with a separate identity and customer prompt for each SMS line.</p>
+                </div>
+              </summary>
+              <div className="p-3 sm:p-5 flex flex-col gap-5">
+                {(['primary', 'secondary'] as const).map((key, index) => {
+                  const profile = lineProfiles[key];
+                  return (
+                    <section key={key} className="rounded-xl border border-slate-200 p-3 flex flex-col gap-3">
+                      <h3 className="font-bold text-sm text-slate-800">Line {index + 1}</h3>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <label className="flex flex-col gap-1 text-[10px] font-bold text-slate-600">Display name<input value={profile.displayName} onChange={(event) => updateLineProfile(key, 'displayName', event.target.value)} className="rounded border border-slate-300 p-2 text-xs font-normal" /></label>
+                        <label className="flex flex-col gap-1 text-[10px] font-bold text-slate-600">Provider name<input value={profile.providerName} onChange={(event) => updateLineProfile(key, 'providerName', event.target.value)} className="rounded border border-slate-300 p-2 text-xs font-normal" /></label>
+                        <label className="flex flex-col gap-1 text-[10px] font-bold text-slate-600">Information link<input value={profile.informationUrl} onChange={(event) => updateLineProfile(key, 'informationUrl', event.target.value)} placeholder="https://..." className="rounded border border-slate-300 p-2 text-xs font-normal" /></label>
+                      </div>
+                      <label className="flex flex-col gap-1 text-[10px] font-bold text-slate-600">
+                        Customer prompt for this line
+                        <textarea
+                          value={profile.userPrompt}
+                          onFocus={rememberVariableTarget((value) => updateLineProfile(key, 'userPrompt', value))}
+                          onChange={(event) => updateLineProfile(key, 'userPrompt', event.target.value)}
+                          rows={6}
+                          placeholder="Leave blank to use the shared user template prompt."
+                          className="rounded border border-slate-300 bg-slate-50 p-2 text-xs font-mono font-normal"
+                        />
+                      </label>
+                      <p className="text-[10px] text-slate-500">Keep <code>{'{message}'}</code>, <code>{'{knowledge}'}</code>, and <code>{'{slots}'}</code>. You can also use <code>{'{line_provider_name}'}</code> and <code>{'{line_information_url}'}</code>.</p>
+                    </section>
+                  );
+                })}
+                <div className="flex justify-end"><button type="button" onClick={handleSaveLineProfiles} disabled={savingLineProfiles} className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-4 py-2 rounded-lg font-bold disabled:opacity-50">{savingLineProfiles ? 'Saving...' : 'Save line settings'}</button></div>
+              </div>
+            </details>
+
             {/* OpenAI Configuration Section */}
             <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
               <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
@@ -1404,6 +1515,7 @@ export default function SettingsView() {
                   </label>
                   <textarea
                     value={systemPrompt}
+                    onFocus={rememberVariableTarget(setSystemPrompt)}
                     onChange={(e) => setSystemPrompt(e.target.value)}
                     rows={8}
                     className="w-full text-xs font-mono bg-slate-900 text-slate-200 border border-slate-805 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"
@@ -1418,6 +1530,7 @@ export default function SettingsView() {
                   </label>
                   <textarea
                     value={userPrompt}
+                    onFocus={rememberVariableTarget(setUserPrompt)}
                     onChange={(e) => setUserPrompt(e.target.value)}
                     rows={4}
                     className="w-full text-xs font-mono bg-slate-900 text-slate-200 border border-slate-805 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"
@@ -1506,7 +1619,7 @@ export default function SettingsView() {
                       className="inline-flex items-center gap-1.5 rounded-lg border border-transparent bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-45 cursor-pointer shrink-0"
                     >
                       {savingLearning ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
-                      {savingLearning ? 'Structuring...' : 'Add to learned material'}
+                      {savingLearning ? 'Structuring...' : 'Add to review queue'}
                     </button>
                   </div>
 
@@ -1527,8 +1640,13 @@ export default function SettingsView() {
 
                 <div className="rounded-xl border border-slate-200 bg-white">
                   <div className="border-b border-slate-200 px-3 py-2.5">
-                    <h3 className="text-xs font-bold text-slate-800">Saved learned rules</h3>
-                    <p className="mt-0.5 text-[10px] text-slate-500">Edit the wording or scope, or remove obsolete material.</p>
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <h3 className="text-xs font-bold text-slate-800">Learning review queue</h3>
+                        <p className="mt-0.5 text-[10px] text-slate-500">New or edited material stays here until you approve it. Scope defaults to the line it came from.</p>
+                      </div>
+                      <button type="button" onClick={handleMoveAllLearningsToReview} className="shrink-0 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-[10px] font-bold text-amber-800 hover:bg-amber-100">Move all to review</button>
+                    </div>
                   </div>
                   <div className="max-h-[420px] divide-y divide-slate-100 overflow-y-auto">
                     {learnedEntries.length === 0 ? <p className="p-3 text-xs text-slate-500">No learned rules saved yet.</p> : learnedEntries.map(entry => (
@@ -1543,8 +1661,8 @@ export default function SettingsView() {
                             <div className="flex gap-2"><button onClick={() => setEditingLearnedId(null)} className="rounded border border-slate-300 px-3 py-1.5 text-xs">Cancel</button><button onClick={() => handleSaveLearnedEntry(entry)} className="rounded bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white">Save</button></div>
                           </div>
                         </div> : <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0"><p className="text-xs font-bold text-slate-800">{entry.topic || entry.type}</p><p className="mt-1 whitespace-pre-wrap text-[11px] text-slate-600">{entry.text}</p><p className="mt-1 text-[10px] font-semibold text-indigo-700">{entry.scope === 'primary' ? 'Line 1' : entry.scope === 'secondary' ? 'Line 2' : entry.scope === 'shared' ? 'Shared' : 'Internal'}</p></div>
-                          <div className="flex shrink-0 gap-1"><button onClick={() => setEditingLearnedId(entry.id)} className="rounded p-1.5 text-indigo-600 hover:bg-indigo-50" title="Edit learned rule"><Edit className="h-3.5 w-3.5" /></button><button onClick={() => handleDeleteLearnedEntry(entry.id)} className="rounded p-1.5 text-rose-600 hover:bg-rose-50" title="Delete learned rule"><Trash2 className="h-3.5 w-3.5" /></button></div>
+                          <div className="min-w-0"><p className="text-xs font-bold text-slate-800">{entry.topic || entry.type}</p><p className="mt-1 whitespace-pre-wrap text-[11px] text-slate-600">{entry.text}</p><p className="mt-1 flex flex-wrap gap-1.5 text-[10px] font-semibold"><span className="text-indigo-700">{entry.scope === 'primary' ? 'Line 1' : entry.scope === 'secondary' ? 'Line 2' : entry.scope === 'shared' ? 'Shared' : 'Internal'}</span><span className={entry.review_status === 'approved' ? 'text-emerald-700' : 'text-amber-700'}>{entry.review_status === 'approved' ? (entry.retrieval_enabled ? 'Approved and active' : 'Approved, not injected') : 'Needs review'}</span></p>{entry.review_note && <p className="mt-1 text-[10px] text-amber-700">{entry.review_note}</p>}</div>
+                          <div className="flex shrink-0 gap-1"><button onClick={() => setEditingLearnedId(entry.id)} className="rounded p-1.5 text-indigo-600 hover:bg-indigo-50" title="Edit learned rule"><Edit className="h-3.5 w-3.5" /></button>{entry.review_status !== 'approved' && <button onClick={() => handleApproveLearnedEntry(entry.id)} className="rounded border border-emerald-200 px-2 py-1 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50" title="Approve learned rule">Approve</button>}<button onClick={() => handleDeleteLearnedEntry(entry.id)} className="rounded p-1.5 text-rose-600 hover:bg-rose-50" title="Delete learned rule"><Trash2 className="h-3.5 w-3.5" /></button></div>
                         </div>}
                       </div>
                     ))}

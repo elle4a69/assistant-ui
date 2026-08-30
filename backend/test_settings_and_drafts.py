@@ -105,6 +105,19 @@ def test_first_contact_settings_save_independent_accounts(monkeypatch, tmp_path)
     assert saved["accounts"]["secondary"]["message"] == "Anonymous hello"
 
 
+def test_line_profiles_persist_and_supply_line_variables(monkeypatch, tmp_path):
+    profiles_path = tmp_path / "sms_line_profiles.json"
+    monkeypatch.setattr(main, "LINE_PROFILES_PATH", str(profiles_path))
+    main.save_line_profiles({
+        "primary": {"displayName": "Line 1", "providerName": "Tori", "informationUrl": "https://tori.example", "userPrompt": "Tori prompt"},
+        "secondary": {"displayName": "Line 2", "providerName": "Anonymous", "informationUrl": "https://anonymous.example", "userPrompt": "Anonymous prompt"},
+    })
+
+    assert main.get_line_profile("secondary")["userPrompt"] == "Anonymous prompt"
+    assert main.effective_line_user_prompt("secondary", "Shared prompt") == "Anonymous prompt"
+    assert main.get_line_business_variable_values("secondary")["line_provider_name"] == "Anonymous"
+
+
 def test_clear_pending_drafts_removes_all_drafts_and_updates_threads():
     db = make_db()
     add_thread(db, "thread-001")
@@ -165,7 +178,7 @@ def test_clear_review_only_threads_preserves_pending_drafts():
     db.close()
 
 
-def test_edited_draft_is_saved_as_classified_learning_after_approval(monkeypatch, tmp_path):
+def test_edited_draft_is_saved_to_learning_review_after_approval(monkeypatch, tmp_path):
     client = FakeLearningClient(lambda kwargs: json.dumps({"classifications": [{
         "id": json.loads(kwargs["input"])["records"][0]["id"],
         "scope": "shared",
@@ -197,7 +210,8 @@ def test_edited_draft_is_saved_as_classified_learning_after_approval(monkeypatch
     assert result["status"] == "success"
     assert result["learningSaved"] is True
     assert saved["type"] == "staff_edited_draft"
-    assert saved["retrieval_enabled"] is True
+    assert saved["review_status"] == "pending"
+    assert saved["retrieval_enabled"] is False
     assert saved["example_reply"].startswith("Yes, natural service")
     assert db.query(Message).filter(Message.id == "draft-learning").one().role == "agent"
     db.close()
@@ -254,7 +268,35 @@ def test_manual_learning_is_ai_structured_saved_and_reindexed(monkeypatch, tmp_p
     assert saved["owner_guidance"] == "Check that it is their booking first, then offer the closest valid time."
     assert "Instruction: Check the customer's existing booking" in saved["text"]
     assert client.responses.calls[0]["store"] is False
-    assert main.retrieve_knowledge_chunks("change booking time")[0]["source"] == main.LEARNED_INFORMATION_FILENAME
+    assert saved["review_status"] == "pending"
+    assert saved["retrieval_enabled"] is False
+    assert main.retrieve_knowledge_chunks("change booking time") == []
+
+
+def test_approved_learning_is_retrievable_but_editing_returns_it_to_review(monkeypatch, tmp_path):
+    client = FakeLearningClient(lambda kwargs: json.dumps({"classifications": [{
+        "id": json.loads(kwargs["input"])["records"][0]["id"],
+        "scope": "primary", "category": "service_specific", "retrieval_enabled": True,
+    }]}))
+    monkeypatch.setattr(main, "openai_client", client)
+    monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "KNOWLEDGE_CHUNKS", [])
+    entry = {
+        "id": "review-1", "type": "manual_guidance", "text": "Natural service details.",
+        "scope": "primary", "review_status": "pending", "retrieval_enabled": False,
+    }
+    main._upsert_learned_information_entry(entry)
+
+    approved = main.approve_learned_information_entry("review-1")
+    assert approved["review_status"] == "approved"
+    assert approved["retrieval_enabled"] is True
+    assert main.retrieve_knowledge_chunks("natural service", account_key="primary")
+
+    updated = main.replace_learned_information_entry("review-1", {
+        "text": "Changed natural service details.", "review_status": "pending", "retrieval_enabled": False,
+    })
+    assert updated["review_status"] == "pending"
+    assert main.retrieve_knowledge_chunks("natural service", account_key="primary") == []
 
 
 def test_manual_learning_fails_closed_when_ai_is_unavailable(monkeypatch, tmp_path):

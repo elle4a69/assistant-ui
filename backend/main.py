@@ -1385,6 +1385,7 @@ init_db()
 # Kept near the loader because the loader needs to recognise learned records
 # during module startup, before the learning helpers are defined below.
 LEARNED_INFORMATION_FILENAME = "learned_information.jsonl"
+LEARNING_REVIEW_STATUSES = {"pending", "approved"}
 
 def load_knowledge_base():
     global KNOWLEDGE_CHUNKS
@@ -1440,16 +1441,17 @@ def load_knowledge_base():
                                 if not text_val:
                                     text_val = " ".join(str(val) for val in obj.values() if isinstance(val, (str, int, float)))
                                 if text_val:
-                                    # Learned JSONL entries are fail-closed until the
-                                    # classifier has assigned their permanent scope.
+                                    # Learned material is fail-closed until a staff member
+                                    # has reviewed and approved it for retrieval.
                                     is_learned_entry = filename == LEARNED_INFORMATION_FILENAME
+                                    review_status = str(obj.get("review_status", "pending" if is_learned_entry else "approved"))
                                     KNOWLEDGE_CHUNKS.append({
                                         "source": filename,
                                         "type": "text",
                                         "text": text_val.strip(),
                                         "scope": str(obj.get("scope", "internal" if is_learned_entry else "shared")),
                                         "category": str(obj.get("category", "internal_or_uncertain")),
-                                        "retrieval_enabled": bool(obj.get("retrieval_enabled", not is_learned_entry)),
+                                        "retrieval_enabled": bool(obj.get("retrieval_enabled", False)) and review_status == "approved",
                                     })
                         except Exception as line_e:
                             print(f"Error parsing jsonl line: {line_e}")
@@ -1504,6 +1506,46 @@ def search_knowledge(query: str, limit: int = 5, account_key: str = "primary") -
 
 
 LINE_SERVICE_FILENAMES = {"primary": "line_1_services.json", "secondary": "line_2_services.json"}
+LINE_PROFILES_PATH = os.path.join(DATA_DIR, "sms_line_profiles.json")
+LINE_PROFILE_DEFAULTS = {
+    "primary": {"displayName": "Line 1", "providerName": "Tori", "informationUrl": "", "userPrompt": ""},
+    "secondary": {"displayName": "Line 2", "providerName": "Anonymous", "informationUrl": "", "userPrompt": ""},
+}
+
+
+def _normalize_line_profile(account_key: str, value: Any) -> Dict[str, str]:
+    profile = dict(LINE_PROFILE_DEFAULTS[account_key])
+    if isinstance(value, dict):
+        for key in profile:
+            if value.get(key) is not None:
+                profile[key] = str(value[key]).strip()
+    return profile
+
+
+def load_line_profiles() -> Dict[str, Dict[str, str]]:
+    try:
+        with open(LINE_PROFILES_PATH, "r", encoding="utf-8") as handle:
+            saved = json.load(handle)
+    except (OSError, ValueError):
+        saved = {}
+    return {key: _normalize_line_profile(key, saved.get(key) if isinstance(saved, dict) else None)
+            for key in FIRST_CONTACT_ACCOUNT_KEYS}
+
+
+def save_line_profiles(profiles: Dict[str, Dict[str, str]]) -> None:
+    normalized = {key: _normalize_line_profile(key, profiles.get(key)) for key in FIRST_CONTACT_ACCOUNT_KEYS}
+    os.makedirs(os.path.dirname(LINE_PROFILES_PATH), exist_ok=True)
+    temporary_path = f"{LINE_PROFILES_PATH}.{uuid.uuid4().hex}.tmp"
+    with open(temporary_path, "w", encoding="utf-8") as handle:
+        json.dump(normalized, handle, indent=2, ensure_ascii=False)
+    os.replace(temporary_path, LINE_PROFILES_PATH)
+
+
+def get_line_profile(account_key: str) -> Dict[str, str]:
+    """Return the saved customer-conversation profile for one SMS line."""
+    if account_key not in FIRST_CONTACT_ACCOUNT_KEYS:
+        account_key = "primary"
+    return load_line_profiles()[account_key]
 
 def _line_services_path(account_key: str) -> str:
     return os.path.join(DATA_DIR, LINE_SERVICE_FILENAMES[account_key])
@@ -1741,6 +1783,25 @@ def get_business_variable_values() -> Dict[str, str]:
     return raw_vals
 
 
+def get_line_business_variable_values(account_key: str) -> Dict[str, str]:
+    """Add the selected line's identity fields without changing shared values."""
+    values = get_business_variable_values()
+    profile = get_line_profile(account_key)
+    values.update({
+        "line_key": account_key,
+        "line_display_name": profile["displayName"],
+        "line_provider_name": profile["providerName"],
+        "line_information_url": profile["informationUrl"],
+    })
+    return values
+
+
+def effective_line_user_prompt(account_key: str, shared_prompt: str) -> str:
+    """Use an explicitly saved line prompt, falling back to the shared template."""
+    line_prompt = get_line_profile(account_key)["userPrompt"].strip()
+    return line_prompt or shared_prompt
+
+
 
 def render_template_variables(template: str, values: Dict[str, Any]) -> str:
     """Replace known {variable} tokens while leaving unknown tokens visible."""
@@ -1879,8 +1940,12 @@ def save_learned_information(
         "owner_information": supplied_information.strip(),
         "text": knowledge_summary.strip(),
         "updated_at": datetime.utcnow().isoformat() + "Z",
+        "review_status": "pending",
+        "retrieval_enabled": False,
     }
     entry.update(classify_knowledge_entries([entry]).get(entry["id"], _quarantined_knowledge_classification()))
+    entry["review_status"] = "pending"
+    entry["retrieval_enabled"] = False
     entry["scope"] = account_key if account_key in FIRST_CONTACT_ACCOUNT_KEYS else "internal"
     entry["source_account_key"] = account_key
     _upsert_learned_information_entry(entry)
@@ -1961,6 +2026,42 @@ def replace_learned_information_entry(entry_id: str, updates: Dict[str, Any]) ->
         os.replace(temporary, filepath)
     load_knowledge_base()
     return updated_entry
+
+
+def move_all_learned_information_to_review() -> int:
+    """Quarantine existing learned entries until each is reviewed by staff."""
+    count = 0
+    for entry in list_learned_information():
+        if entry.get("review_status") != "pending" or entry.get("retrieval_enabled") is not False:
+            replace_learned_information_entry(entry["id"], {"review_status": "pending", "retrieval_enabled": False})
+            count += 1
+    return count
+
+
+def approve_learned_information_entry(entry_id: str) -> Dict[str, Any]:
+    entries = {entry["id"]: entry for entry in list_learned_information()}
+    entry = entries.get(entry_id)
+    if not entry:
+        raise KeyError(entry_id)
+    classification = classify_knowledge_entries([entry]).get(entry_id, _quarantined_knowledge_classification())
+    dynamic_pattern = re.compile(
+        r"(?:\$|\bprice\b|\bpricing\b|\bcost\b|\bavailable\b|\bavailability\b|\btoday\b|\btomorrow\b|\barrival\b|\bdirections?\b)",
+        re.IGNORECASE,
+    )
+    unsafe = (
+        classification.get("category") in {"availability_or_booking_state", "customer_specific", "internal_or_uncertain"}
+        or bool(dynamic_pattern.search(str(entry.get("text", ""))))
+    )
+    updates = {
+        "review_status": "approved",
+        "category": classification.get("category", "internal_or_uncertain"),
+        "classification_version": classification.get("classification_version", KNOWLEDGE_CLASSIFICATION_VERSION),
+        "classification_status": classification.get("classification_status", "classified"),
+        "retrieval_enabled": not unsafe and entry.get("scope") in {"shared", "primary", "secondary"},
+    }
+    if unsafe:
+        updates["review_note"] = "Approved for audit only; time-sensitive, pricing, arrival, customer-specific, or uncertain material is not injected into AI replies."
+    return replace_learned_information_entry(entry_id, updates)
 
 
 def delete_learned_information_entry(entry_id: str) -> None:
@@ -2198,8 +2299,12 @@ def save_manual_learning(
         "text": "\n".join(text_parts),
         "created_at": now,
         "updated_at": now,
+        "review_status": "pending",
+        "retrieval_enabled": False,
     }
     entry.update(classify_knowledge_entries([entry]).get(entry["id"], _quarantined_knowledge_classification()))
+    entry["review_status"] = "pending"
+    entry["retrieval_enabled"] = False
     if scope in {"primary", "secondary"}:
         entry["scope"] = scope
         entry["source_account_key"] = scope
@@ -2237,6 +2342,8 @@ def save_edited_draft_learning(db: Session, thread: Thread, draft: Message) -> O
         ),
         "created_at": now,
         "updated_at": now,
+        "review_status": "pending",
+        "retrieval_enabled": False,
     }
     entry.update(
         classify_knowledge_entries([entry]).get(
@@ -2245,6 +2352,8 @@ def save_edited_draft_learning(db: Session, thread: Thread, draft: Message) -> O
     )
     entry["scope"] = thread.sms_account_key if thread.sms_account_key in FIRST_CONTACT_ACCOUNT_KEYS else "internal"
     entry["source_account_key"] = thread.sms_account_key
+    entry["review_status"] = "pending"
+    entry["retrieval_enabled"] = False
     _upsert_learned_information_entry(entry)
     return entry
 
@@ -4373,15 +4482,15 @@ def run_sms_reply_logic(
     if os.path.exists(system_prompt_path):
         with open(system_prompt_path, "r", encoding="utf-8") as f:
             system_prompt_tmpl = f.read()
-    if thread.sms_account_key == "secondary":
-        system_prompt_tmpl = re.sub(r"\bTori\b", "Anonymous", system_prompt_tmpl, flags=re.IGNORECASE)
-            
     user_prompt_tmpl = "Customer message: {message}\nKnowledge context:\n{knowledge}\nCalendar openings:\n{slots}"
     if os.path.exists(user_prompt_path):
         with open(user_prompt_path, "r", encoding="utf-8") as f:
             user_prompt_tmpl = f.read()
-            
-    business_variables = get_business_variable_values()
+
+    # The system prompt is shared. Identity, service wording and links belong
+    # to the saved profile for the line that received this message.
+    user_prompt_tmpl = effective_line_user_prompt(thread.sms_account_key, user_prompt_tmpl)
+    business_variables = get_line_business_variable_values(thread.sms_account_key)
     system_prompt_rendered = render_template_variables(system_prompt_tmpl, {
         **business_variables,
         "current_time": now_local.strftime("%A %d %B %Y, %I:%M %p %Z"),
@@ -7168,6 +7277,18 @@ class BusinessVariableInput(BaseModel):
 
 class BusinessVariablesInput(BaseModel):
     variables: List[BusinessVariableInput] = Field(max_length=50)
+
+
+class LineProfileInput(BaseModel):
+    displayName: str = Field(default="", max_length=100)
+    providerName: str = Field(default="", max_length=100)
+    informationUrl: str = Field(default="", max_length=2000)
+    userPrompt: str = Field(default="", max_length=12000)
+
+
+class LineProfilesInput(BaseModel):
+    primary: LineProfileInput
+    secondary: LineProfileInput
 
 
 class SettingsUpdateInput(BaseModel):
@@ -11020,6 +11141,28 @@ def save_business_variables(payload: BusinessVariablesInput):
     return {"status": "success", "variables": load_business_variables()}
 
 
+@app.get("/api/settings/line-profiles")
+def get_line_profiles():
+    return {"profiles": load_line_profiles()}
+
+
+@app.post("/api/settings/line-profiles")
+def update_line_profiles(payload: LineProfilesInput):
+    profiles = {
+        key: _normalize_line_profile(key, getattr(payload, key).model_dump())
+        for key in FIRST_CONTACT_ACCOUNT_KEYS
+    }
+    for key, profile in profiles.items():
+        url = profile["informationUrl"]
+        if url and not re.match(r"^https?://", url, flags=re.IGNORECASE):
+            raise HTTPException(status_code=422, detail=f"{key} information URL must start with http:// or https://")
+    try:
+        save_line_profiles(profiles)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Failed to save line profiles.") from exc
+    return {"status": "success", "profiles": profiles}
+
+
 @app.get("/api/settings")
 def get_settings():
     api_key = os.getenv("OPENAI_API_KEY") or ""
@@ -11458,10 +11601,30 @@ def get_learned_information():
 @app.put("/api/settings/learnings/{entry_id}")
 def update_learned_information(entry_id: str, payload: LearnedInformationUpdateInput):
     try:
-        entry = replace_learned_information_entry(entry_id, payload.model_dump())
+        # An edit changes the meaning of a learning, so it must be reviewed
+        # again before it can affect a customer reply.
+        entry = replace_learned_information_entry(entry_id, {
+            **payload.model_dump(),
+            "review_status": "pending",
+            "retrieval_enabled": False,
+        })
     except KeyError:
         raise HTTPException(status_code=404, detail="Learned entry not found.")
     return {"status": "success", "entry": entry}
+
+
+@app.post("/api/settings/learnings/{entry_id}/approve")
+def approve_learned_information(entry_id: str):
+    try:
+        entry = approve_learned_information_entry(entry_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Learned entry not found.")
+    return {"status": "success", "entry": entry}
+
+
+@app.post("/api/settings/learnings/move-all-to-review")
+def move_all_learnings_to_review():
+    return {"status": "success", "moved": move_all_learned_information_to_review()}
 
 
 @app.delete("/api/settings/learnings/{entry_id}")
