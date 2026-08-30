@@ -249,6 +249,8 @@ def test_agent_prompt_forbids_customer_evidence_in_coding_task_fields():
     assert "The earlier repair still fails" in prompt
     assert "Keep replies concise" in prompt
     assert "Only the current owner message" in prompt
+    assert "For a request for the status of everything" in prompt
+    assert "Never complete with a bare claim such as 'verified'" in prompt
 
 
 def test_agent_run_persists_one_idempotent_owner_chat_turn(isolated_agent_database):

@@ -113,6 +113,7 @@ def test_operations_chat_persists_both_sides_and_uses_read_only_snapshot(monkeyp
     assert "Do not use corporate, bureaucratic or academic phrasing" in call["instructions"]
     assert "When a workflow or deployment failed, inspect the failed run before asking the owner for anything" in call["instructions"]
     assert "Never leave the owner with a vague queued, waiting, or unavailable response" in call["instructions"]
+    assert "Never answer a status request with a bare claim" in call["instructions"]
     assert call["tools"] == main.OPERATIONS_AI_TOOLS
     assert call["max_output_tokens"] == 1200
     assert "include" not in call
