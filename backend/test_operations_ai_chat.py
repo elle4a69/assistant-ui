@@ -111,6 +111,8 @@ def test_operations_chat_persists_both_sides_and_uses_read_only_snapshot(monkeyp
     assert "cannot edit source code" in call["instructions"]
     assert "Lead every response with the outcome" in call["instructions"]
     assert "Do not use corporate, bureaucratic or academic phrasing" in call["instructions"]
+    assert "When a workflow or deployment failed, inspect the failed run before asking the owner for anything" in call["instructions"]
+    assert "Never leave the owner with a vague queued, waiting, or unavailable response" in call["instructions"]
     assert call["tools"] == main.OPERATIONS_AI_TOOLS
     assert call["max_output_tokens"] == 1200
     assert "include" not in call
@@ -119,6 +121,16 @@ def test_operations_chat_persists_both_sides_and_uses_read_only_snapshot(monkeyp
     ).one()
     assert "complete and verify the work" in owner_style.content
     db.close()
+
+
+def test_operations_chat_instructions_start_a_task_from_an_owner_described_fault(monkeypatch):
+    monkeypatch.setattr(main, "operations_code_access_available", lambda: True)
+
+    instructions = main.operations_ai_instructions('{"coding_runner_configured": true}')
+
+    assert "Treat an owner-described fault, failed deployment, regression, or requested change as the task" in instructions
+    assert "do not require the owner to supply a task ID, pull request, commit, branch, or implementation plan" in instructions
+    assert "create the one deduplicated repair task yourself" in instructions
 
 
 def test_operations_runtime_change_requires_exact_separate_confirmation(tmp_path, monkeypatch):
