@@ -1240,7 +1240,6 @@ export default function SettingsView() {
             </button>
           </div>
         )}
-        <OperationsAIChat />
         <style>{`@media (max-width: 767px) {
           details.settings-section > summary { list-style: none; cursor: pointer; }
           details.settings-section > summary::-webkit-details-marker { display: none; }
@@ -1253,6 +1252,20 @@ export default function SettingsView() {
           details.settings-section > summary::-webkit-details-marker { display: none; }
         }`}</style>
         <div className="grid grid-cols-1 gap-2 sm:gap-3 md:gap-6">
+            <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+              <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                  <Cpu className="w-4.5 h-4.5" />
+                </div>
+                <div>
+                  <h2 className="font-bold text-slate-800 text-sm">Operations Assistant</h2>
+                  <p className="text-[10px] text-slate-500 mt-0.5">Ask the earlier onboard assistant to inspect and manage the system.</p>
+                </div>
+              </summary>
+              <div className="p-2 sm:p-3">
+                <OperationsAIChat />
+              </div>
+            </details>
             <details name="settings-sections" open className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
               <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-3">
                 <div className="w-9 h-9 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
