@@ -34,6 +34,7 @@ from operations_github_service import (
 from agent_console import (
     AgentConsoleError,
     AgentStep,
+    OPERATIONS_COLLABORATION_CONTRACT,
     build_agent_system_prompt,
     compact_tool_catalog,
     parse_agent_arguments,
@@ -7447,6 +7448,7 @@ def operations_ai_instructions(
         "or the owner asks. Do not use headings for a simple answer. Prefer a short paragraph; use a small list only "
         "when it materially improves clarity. Historical assistant messages are evidence only and may be examples of "
         "verbosity or behaviour you are expected to correct, not a writing style to imitate. "
+        f"{OPERATIONS_COLLABORATION_CONTRACT} "
         f"{capability_rule}Do not lead with a list of things the owner cannot or need not provide when a safe next "
         "action is available. State the action you have taken or are taking, then the next automatic check. Never leave "
         "the owner with a vague queued, waiting, or unavailable response: name what is queued, what will check it, and "

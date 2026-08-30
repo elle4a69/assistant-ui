@@ -251,6 +251,7 @@ def test_agent_prompt_forbids_customer_evidence_in_coding_task_fields():
     assert "Only the current owner message" in prompt
     assert "For a request for the status of everything" in prompt
     assert "Never complete with a bare claim such as 'verified'" in prompt
+    assert "A question authorises explanation or inspection, not a code or production change" in prompt
 
 
 def test_agent_run_persists_one_idempotent_owner_chat_turn(isolated_agent_database):
