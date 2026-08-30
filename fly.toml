@@ -12,7 +12,7 @@ primary_region = "syd"
   OPS_AGENT_GITHUB_REPO = "elle4a69/assistant-ui"
 
 [mounts]
-  source = "assistant_data_volume"
+  source = "assistant_data_clone_260830"
   destination = "/data"
 
 [http_service]
