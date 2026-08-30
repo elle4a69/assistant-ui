@@ -149,6 +149,35 @@ def customer_explicitly_requests_link(message: str) -> bool:
     ))
 
 
+def customer_explicitly_requests_payment_details(message: str) -> bool:
+    return bool(re.search(
+        r"\b(?:cash|deposit|payment|payid|bank\s*transfer|card|how\s+(?:do|can)\s+i\s+pay|payment\s+method)\b",
+        str(message or ""),
+        re.IGNORECASE,
+    ))
+
+
+def suppress_unrequested_payment_details(reply: str, customer_message: str) -> str:
+    """Do not volunteer payment method or deposit terms in an ordinary price reply."""
+    if customer_explicitly_requests_payment_details(customer_message):
+        return reply
+    cleaned = re.sub(
+        r"\s*,?\s*cash(?:\s+on\s+arrival)?(?:\s+only)?\s+and\s+no\s+deposit\b",
+        "",
+        reply,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\s*,?\s*(?:cash(?:\s+on\s+arrival)?(?:\s+only)?|no\s+deposit)\b",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r",\s*,", ",", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned.strip(" ,")
+
+
 def suppress_recently_sent_links(
     reply: str,
     history_messages: list[Any],
@@ -646,6 +675,8 @@ RELEVANCE_AND_THREAD_FLOW_POLICY = """Reply relevance and thread-flow rule:
 - Read the supplied conversation chronologically before replying. Use the current customer turn together with the recent thread to understand what has already been said, offered, answered, and linked.
 - Answer the customer's actual question first, in one or two natural SMS sentences where possible. Do not volunteer price, payment, service detail, availability, booking instructions, or a page link unless the customer asked for it or it is necessary to answer their question.
 - A greeting, flirt, tease, or vague opener is not permission to quote a price, describe an encounter, send a link, or push for a booking. Reply briefly and naturally, then ask at most one useful question if needed.
+- When a customer asks about price, give only the relevant price and a short next question. Do not add cash, deposit, payment-method, privacy, face, service-description, or booking terms unless the customer specifically asked about those details.
+- When a customer asks whether you are available, ask for the date and time needed, then check live availability. Do not add unrelated selling points while doing so.
 - Do not repeat a link, price, service list, question, or call to action already sent in this thread unless the customer explicitly asks again or there is genuinely new information.
 - Do not leave the customer hanging: if a direct answer is supported, give it. If the message is casual or unclear, give a short natural reply rather than a sales script."""
 
@@ -4976,6 +5007,10 @@ def run_sms_reply_logic(
         return booking_confirmed, slots_presented
             
     assistant_reply = sanitize_outgoing_urls(assistant_reply)
+    assistant_reply = suppress_unrequested_payment_details(
+        assistant_reply or "",
+        effective_body,
+    )
     assistant_reply = suppress_recently_sent_links(
         assistant_reply or "",
         history_msgs,

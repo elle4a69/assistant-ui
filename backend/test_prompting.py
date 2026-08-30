@@ -19,6 +19,7 @@ from main import (  # noqa: E402
     current_business_time,
     run_sms_reply_logic,
     suppress_recently_sent_links,
+    suppress_unrequested_payment_details,
 )
 
 
@@ -248,6 +249,15 @@ def test_repeated_page_link_is_removed_unless_customer_requests_it_again():
     assert "https://example.com/services" not in suppressed
     assert "Yep, I can help." in suppressed
     assert retained == "Here it is: https://example.com/services"
+
+
+def test_price_reply_does_not_volunteer_payment_terms():
+    reply = "It's $200, cash on arrival and no deposit. What day and time were you after?"
+
+    assert suppress_unrequested_payment_details(reply, "What do you want in return?") == (
+        "It's $200. What day and time were you after?"
+    )
+    assert suppress_unrequested_payment_details(reply, "Is it cash on arrival and do I need a deposit?") == reply
 
 
 def test_simulator_skips_delay_when_preapproval_is_off(monkeypatch):
