@@ -856,6 +856,22 @@ export async function approveLearnedInformation(id: string): Promise<LearnedInfo
   return (await response.json()).entry;
 }
 
+export async function approvePendingLearnedInformation(): Promise<{ processed: number; active: number; restricted: number }> {
+  const response = await apiFetch(`${API_BASE}/api/settings/learnings/approve-pending`, { method: 'POST' });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to approve pending learned rules.');
+  return response.json();
+}
+
+export async function approveSelectedLearnedInformation(entryIds: string[]): Promise<{ processed: number; active: number; restricted: number }> {
+  const response = await apiFetch(`${API_BASE}/api/settings/learnings/approve-selected`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entry_ids: entryIds }),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to approve selected learned rules.');
+  return response.json();
+}
+
 export async function redraftLearnedInformation(id: string): Promise<LearnedInformationEntry> {
   const response = await apiFetch(`${API_BASE}/api/settings/learnings/${encodeURIComponent(id)}/redraft`, { method: 'POST' });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to redraft learned rule.');

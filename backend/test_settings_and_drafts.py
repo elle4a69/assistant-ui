@@ -299,6 +299,33 @@ def test_approved_learning_is_retrievable_but_editing_returns_it_to_review(monke
     assert main.retrieve_knowledge_chunks("natural service", account_key="primary") == []
 
 
+def test_bulk_approval_applies_the_normal_safety_gate(monkeypatch, tmp_path):
+    def classification_response(kwargs):
+        entry_id = json.loads(kwargs["input"])["records"][0]["id"]
+        return json.dumps({"classifications": [{
+            "id": entry_id, "scope": "shared", "category": "generic", "retrieval_enabled": True,
+        }]})
+
+    monkeypatch.setattr(main, "openai_client", FakeLearningClient(classification_response))
+    monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "KNOWLEDGE_CHUNKS", [])
+    main._upsert_learned_information_entry({
+        "id": "safe", "type": "manual_guidance", "text": "Clients can ask about services.",
+        "scope": "shared", "review_status": "pending", "retrieval_enabled": False,
+    })
+    main._upsert_learned_information_entry({
+        "id": "price", "type": "manual_guidance", "text": "The price is $200.",
+        "scope": "shared", "review_status": "pending", "retrieval_enabled": False,
+    })
+
+    result = main.approve_pending_learned_information()
+
+    assert result == {"processed": 2, "active": 1, "restricted": 1}
+    entries = {entry["id"]: entry for entry in main.list_learned_information()}
+    assert entries["safe"]["retrieval_enabled"] is True
+    assert entries["price"]["retrieval_enabled"] is False
+
+
 def test_learning_redraft_stays_pending_and_is_labelled(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
     monkeypatch.setattr(main, "openai_client", FakeLearningClient(json.dumps({

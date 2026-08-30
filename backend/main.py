@@ -2146,6 +2146,43 @@ def approve_learned_information_entry(entry_id: str) -> Dict[str, Any]:
     return replace_learned_information_entry(entry_id, updates)
 
 
+def approve_pending_learned_information() -> Dict[str, int]:
+    """Approve every item still in the review queue through the normal safety gate."""
+    processed = 0
+    active = 0
+    restricted = 0
+    for entry in list_learned_information():
+        if entry.get("review_status") == "approved":
+            continue
+        approved = approve_learned_information_entry(entry["id"])
+        processed += 1
+        if approved.get("retrieval_enabled"):
+            active += 1
+        else:
+            restricted += 1
+    return {"processed": processed, "active": active, "restricted": restricted}
+
+
+def approve_selected_learned_information(entry_ids: List[str]) -> Dict[str, int]:
+    entries = {entry["id"]: entry for entry in list_learned_information()}
+    missing = [entry_id for entry_id in entry_ids if entry_id not in entries]
+    if missing:
+        raise KeyError(missing[0])
+    processed = 0
+    active = 0
+    restricted = 0
+    for entry_id in entry_ids:
+        if entries[entry_id].get("review_status") == "approved":
+            continue
+        approved = approve_learned_information_entry(entry_id)
+        processed += 1
+        if approved.get("retrieval_enabled"):
+            active += 1
+        else:
+            restricted += 1
+    return {"processed": processed, "active": active, "restricted": restricted}
+
+
 def delete_learned_information_entry(entry_id: str) -> None:
     filepath = os.path.join(KNOWLEDGE_DIR, LEARNED_INFORMATION_FILENAME)
     if not os.path.exists(filepath):
@@ -3104,6 +3141,17 @@ class LearnedInformationUpdateInput(BaseModel):
         self.text = self.text.strip()
         if not self.text:
             raise ValueError("Learning text is required.")
+        return self
+
+
+class LearnedInformationBulkApproveInput(BaseModel):
+    entry_ids: List[str] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def clean_entry_ids(self):
+        self.entry_ids = list(dict.fromkeys(entry_id.strip() for entry_id in self.entry_ids if entry_id.strip()))
+        if not self.entry_ids:
+            raise ValueError("Select at least one learned rule.")
         return self
 
 
@@ -11780,6 +11828,19 @@ def approve_learned_information(entry_id: str):
     except KeyError:
         raise HTTPException(status_code=404, detail="Learned entry not found.")
     return {"status": "success", "entry": entry}
+
+
+@app.post("/api/settings/learnings/approve-pending")
+def approve_pending_learned_information_endpoint():
+    return {"status": "success", **approve_pending_learned_information()}
+
+
+@app.post("/api/settings/learnings/approve-selected")
+def approve_selected_learned_information_endpoint(payload: LearnedInformationBulkApproveInput):
+    try:
+        return {"status": "success", **approve_selected_learned_information(payload.entry_ids)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="One or more learned entries were not found.")
 
 
 @app.post("/api/settings/learnings/{entry_id}/redraft")

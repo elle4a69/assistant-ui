@@ -10,6 +10,8 @@ import {
   listLearnedInformation,
   updateLearnedInformation,
   approveLearnedInformation,
+  approvePendingLearnedInformation,
+  approveSelectedLearnedInformation,
   redraftLearnedInformation,
   redraftPendingLearnedInformation,
   moveAllLearnedInformationToReview,
@@ -163,6 +165,8 @@ export default function SettingsView() {
   const [lastSavedLearning, setLastSavedLearning] = useState<ManualLearningEntry | null>(null);
   const [learnedEntries, setLearnedEntries] = useState<LearnedInformationEntry[]>([]);
   const [editingLearnedId, setEditingLearnedId] = useState<string | null>(null);
+  const [selectedLearnedIds, setSelectedLearnedIds] = useState<Set<string>>(new Set());
+  const [approvingPendingLearnings, setApprovingPendingLearnings] = useState(false);
 
   // Modal states for File Editor & Moderation
   const [activeEditFile, setActiveEditFile] = useState<string | null>(null);
@@ -583,6 +587,52 @@ export default function SettingsView() {
       console.error(err);
       triggerBanner('error', err instanceof Error ? err.message : 'Failed to approve learned rule.');
     }
+  };
+
+  const handleApprovePendingLearnings = async () => {
+    const pendingCount = learnedEntries.filter(entry => entry.review_status !== 'approved').length;
+    if (!pendingCount) return;
+    if (!window.confirm(`Approve all ${pendingCount} pending learned rule${pendingCount === 1 ? '' : 's'}? Each item will still be checked before it can be used in customer replies.`)) return;
+    setApprovingPendingLearnings(true);
+    try {
+      const result = await approvePendingLearnedInformation();
+      setLearnedEntries(await listLearnedInformation());
+      setSelectedLearnedIds(new Set());
+      triggerBanner('success', `${result.processed} learned rule${result.processed === 1 ? '' : 's'} approved; ${result.active} active in replies and ${result.restricted} retained for audit only.`);
+    } catch (err) {
+      console.error(err);
+      triggerBanner('error', err instanceof Error ? err.message : 'Failed to approve pending learned rules.');
+    } finally {
+      setApprovingPendingLearnings(false);
+    }
+  };
+
+  const handleApproveSelectedLearnings = async () => {
+    const selectedPendingIds = learnedEntries
+      .filter(entry => selectedLearnedIds.has(entry.id) && entry.review_status !== 'approved')
+      .map(entry => entry.id);
+    if (!selectedPendingIds.length) return;
+    if (!window.confirm(`Approve ${selectedPendingIds.length} selected learned rule${selectedPendingIds.length === 1 ? '' : 's'}? Each item will still be checked before it can be used in customer replies.`)) return;
+    setApprovingPendingLearnings(true);
+    try {
+      const result = await approveSelectedLearnedInformation(selectedPendingIds);
+      setLearnedEntries(await listLearnedInformation());
+      setSelectedLearnedIds(new Set());
+      triggerBanner('success', `${result.processed} selected learned rule${result.processed === 1 ? '' : 's'} approved; ${result.active} active in replies and ${result.restricted} retained for audit only.`);
+    } catch (err) {
+      console.error(err);
+      triggerBanner('error', err instanceof Error ? err.message : 'Failed to approve selected learned rules.');
+    } finally {
+      setApprovingPendingLearnings(false);
+    }
+  };
+
+  const toggleLearnedSelection = (id: string) => {
+    setSelectedLearnedIds(current => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
   };
 
   const handleRedraftLearnedEntry = async (id: string) => {
@@ -1675,6 +1725,8 @@ export default function SettingsView() {
                         <p className="mt-0.5 text-[10px] text-slate-500">New or edited material stays here until you approve it. Scope defaults to the line it came from.</p>
                       </div>
                       <div className="flex shrink-0 flex-col gap-1">
+                        <button type="button" onClick={handleApproveSelectedLearnings} disabled={approvingPendingLearnings || !learnedEntries.some(entry => selectedLearnedIds.has(entry.id) && entry.review_status !== 'approved')} className="rounded border border-emerald-200 bg-white px-2 py-1.5 text-[10px] font-bold text-emerald-800 hover:bg-emerald-50 disabled:opacity-50">Approve selected{selectedLearnedIds.size ? ` (${selectedLearnedIds.size})` : ''}</button>
+                        <button type="button" onClick={handleApprovePendingLearnings} disabled={approvingPendingLearnings || !learnedEntries.some(entry => entry.review_status !== 'approved')} className="rounded border border-emerald-300 bg-emerald-50 px-2 py-1.5 text-[10px] font-bold text-emerald-800 hover:bg-emerald-100 disabled:opacity-50">{approvingPendingLearnings ? 'Approving...' : 'Approve all pending'}</button>
                         <button type="button" onClick={handleRedraftPendingLearnings} disabled={redraftingPendingLearnings} className="rounded border border-indigo-300 bg-indigo-50 px-2 py-1.5 text-[10px] font-bold text-indigo-800 hover:bg-indigo-100 disabled:opacity-50">{redraftingPendingLearnings ? 'Redrafting...' : 'Redraft all pending'}</button>
                         <button type="button" onClick={handleMoveAllLearningsToReview} className="rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-[10px] font-bold text-amber-800 hover:bg-amber-100">Move all to review</button>
                       </div>
@@ -1693,6 +1745,9 @@ export default function SettingsView() {
                             <div className="flex gap-2"><button onClick={() => setEditingLearnedId(null)} className="rounded border border-slate-300 px-3 py-1.5 text-xs">Cancel</button><button onClick={() => handleSaveLearnedEntry(entry)} className="rounded bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white">Save</button></div>
                           </div>
                         </div> : <div className="flex items-start justify-between gap-3">
+                          <label className="mt-0.5 flex shrink-0 items-center" title={`Select ${entry.topic || entry.type}`}>
+                            <input type="checkbox" checked={selectedLearnedIds.has(entry.id)} onChange={() => toggleLearnedSelection(entry.id)} className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
+                          </label>
                           <div className="min-w-0"><p className="text-xs font-bold text-slate-800">{entry.topic || entry.type}</p><p className="mt-1 whitespace-pre-wrap text-[11px] text-slate-600">{entry.text}</p><p className="mt-1 flex flex-wrap gap-1.5 text-[10px] font-semibold"><span className="text-indigo-700">{entry.scope === 'primary' ? 'Line 1' : entry.scope === 'secondary' ? 'Line 2' : entry.scope === 'shared' ? 'Shared' : 'Internal'}</span><span className={entry.review_status === 'approved' ? 'text-emerald-700' : 'text-amber-700'}>{entry.review_status === 'approved' ? (entry.retrieval_enabled ? 'Approved and active' : 'Approved, not injected') : 'Needs review'}</span>{entry.review_source && <span className="text-slate-500">{entry.review_source === 'ai-redrafted' ? 'AI redrafted' : entry.review_source === 'ai-drafted' ? 'AI drafted' : 'Staff-edited reply'}</span>}</p>{entry.review_note && <p className="mt-1 text-[10px] text-amber-700">{entry.review_note}</p>}</div>
                           <div className="flex shrink-0 gap-1"><button onClick={() => setEditingLearnedId(entry.id)} className="rounded p-1.5 text-indigo-600 hover:bg-indigo-50" title="Edit learned rule"><Edit className="h-3.5 w-3.5" /></button>{entry.review_status !== 'approved' && <><button onClick={() => handleRedraftLearnedEntry(entry.id)} className="rounded border border-indigo-200 px-2 py-1 text-[10px] font-bold text-indigo-700 hover:bg-indigo-50" title="Ask AI to improve this draft">Redraft</button><button onClick={() => handleApproveLearnedEntry(entry.id)} className="rounded border border-emerald-200 px-2 py-1 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50" title="Approve learned rule">Approve</button></>}<button onClick={() => handleDeleteLearnedEntry(entry.id)} className="rounded p-1.5 text-rose-600 hover:bg-rose-50" title="Delete learned rule"><Trash2 className="h-3.5 w-3.5" /></button></div>
                         </div>}
