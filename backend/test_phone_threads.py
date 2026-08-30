@@ -194,3 +194,50 @@ def test_thread_list_orders_conversations_by_latest_message_not_thread_update():
     assert [item["id"] for item in items] == [recent_conversation.id, stale_conversation.id]
     assert items[0]["lastMessageText"] == "Newest message"
     db.close()
+
+
+def test_thread_search_matches_message_body_not_just_phone_number():
+    test_engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=test_engine)
+    db = sessionmaker(bind=test_engine)()
+    now = datetime.utcnow()
+    thread = Thread(
+        id="body-search-thread",
+        customer_phone="+61412345678",
+        state="auto-reply",
+        priority="medium",
+        sla_due_at=now + timedelta(hours=1),
+        unread_count=0,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(thread)
+    db.flush()
+    db.add_all([
+        Message(
+            id="old-matching-message",
+            thread_id=thread.id,
+            role="customer",
+            text="Can you do a natural service?",
+            at=now - timedelta(minutes=5),
+        ),
+        Message(
+            id="latest-non-matching-message",
+            thread_id=thread.id,
+            role="agent",
+            text="Yep, what day were you after?",
+            at=now,
+        ),
+    ])
+    db.commit()
+
+    items = get_threads(
+        search="natural service",
+        filterStatus=None,
+        filterPriority=None,
+        onlyUnread=None,
+        db=db,
+    )
+
+    assert [item["id"] for item in items] == [thread.id]
+    db.close()

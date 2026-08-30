@@ -98,7 +98,9 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const loadThreads = useCallback(async () => {
     const requestId = ++threadsRequestRef.current
     try {
-      const nextThreads = await listThreads()
+      // The list payload contains only the latest message, so searching it locally
+      // misses matches earlier in a conversation. Let the API search every message.
+      const nextThreads = await listThreads({ search: query.trim() || undefined })
       if (requestId !== threadsRequestRef.current) return
       setThreads(nextThreads)
       setError('')
@@ -107,7 +109,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [query])
 
   const clearArrivalUrl = useCallback(() => {
     const url = new URL(window.location.href)
@@ -249,13 +251,9 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   }, [thread?.events.length, thread?.messages.length])
 
   const filteredThreads = useMemo(() => {
-    const needle = query.trim().toLowerCase()
-    if (!needle) return threads
-    return threads.filter(item =>
-      contactLabel(item.customerPhone).toLowerCase().includes(needle)
-      || item.lastMessageText.toLowerCase().includes(needle)
-    )
-  }, [threads, query])
+    // Search results are already filtered by the server across the full thread.
+    return threads
+  }, [threads])
 
   const orderedTimeline = useMemo(() => {
     const items: Array<
