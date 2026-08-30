@@ -6,6 +6,8 @@ import threading
 import asyncio
 import concurrent.futures
 import contextlib
+import csv
+import io
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TMP_DIR = os.path.join(BASE_DIR, "tmp")
 os.environ["SQLITE_TMPDIR"] = TMP_DIR
@@ -12014,6 +12016,72 @@ def create_manual_learning(payload: ManualLearningInput):
         "filename": LEARNED_INFORMATION_FILENAME,
         "entry": entry,
     }
+
+
+MESSAGE_EXPORT_COLUMNS = (
+    "account_identifier",
+    "timestamp",
+    "direction",
+    "message_body",
+    "conversation_reference",
+    "contact_reference",
+)
+
+
+def _safe_csv_cell(value: Any) -> str:
+    """Prevent exported values from being interpreted as spreadsheet formulas."""
+    text = "" if value is None else str(value)
+    first_content_character = text.lstrip(" \t\r\n")[:1]
+    if first_content_character in {"=", "+", "-", "@"}:
+        return f"'{text}"
+    return text
+
+
+def render_message_export_csv(db: Session) -> str:
+    rows = (
+        db.query(Message, Thread)
+        .join(Thread, Thread.id == Message.thread_id)
+        .order_by(Message.at.asc(), Message.id.asc())
+        .all()
+    )
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\r\n")
+    writer.writerow(MESSAGE_EXPORT_COLUMNS)
+    for message, thread in rows:
+        direction = {
+            "customer": "inbound",
+            "agent": "outbound",
+            "draft": "draft",
+            "system": "system",
+        }.get(message.role, message.role)
+        writer.writerow(
+            _safe_csv_cell(value)
+            for value in (
+                thread.sms_account_key,
+                format_dt(message.at),
+                direction,
+                message.text,
+                thread.id,
+                thread.customer_phone,
+            )
+        )
+    return output.getvalue()
+
+
+@app.get("/api/settings/messages/export.csv")
+def export_messages_csv(db: Session = Depends(get_db)):
+    try:
+        content = render_message_export_csv(db)
+    except Exception as exc:
+        logger.exception("Message CSV export failed")
+        raise HTTPException(status_code=500, detail="Message export could not be generated.") from exc
+
+    filename = f"messages-export-{datetime.now(timezone.utc):%Y%m%d}.csv"
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/settings/learnings")

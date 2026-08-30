@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   getSettings,
+  downloadMessagesCsv,
   updateSettings,
   getBusinessVariables,
   saveBusinessVariables,
@@ -80,7 +81,8 @@ import {
   Check,
   GripVertical,
   BellRing,
-  Volume2
+  Volume2,
+  Download
 } from 'lucide-react';
 import {
   getIncomingAlarmSettings,
@@ -140,6 +142,7 @@ export default function SettingsView() {
   const [hasGoogleCreds, setHasGoogleCreds] = useState(false);
   const [showMessageAvatars, setShowMessageAvatars] = useState(true);
   const [savingMessageDisplay, setSavingMessageDisplay] = useState(false);
+  const [exportingMessages, setExportingMessages] = useState(false);
   const [clearingPendingDrafts, setClearingPendingDrafts] = useState(false);
   const [clearingReviewTags, setClearingReviewTags] = useState(false);
   const [catchUpLookbackDays, setCatchUpLookbackDays] = useState(3);
@@ -502,6 +505,27 @@ export default function SettingsView() {
       element.focus();
       element.setSelectionRange(start + inserted.length, start + inserted.length);
     });
+  };
+
+  const handleExportMessages = async () => {
+    setExportingMessages(true);
+    try {
+      const { blob, filename } = await downloadMessagesCsv();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      triggerBanner('success', 'Message CSV export downloaded.');
+    } catch (err) {
+      console.error(err);
+      triggerBanner('error', 'Failed to export messages. Please try again.');
+    } finally {
+      setExportingMessages(false);
+    }
   };
 
   const handleSaveBusinessVariables = async () => {
@@ -1319,6 +1343,25 @@ export default function SettingsView() {
 
               <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100">
                 <div className="flex items-start gap-3 min-w-0">
+                  <Download className="w-4 h-4 text-indigo-600 mt-0.5 shrink-0" />
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-slate-800">Export messages</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Download all authorised message history as a safely escaped CSV for manual review.</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={exportingMessages}
+                  onClick={handleExportMessages}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-indigo-200 bg-white px-3 py-2 text-[10px] font-bold text-indigo-700 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer shrink-0"
+                >
+                  {exportingMessages ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                  {exportingMessages ? 'Exporting…' : 'Download CSV'}
+                </button>
+              </div>
+
+              <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100">
+                <div className="flex items-start gap-3 min-w-0">
                   <Trash2 className="w-4 h-4 text-rose-600 mt-0.5 shrink-0" />
                   <div className="min-w-0">
                     <p className="text-xs font-bold text-slate-800">Clear pending AI drafts</p>
@@ -1612,6 +1655,7 @@ export default function SettingsView() {
                 })}
                 <div className="flex justify-end"><button type="button" onClick={handleSaveLineProfiles} disabled={savingLineProfiles} className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-4 py-2 rounded-lg font-bold disabled:opacity-50">{savingLineProfiles ? 'Saving...' : 'Save line settings'}</button></div>
               </div>
+
             </details>
 
             {/* OpenAI Configuration Section */}

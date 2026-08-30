@@ -757,6 +757,19 @@ export async function getSettings(): Promise<SystemSettings> {
   return response.json();
 }
 
+export async function downloadMessagesCsv(): Promise<{ blob: Blob; filename: string }> {
+  const response = await apiFetch(`${API_BASE}/api/settings/messages/export.csv`, {
+    credentials: 'same-origin',
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Message export failed: ${response.statusText}`);
+  }
+  const disposition = response.headers.get('content-disposition') || '';
+  const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || 'messages-export.csv';
+  return { blob: await response.blob(), filename };
+}
+
 export async function updateSettings(settings: { openaiApiKey?: string; systemPrompt?: string; userPrompt?: string; autoReplyGlobalEnabled?: boolean; trainingModeEnabled?: boolean; showMessageAvatars?: boolean; catchUpLookbackDays?: number }): Promise<{ status: string }> {
   const response = await apiFetch(`${API_BASE}/api/settings`, {
     method: 'POST',
