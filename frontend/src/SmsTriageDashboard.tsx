@@ -323,12 +323,15 @@ export default function SmsTriageDashboard() {
   // Fetch threads list
   const fetchThreadsList = useCallback(async () => {
     const requestId = ++threadListRequestRef.current;
+    const searching = searchQuery.trim().length > 0;
     try {
       const list = await listThreads({
-        search: searchQuery || undefined,
-        filterStatus: statusFilter !== 'all' ? statusFilter : undefined,
-        filterPriority: priorityFilter !== 'all' ? priorityFilter : undefined,
-        onlyUnread: showUnreadOnly ? true : undefined
+        // Search is an inbox-wide lookup. Keeping the default "Needs Review"
+        // filter here made valid text matches in normal conversations disappear.
+        search: searching ? searchQuery.trim() : undefined,
+        filterStatus: searching || statusFilter === 'all' ? undefined : statusFilter,
+        filterPriority: searching || priorityFilter === 'all' ? undefined : priorityFilter,
+        onlyUnread: searching ? undefined : (showUnreadOnly ? true : undefined)
       });
       if (requestId !== threadListRequestRef.current) return;
       setThreads(list);
@@ -665,7 +668,7 @@ export default function SmsTriageDashboard() {
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
             <input
               type="text"
-              placeholder="Search phone or body..."
+              placeholder="Search all messages or phone..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full pl-9 pr-3 py-1.5 text-sm bg-slate-50 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white text-slate-800"
