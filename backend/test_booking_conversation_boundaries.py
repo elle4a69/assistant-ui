@@ -47,6 +47,9 @@ def test_catalogue_context_exposes_only_customer_visible_details(tmp_path, monke
 
 
 def test_secondary_account_receives_its_own_services_but_not_primary_knowledge_or_state(tmp_path, monkeypatch):
+    # This test verifies a sent secondary-line reply, rather than the separate
+    # draft-approval workflow. Keep it independent of a persisted local setting.
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
     monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
     write_services(tmp_path)
     monkeypatch.setattr(main, "KNOWLEDGE_CHUNKS", [{
@@ -124,7 +127,9 @@ def test_secondary_account_receives_its_own_services_but_not_primary_knowledge_o
     assert "Private Line Two Service" in str(calls[0]["input"])
     assert "Scalp Care" not in str(calls[0]["input"])
     assert "Tori" not in calls[0]["instructions"]
-    assert "Anonymous" in calls[0]["instructions"]
+    # The shared system fallback must stay identity-neutral. The selected line's
+    # identity belongs to its separately persisted line prompt/profile, not here.
+    assert "Anonymous" not in calls[0]["instructions"]
     db.close()
 
 
