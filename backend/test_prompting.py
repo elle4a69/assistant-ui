@@ -18,6 +18,7 @@ from main import (  # noqa: E402
     build_broad_availability_guidance,
     current_business_time,
     run_sms_reply_logic,
+    suppress_recently_sent_links,
 )
 
 
@@ -84,6 +85,8 @@ def test_model_instructions_require_direct_context_answers_and_in_chat_booking()
     assert "Do not ask the customer what a term means" in instructions
     assert "Complete bookings in this conversation" in instructions
     assert "never a substitute for answering the question in chat" in instructions
+    assert "Answer the customer's actual question first" in instructions
+    assert "A greeting, flirt, tease, or vague opener" in instructions
 
 
 def test_broad_afternoon_availability_asks_for_preferred_time(monkeypatch):
@@ -223,6 +226,28 @@ def test_outgoing_sms_never_contains_em_or_en_dashes():
     assert cleaned == "I am free, what time suits? 4-6 pm works."
     assert "—" not in cleaned
     assert "–" not in cleaned
+
+
+def test_repeated_page_link_is_removed_unless_customer_requests_it_again():
+    history = [
+        StoredMessage("customer", "What services do you offer?"),
+        StoredMessage("system", "Have a look at https://example.com/services"),
+    ]
+
+    suppressed = suppress_recently_sent_links(
+        "Yep, I can help. Have a look at https://example.com/services",
+        history,
+        "Are you real?",
+    )
+    retained = suppress_recently_sent_links(
+        "Here it is: https://example.com/services",
+        history,
+        "Can you send me the link again please?",
+    )
+
+    assert "https://example.com/services" not in suppressed
+    assert "Yep, I can help." in suppressed
+    assert retained == "Here it is: https://example.com/services"
 
 
 def test_simulator_skips_delay_when_preapproval_is_off(monkeypatch):

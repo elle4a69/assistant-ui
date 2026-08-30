@@ -116,6 +116,7 @@ operations_github_oidc_verifier = GitHubOIDCVerifier()
 URL_TRAILING_PUNCTUATION_RE = re.compile(
     r"(https?://[^\s<>\"']*?)[.,!?;:]+(?=\s|$)", re.IGNORECASE
 )
+OUTGOING_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 STYLE_STOP_WORDS = {
     "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
     "going", "had", "has", "have", "he", "her", "him", "his",
@@ -132,6 +133,47 @@ def sanitize_outgoing_urls(text: Optional[str]) -> Optional[str]:
         return text
     text = re.sub(r"\s*—\s*", ", ", text).replace("–", "-")
     return URL_TRAILING_PUNCTUATION_RE.sub(r"\1", text)
+
+
+def _normalise_url_for_comparison(url: str) -> str:
+    return URL_TRAILING_PUNCTUATION_RE.sub(r"\1", url).rstrip("/").lower()
+
+
+def customer_explicitly_requests_link(message: str) -> bool:
+    """Allow a repeat only when the customer has actually asked for one."""
+    normalised = str(message or "").lower()
+    return bool(re.search(
+        r"\b(?:send|share|give|need|want|where(?:'s| is)|what(?:'s| is)).{0,40}\b(?:link|url|website|web\s*site|page)\b"
+        r"|\b(?:link|url|website|web\s*site|page).{0,40}\b(?:again|please)\b",
+        normalised,
+    ))
+
+
+def suppress_recently_sent_links(
+    reply: str,
+    history_messages: list[Any],
+    customer_message: str,
+) -> str:
+    """Remove page links already sent in this thread unless requested again."""
+    if customer_explicitly_requests_link(customer_message):
+        return reply
+    prior_urls = {
+        _normalise_url_for_comparison(url)
+        for message in history_messages[-100:]
+        if getattr(message, "role", None) in {"agent", "system"}
+        for url in OUTGOING_URL_RE.findall(str(getattr(message, "text", "")))
+    }
+    if not prior_urls:
+        return reply
+    repeated_urls = {
+        url for url in OUTGOING_URL_RE.findall(reply)
+        if _normalise_url_for_comparison(url) in prior_urls
+    }
+    for url in repeated_urls:
+        reply = reply.replace(url, "")
+    reply = re.sub(r"[ \t]+\n", "\n", reply)
+    reply = re.sub(r"\n{3,}", "\n\n", reply)
+    return reply.strip()
 
 def tokenise(text: str) -> list[str]:
     tokens = []
@@ -600,6 +642,13 @@ SERVICE_AND_BOOKING_CONVERSATION_POLICY = """Service and booking conversation ru
 - You may include the supplied website as an optional reference for photos or browsing the full service page, but the link is supplementary, never a substitute for answering the question in chat.
 - Complete bookings in this conversation. Do not instruct the customer to fill out a booking form or send them elsewhere to make the booking."""
 
+RELEVANCE_AND_THREAD_FLOW_POLICY = """Reply relevance and thread-flow rule:
+- Read the supplied conversation chronologically before replying. Use the current customer turn together with the recent thread to understand what has already been said, offered, answered, and linked.
+- Answer the customer's actual question first, in one or two natural SMS sentences where possible. Do not volunteer price, payment, service detail, availability, booking instructions, or a page link unless the customer asked for it or it is necessary to answer their question.
+- A greeting, flirt, tease, or vague opener is not permission to quote a price, describe an encounter, send a link, or push for a booking. Reply briefly and naturally, then ask at most one useful question if needed.
+- Do not repeat a link, price, service list, question, or call to action already sent in this thread unless the customer explicitly asks again or there is genuinely new information.
+- Do not leave the customer hanging: if a direct answer is supported, give it. If the message is casual or unclear, give a short natural reply rather than a sales script."""
+
 SMS_TYPOGRAPHY_POLICY = """SMS typography rule:
 - Never use an em dash (—) or en dash (–). Use a comma, full stop, or ordinary hyphen instead."""
 
@@ -674,6 +723,7 @@ def build_model_instructions(
         BOOKING_AVAILABILITY_SAFETY_POLICY,
         RETRIEVED_BUSINESS_CONTEXT_POLICY,
         SERVICE_AND_BOOKING_CONVERSATION_POLICY,
+        RELEVANCE_AND_THREAD_FLOW_POLICY,
         SMS_TYPOGRAPHY_POLICY,
     ]
     if style_profile is not None:
@@ -4926,6 +4976,24 @@ def run_sms_reply_logic(
         return booking_confirmed, slots_presented
             
     assistant_reply = sanitize_outgoing_urls(assistant_reply)
+    assistant_reply = suppress_recently_sent_links(
+        assistant_reply or "",
+        history_msgs,
+        effective_body,
+    )
+
+    if not assistant_reply:
+        thread.state = "needs-review"
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread.id,
+            type="ai-reply-cancelled",
+            agent_id=None,
+            meta=json.dumps({"reason": "reply-contained-only-a-repeated-link"}),
+            at=datetime.utcnow(),
+        ))
+        db.commit()
+        return booking_confirmed, False
 
     if (
         not TRAINING_MODE_ENABLED
