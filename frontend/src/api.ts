@@ -862,6 +862,12 @@ export async function redraftLearnedInformation(id: string): Promise<LearnedInfo
   return (await response.json()).entry;
 }
 
+export async function redraftPendingLearnedInformation(): Promise<{ processed: number; failed: number }> {
+  const response = await apiFetch(`${API_BASE}/api/settings/learnings/redraft-pending`, { method: 'POST' });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to redraft pending learned rules.');
+  return response.json();
+}
+
 export async function moveAllLearnedInformationToReview(): Promise<number> {
   const response = await apiFetch(`${API_BASE}/api/settings/learnings/move-all-to-review`, { method: 'POST' });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to move learned rules to review.');

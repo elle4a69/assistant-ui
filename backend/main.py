@@ -2433,6 +2433,22 @@ def redraft_learned_information_entry(entry_id: str) -> Dict[str, Any]:
     })
 
 
+def redraft_all_pending_learned_information() -> Dict[str, int]:
+    """Run the learning-only curator over pending entries without approving any."""
+    processed = 0
+    failed = 0
+    for entry in list_learned_information():
+        if entry.get("review_status") != "pending":
+            continue
+        try:
+            redraft_learned_information_entry(entry["id"])
+            processed += 1
+        except Exception as exc:
+            failed += 1
+            print(f"Learning redraft failed for {entry.get('id')}: {type(exc).__name__}")
+    return {"processed": processed, "failed": failed}
+
+
 def save_edited_draft_learning(db: Session, thread: Thread, draft: Message) -> Optional[Dict[str, Any]]:
     """Turn a staff-edited draft into safely classified reusable guidance.
 
@@ -11775,6 +11791,11 @@ def redraft_learned_information(entry_id: str):
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": "success", "entry": entry}
+
+
+@app.post("/api/settings/learnings/redraft-pending")
+def redraft_pending_learned_information():
+    return {"status": "success", **redraft_all_pending_learned_information()}
 
 
 @app.post("/api/settings/learnings/move-all-to-review")

@@ -11,6 +11,7 @@ import {
   updateLearnedInformation,
   approveLearnedInformation,
   redraftLearnedInformation,
+  redraftPendingLearnedInformation,
   moveAllLearnedInformationToReview,
   deleteLearnedInformation,
   uploadKnowledgeFile,
@@ -158,6 +159,7 @@ export default function SettingsView() {
   const [learningGuidance, setLearningGuidance] = useState('');
   const [learningScope, setLearningScope] = useState<'shared' | 'primary' | 'secondary'>('shared');
   const [savingLearning, setSavingLearning] = useState(false);
+  const [redraftingPendingLearnings, setRedraftingPendingLearnings] = useState(false);
   const [lastSavedLearning, setLastSavedLearning] = useState<ManualLearningEntry | null>(null);
   const [learnedEntries, setLearnedEntries] = useState<LearnedInformationEntry[]>([]);
   const [editingLearnedId, setEditingLearnedId] = useState<string | null>(null);
@@ -591,6 +593,21 @@ export default function SettingsView() {
     } catch (err) {
       console.error(err);
       triggerBanner('error', err instanceof Error ? err.message : 'Failed to redraft learned rule.');
+    }
+  };
+
+  const handleRedraftPendingLearnings = async () => {
+    if (!window.confirm('Redraft every pending learning? They will remain in review and will not be used in customer replies until individually approved.')) return;
+    setRedraftingPendingLearnings(true);
+    try {
+      const result = await redraftPendingLearnedInformation();
+      setLearnedEntries(await listLearnedInformation());
+      triggerBanner('success', `${result.processed} pending learning${result.processed === 1 ? '' : 's'} redrafted${result.failed ? `; ${result.failed} could not be processed.` : '.'}`);
+    } catch (err) {
+      console.error(err);
+      triggerBanner('error', err instanceof Error ? err.message : 'Failed to redraft pending learned rules.');
+    } finally {
+      setRedraftingPendingLearnings(false);
     }
   };
 
@@ -1657,7 +1674,10 @@ export default function SettingsView() {
                         <h3 className="text-xs font-bold text-slate-800">Learning review queue</h3>
                         <p className="mt-0.5 text-[10px] text-slate-500">New or edited material stays here until you approve it. Scope defaults to the line it came from.</p>
                       </div>
-                      <button type="button" onClick={handleMoveAllLearningsToReview} className="shrink-0 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-[10px] font-bold text-amber-800 hover:bg-amber-100">Move all to review</button>
+                      <div className="flex shrink-0 flex-col gap-1">
+                        <button type="button" onClick={handleRedraftPendingLearnings} disabled={redraftingPendingLearnings} className="rounded border border-indigo-300 bg-indigo-50 px-2 py-1.5 text-[10px] font-bold text-indigo-800 hover:bg-indigo-100 disabled:opacity-50">{redraftingPendingLearnings ? 'Redrafting...' : 'Redraft all pending'}</button>
+                        <button type="button" onClick={handleMoveAllLearningsToReview} className="rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-[10px] font-bold text-amber-800 hover:bg-amber-100">Move all to review</button>
+                      </div>
                     </div>
                   </div>
                   <div className="max-h-[420px] divide-y divide-slate-100 overflow-y-auto">

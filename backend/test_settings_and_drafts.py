@@ -332,6 +332,18 @@ def test_learning_draft_rejects_literal_urls(monkeypatch):
         main.generate_manual_learning("Booking link", "Send the booking link.")
 
 
+def test_redraft_all_only_processes_pending_entries(monkeypatch):
+    monkeypatch.setattr(main, "list_learned_information", lambda: [
+        {"id": "pending", "review_status": "pending"},
+        {"id": "approved", "review_status": "approved"},
+    ])
+    processed = []
+    monkeypatch.setattr(main, "redraft_learned_information_entry", lambda entry_id: processed.append(entry_id) or {})
+
+    assert main.redraft_all_pending_learned_information() == {"processed": 1, "failed": 0}
+    assert processed == ["pending"]
+
+
 def test_manual_learning_fails_closed_when_ai_is_unavailable(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "openai_client", None)
     monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
