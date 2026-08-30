@@ -731,6 +731,24 @@ export interface LearnedInformationEntry extends Omit<ManualLearningEntry, 'scop
   review_source?: 'ai-drafted' | 'ai-redrafted' | 'staff-edited-reply';
 }
 
+export interface SmsLearningPreviewItem {
+  id: string;
+  account_key: 'primary' | 'secondary';
+  customer: string;
+  reply: string;
+  reason: string;
+  topic?: string;
+  applies_when?: string;
+  instruction?: string;
+  example_reply?: string;
+}
+
+export interface SmsLearningPreview {
+  sampled: number;
+  candidates: SmsLearningPreviewItem[];
+  rejected: SmsLearningPreviewItem[];
+}
+
 export async function getSettings(): Promise<SystemSettings> {
   const response = await apiFetch(`${API_BASE}/api/settings`, { cache: 'no-store' });
   if (!response.ok) {
@@ -869,6 +887,16 @@ export async function approveSelectedLearnedInformation(entryIds: string[]): Pro
     body: JSON.stringify({ entry_ids: entryIds }),
   });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to approve selected learned rules.');
+  return response.json();
+}
+
+export async function previewSmsPairLearnings(limit = 50): Promise<SmsLearningPreview> {
+  const response = await apiFetch(`${API_BASE}/api/settings/learnings/sms-pair-preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ limit }),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to generate the SMS training preview.');
   return response.json();
 }
 

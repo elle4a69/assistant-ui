@@ -12,6 +12,7 @@ import {
   approveLearnedInformation,
   approvePendingLearnedInformation,
   approveSelectedLearnedInformation,
+  previewSmsPairLearnings,
   redraftLearnedInformation,
   redraftPendingLearnedInformation,
   moveAllLearnedInformationToReview,
@@ -21,6 +22,7 @@ import {
   KnowledgeFile,
   ManualLearningEntry,
   LearnedInformationEntry,
+  SmsLearningPreview,
   getKnowledgeFile,
   saveKnowledgeFile,
   deleteKnowledgeFile,
@@ -167,6 +169,8 @@ export default function SettingsView() {
   const [editingLearnedId, setEditingLearnedId] = useState<string | null>(null);
   const [selectedLearnedIds, setSelectedLearnedIds] = useState<Set<string>>(new Set());
   const [approvingPendingLearnings, setApprovingPendingLearnings] = useState(false);
+  const [generatingSmsLearningPreview, setGeneratingSmsLearningPreview] = useState(false);
+  const [smsLearningPreview, setSmsLearningPreview] = useState<SmsLearningPreview | null>(null);
 
   // Modal states for File Editor & Moderation
   const [activeEditFile, setActiveEditFile] = useState<string | null>(null);
@@ -633,6 +637,21 @@ export default function SettingsView() {
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
+  };
+
+  const handlePreviewSmsPairLearnings = async () => {
+    if (!window.confirm('Analyse 50 recent customer/agent SMS pairs? This creates a view-only preview and does not add, approve, delete, or send anything.')) return;
+    setGeneratingSmsLearningPreview(true);
+    try {
+      const preview = await previewSmsPairLearnings(50);
+      setSmsLearningPreview(preview);
+      triggerBanner('success', `Preview complete: ${preview.candidates.length} potential guidance item${preview.candidates.length === 1 ? '' : 's'} and ${preview.rejected.length} rejected pair${preview.rejected.length === 1 ? '' : 's'}. Nothing was saved.`);
+    } catch (err) {
+      console.error(err);
+      triggerBanner('error', err instanceof Error ? err.message : 'Failed to generate the SMS training preview.');
+    } finally {
+      setGeneratingSmsLearningPreview(false);
+    }
   };
 
   const handleRedraftLearnedEntry = async (id: string) => {
@@ -1754,6 +1773,20 @@ export default function SettingsView() {
                       </div>
                     ))}
                   </div>
+                </div>
+
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div><h3 className="text-xs font-bold text-slate-800">SMS learning trial</h3><p className="mt-0.5 text-[10px] text-slate-500">Review what a strict curator would keep or reject from 50 recent customer/agent pairs. It never changes knowledge or sends SMS.</p></div>
+                    <button type="button" onClick={handlePreviewSmsPairLearnings} disabled={generatingSmsLearningPreview} className="shrink-0 rounded border border-indigo-300 bg-white px-2 py-1.5 text-[10px] font-bold text-indigo-800 hover:bg-indigo-50 disabled:opacity-50">{generatingSmsLearningPreview ? 'Analysing...' : 'Preview 50 pairs'}</button>
+                  </div>
+                  {smsLearningPreview && <div className="mt-3 space-y-3">
+                    <p className="text-[10px] font-semibold text-slate-600">Sampled {smsLearningPreview.sampled}. Kept as possible guidance: {smsLearningPreview.candidates.length}. Rejected: {smsLearningPreview.rejected.length}.</p>
+                    <div className="max-h-[520px] space-y-2 overflow-y-auto">
+                      {smsLearningPreview.candidates.map(item => <div key={item.id} className="rounded border border-emerald-200 bg-white p-2 text-[10px]"><p className="font-bold text-emerald-800">Keep — {item.account_key === 'primary' ? 'Line 1' : 'Line 2'}: {item.topic}</p><p className="mt-1 text-slate-700"><strong>When:</strong> {item.applies_when}</p><p className="mt-1 text-slate-700"><strong>Guidance:</strong> {item.instruction}</p>{item.example_reply && <p className="mt-1 text-slate-700"><strong>Example:</strong> {item.example_reply}</p>}<p className="mt-1 text-slate-500"><strong>Why:</strong> {item.reason}</p><p className="mt-1 text-slate-500"><strong>Source:</strong> {item.customer} → {item.reply}</p></div>)}
+                      {smsLearningPreview.rejected.map(item => <div key={item.id} className="rounded border border-rose-200 bg-white p-2 text-[10px]"><p className="font-bold text-rose-800">Rejected — {item.account_key === 'primary' ? 'Line 1' : 'Line 2'}</p><p className="mt-1 text-slate-600"><strong>Why:</strong> {item.reason}</p><p className="mt-1 text-slate-500"><strong>Source:</strong> {item.customer} → {item.reply}</p></div>)}
+                    </div>
+                  </div>}
                 </div>
                 
                 {/* List of files */}

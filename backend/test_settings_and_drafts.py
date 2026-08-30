@@ -326,6 +326,31 @@ def test_bulk_approval_applies_the_normal_safety_gate(monkeypatch, tmp_path):
     assert entries["price"]["retrieval_enabled"] is False
 
 
+def test_sms_pair_preview_is_view_only_and_separates_candidate_from_rejection(monkeypatch):
+    db = make_db()
+    add_thread(db, "preview-1")
+    now = datetime.utcnow()
+    db.add_all([
+        Message(id="preview-customer", thread_id="preview-1", role="customer", text="What services do you offer?", at=now),
+        Message(id="preview-agent", thread_id="preview-1", role="agent", text="I can explain the services available.", at=now + timedelta(minutes=1)),
+    ])
+    db.commit()
+    monkeypatch.setattr(main, "openai_client", FakeLearningClient(json.dumps({"results": [{
+        "id": "preview-agent", "disposition": "candidate", "reason": "Durable service enquiry pattern.",
+        "topic": "Service enquiries", "applies_when": "A customer asks about services.",
+        "instruction": "Explain the current service catalogue.", "example_reply": "I can explain the current services.",
+    }]})))
+
+    preview = main.preview_sms_pair_learnings(db, limit=5)
+
+    assert preview["sampled"] == 1
+    assert len(preview["candidates"]) == 1
+    assert preview["candidates"][0]["account_key"] == "primary"
+    assert preview["rejected"] == []
+    assert main.list_learned_information() == []
+    db.close()
+
+
 def test_learning_redraft_stays_pending_and_is_labelled(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
     monkeypatch.setattr(main, "openai_client", FakeLearningClient(json.dumps({
