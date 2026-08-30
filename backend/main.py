@@ -236,7 +236,8 @@ STRICT_PLACEHOLDER_ALLOWLIST = {
     "state", "postcode", "business_phone", "email", "booking_arrival_notes",
     "booking_url", "phone", "deposit", "booking_id", "location", "date",
     "time", "address", "hotel_name", "room_number", "level_number", "building_number",
-    "message", "knowledge", "slots", "current_time", "name", "service", "arrival_link"
+    "message", "knowledge", "slots", "current_time", "name", "service", "arrival_link",
+    "line_key", "line_display_name", "line_provider_name", "line_information_url"
 }
 
 CRITICAL_UNRENDERED_TOKENS = ["{website}", "{provider_name}", "{suburb}"]
@@ -2313,7 +2314,10 @@ def generate_manual_learning(topic: str, owner_guidance: str) -> Dict[str, str]:
         "Do not invent facts, prices, availability, policies, names, locations, promises, or steps. "
         "Write instruction as a concise imperative describing what the AI should do. Only populate "
         "example_reply when the owner supplied wording or clearly asked what to say; otherwise use an "
-        "empty string. Make applies_when specific enough for retrieval but broadly reusable. Return only "
+        "empty string. Never include a literal URL, booking link, phone number, price, payment term, deposit, "
+        "availability, address, arrival direction, or customer-specific detail in a learned record. A link is "
+        "dynamic line configuration, not learned knowledge; describe only when it may be offered, if relevant. "
+        "Make applies_when specific enough for retrieval but broadly reusable. Return only "
         "valid JSON with exactly these string fields: topic, applies_when, instruction, example_reply."
     )
     prompt = f"Owner topic or situation:\n{topic}\n\nOwner's rough guidance:\n{owner_guidance}"
@@ -2350,6 +2354,11 @@ def generate_manual_learning(topic: str, owner_guidance: str) -> Dict[str, str]:
         raise HTTPException(
             status_code=502,
             detail="The structured learning was unexpectedly long. Nothing was saved.",
+        )
+    if any(OUTGOING_URL_RE.search(value) for value in normalized.values()):
+        raise HTTPException(
+            status_code=502,
+            detail="The AI included a literal URL in learned material. Nothing was saved.",
         )
     return normalized
 

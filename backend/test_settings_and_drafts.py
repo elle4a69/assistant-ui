@@ -320,6 +320,18 @@ def test_learning_redraft_stays_pending_and_is_labelled(monkeypatch, tmp_path):
     assert "Ask the customer to arrive" in redrafted["text"]
 
 
+def test_learning_draft_rejects_literal_urls(monkeypatch):
+    monkeypatch.setattr(main, "openai_client", FakeLearningClient(json.dumps({
+        "topic": "Booking link",
+        "applies_when": "A customer asks for a booking link.",
+        "instruction": "Send https://example.com.",
+        "example_reply": "https://example.com",
+    })))
+
+    with pytest.raises(main.HTTPException, match="literal URL"):
+        main.generate_manual_learning("Booking link", "Send the booking link.")
+
+
 def test_manual_learning_fails_closed_when_ai_is_unavailable(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "openai_client", None)
     monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
