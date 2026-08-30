@@ -115,6 +115,8 @@ def test_operations_chat_persists_both_sides_and_uses_read_only_snapshot(monkeyp
     assert "Never leave the owner with a vague queued, waiting, or unavailable response" in call["instructions"]
     assert "Never answer a status request with a bare claim" in call["instructions"]
     assert "A question authorises explanation or inspection, not a code or production change" in call["instructions"]
+    assert "Starting a command, submitting a job, or receiving a run ID is not completion" in call["instructions"]
+    assert "Treat recoverable failures as part of the task" in call["instructions"]
     assert call["tools"] == main.OPERATIONS_AI_TOOLS
     assert call["max_output_tokens"] == 1200
     assert "include" not in call
