@@ -13,6 +13,7 @@ import {
   approvePendingLearnedInformation,
   approveSelectedLearnedInformation,
   previewSmsPairLearnings,
+  importSmsPairLearningCandidates,
   redraftLearnedInformation,
   redraftPendingLearnedInformation,
   moveAllLearnedInformationToReview,
@@ -170,6 +171,7 @@ export default function SettingsView() {
   const [selectedLearnedIds, setSelectedLearnedIds] = useState<Set<string>>(new Set());
   const [approvingPendingLearnings, setApprovingPendingLearnings] = useState(false);
   const [generatingSmsLearningPreview, setGeneratingSmsLearningPreview] = useState(false);
+  const [importingSmsLearningCandidates, setImportingSmsLearningCandidates] = useState(false);
   const [smsLearningPreview, setSmsLearningPreview] = useState<SmsLearningPreview | null>(null);
 
   // Modal states for File Editor & Moderation
@@ -651,6 +653,23 @@ export default function SettingsView() {
       triggerBanner('error', err instanceof Error ? err.message : 'Failed to generate the SMS training preview.');
     } finally {
       setGeneratingSmsLearningPreview(false);
+    }
+  };
+
+  const handleImportSmsLearningCandidates = async () => {
+    const candidates = smsLearningPreview?.candidates || [];
+    if (!candidates.length) return;
+    setImportingSmsLearningCandidates(true);
+    try {
+      const result = await importSmsPairLearningCandidates(candidates);
+      setLearnedEntries(await listLearnedInformation());
+      setSmsLearningPreview(null);
+      triggerBanner('success', `${result.created} reusable SMS template${result.created === 1 ? '' : 's'} added to the review queue${result.skipped ? `; ${result.skipped} skipped.` : '.'} They are not active until approved.`);
+    } catch (err) {
+      console.error(err);
+      triggerBanner('error', err instanceof Error ? err.message : 'Failed to add the SMS learning candidates to review.');
+    } finally {
+      setImportingSmsLearningCandidates(false);
     }
   };
 
@@ -1790,11 +1809,11 @@ export default function SettingsView() {
 
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                   <div className="flex items-start justify-between gap-3">
-                    <div><h3 className="text-xs font-bold text-slate-800">SMS learning trial</h3><p className="mt-0.5 text-[10px] text-slate-500">Review what a strict curator would keep or reject from 50 recent customer/agent pairs. It never changes knowledge or sends SMS.</p></div>
+                    <div><h3 className="text-xs font-bold text-slate-800">SMS learning trial</h3><p className="mt-0.5 text-[10px] text-slate-500">Turn reusable booking, service, price and link wording into variable-based templates. Preview first, then add only the kept templates to review. It never sends SMS.</p></div>
                     <button type="button" onClick={handlePreviewSmsPairLearnings} disabled={generatingSmsLearningPreview} className="shrink-0 rounded border border-indigo-300 bg-white px-2 py-1.5 text-[10px] font-bold text-indigo-800 hover:bg-indigo-50 disabled:opacity-50">{generatingSmsLearningPreview ? 'Analysing...' : 'Preview 50 pairs'}</button>
                   </div>
                   {smsLearningPreview && <div className="mt-3 space-y-3">
-                    <p className="text-[10px] font-semibold text-slate-600">Sampled {smsLearningPreview.sampled}. Kept as possible guidance: {smsLearningPreview.candidates.length}. Rejected: {smsLearningPreview.rejected.length}.</p>
+                    <div className="flex items-center justify-between gap-2"><p className="text-[10px] font-semibold text-slate-600">Sampled {smsLearningPreview.sampled}. Kept as possible guidance: {smsLearningPreview.candidates.length}. Rejected: {smsLearningPreview.rejected.length}.</p>{smsLearningPreview.candidates.length > 0 && <button type="button" onClick={handleImportSmsLearningCandidates} disabled={importingSmsLearningCandidates} className="shrink-0 rounded border border-emerald-300 bg-white px-2 py-1.5 text-[10px] font-bold text-emerald-800 hover:bg-emerald-50 disabled:opacity-50">{importingSmsLearningCandidates ? 'Adding…' : 'Add kept templates to review'}</button>}</div>
                     <div className="max-h-[520px] space-y-2 overflow-y-auto">
                       {smsLearningPreview.candidates.map(item => <div key={item.id} className="rounded border border-emerald-200 bg-white p-2 text-[10px]"><p className="font-bold text-emerald-800">Keep — {item.account_key === 'primary' ? 'Line 1' : 'Line 2'}: {item.topic}</p><p className="mt-1 text-slate-700"><strong>When:</strong> {item.applies_when}</p><p className="mt-1 text-slate-700"><strong>Guidance:</strong> {item.instruction}</p>{item.example_reply && <p className="mt-1 text-slate-700"><strong>Example:</strong> {item.example_reply}</p>}<p className="mt-1 text-slate-500"><strong>Why:</strong> {item.reason}</p><p className="mt-1 text-slate-500"><strong>Source:</strong> {item.customer} → {item.reply}</p></div>)}
                       {smsLearningPreview.rejected.map(item => <div key={item.id} className="rounded border border-rose-200 bg-white p-2 text-[10px]"><p className="font-bold text-rose-800">Rejected — {item.account_key === 'primary' ? 'Line 1' : 'Line 2'}</p><p className="mt-1 text-slate-600"><strong>Why:</strong> {item.reason}</p><p className="mt-1 text-slate-500"><strong>Source:</strong> {item.customer} → {item.reply}</p></div>)}

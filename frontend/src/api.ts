@@ -728,7 +728,7 @@ export interface LearnedInformationEntry extends Omit<ManualLearningEntry, 'scop
   retrieval_enabled?: boolean;
   category?: string;
   review_note?: string;
-  review_source?: 'ai-drafted' | 'ai-redrafted' | 'staff-edited-reply';
+  review_source?: 'ai-drafted' | 'ai-redrafted' | 'staff-edited-reply' | 'sms-pair-template';
 }
 
 export interface SmsLearningPreviewItem {
@@ -897,6 +897,25 @@ export async function previewSmsPairLearnings(limit = 50): Promise<SmsLearningPr
     body: JSON.stringify({ limit }),
   });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to generate the SMS training preview.');
+  return response.json();
+}
+
+export async function importSmsPairLearningCandidates(
+  candidates: SmsLearningPreviewItem[],
+): Promise<{ status: string; created: number; skipped: number }> {
+  const response = await apiFetch(`${API_BASE}/api/settings/learnings/sms-pair-import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ candidates: candidates.map(({ id, account_key, topic, applies_when, instruction, example_reply }) => ({
+      id,
+      account_key,
+      topic: topic || '',
+      applies_when: applies_when || '',
+      instruction: instruction || '',
+      example_reply: example_reply || '',
+    })) }),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to add SMS learning candidates to review.');
   return response.json();
 }
 

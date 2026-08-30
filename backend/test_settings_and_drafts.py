@@ -351,6 +351,79 @@ def test_sms_pair_preview_is_view_only_and_separates_candidate_from_rejection(mo
     db.close()
 
 
+def test_sms_pair_templates_keep_variables_then_enter_review_queue(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "KNOWLEDGE_CHUNKS", [])
+
+    result = main.save_sms_pair_learning_candidates([{
+        "id": "source-agent-1",
+        "account_key": "secondary",
+        "topic": "Service and information link",
+        "applies_when": "A customer asks what is offered or wants more information.",
+        "instruction": "Explain the relevant {service} from the current catalogue and offer {line_information_url} if useful.",
+        "example_reply": "I can tell you about {service}. Have a look at {line_information_url} too if you want.",
+    }])
+
+    assert result == {"created": 1, "skipped": 0}
+    entry = main.list_learned_information()[0]
+    assert entry["scope"] == "secondary"
+    assert entry["review_status"] == "pending"
+    assert entry["retrieval_enabled"] is False
+    assert "{service}" in entry["text"]
+    assert "{line_information_url}" in entry["text"]
+
+    rendered = main.render_style_examples(
+        [("What do you offer?", entry["example_reply"])],
+        {"line_information_url": "https://line-two.example/info"},
+    )
+    assert rendered[0][1] == "I can tell you about the relevant service. Have a look at https://line-two.example/info too if you want."
+
+
+def test_sms_pair_template_rejects_literal_price_but_allows_price_token(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
+    safe = main.save_sms_pair_learning_candidates([{
+        "id": "safe-template",
+        "account_key": "primary",
+        "topic": "Price enquiry",
+        "applies_when": "A customer asks about cost.",
+        "instruction": "Use the current catalogue for the {service} and {price}.",
+        "example_reply": "The current price for {service} is {price}.",
+    }])
+    unsafe = main.save_sms_pair_learning_candidates([{
+        "id": "old-price",
+        "account_key": "primary",
+        "topic": "Old price",
+        "applies_when": "A customer asks about cost.",
+        "instruction": "Quote the old price.",
+        "example_reply": "It is $200.",
+    }])
+
+    assert safe == {"created": 1, "skipped": 0}
+    assert unsafe == {"created": 0, "skipped": 1}
+
+
+def test_retrieved_sms_template_renders_only_the_receiving_line(monkeypatch):
+    monkeypatch.setattr(main, "KNOWLEDGE_CHUNKS", [{
+        "source": "learned_information.jsonl",
+        "type": "text",
+        "text": "Offer {service} and {line_information_url}.",
+        "scope": "secondary",
+        "retrieval_enabled": True,
+    }])
+    monkeypatch.setattr(main, "get_line_business_variable_values", lambda account_key: {
+        "line_information_url": "https://line-two.example/info",
+    })
+    monkeypatch.setattr(main, "get_live_business_variables_context", lambda: "")
+    monkeypatch.setattr(main, "get_live_services_context", lambda _account_key: "")
+
+    context = main.build_business_context("service details", account_key="secondary")
+
+    assert "the relevant service" in context
+    assert "https://line-two.example/info" in context
+    assert "{service}" not in context
+    assert "{line_information_url}" not in context
+
+
 def test_learning_redraft_stays_pending_and_is_labelled(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
     monkeypatch.setattr(main, "openai_client", FakeLearningClient(json.dumps({
