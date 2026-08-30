@@ -2382,6 +2382,7 @@ def save_manual_learning(
         "updated_at": now,
         "review_status": "pending",
         "retrieval_enabled": False,
+        "review_source": "ai-drafted",
     }
     entry.update(classify_knowledge_entries([entry]).get(entry["id"], _quarantined_knowledge_classification()))
     entry["review_status"] = "pending"
@@ -2391,6 +2392,36 @@ def save_manual_learning(
         entry["source_account_key"] = scope
     _upsert_learned_information_entry(entry)
     return entry
+
+
+def redraft_learned_information_entry(entry_id: str) -> Dict[str, Any]:
+    """Ask the learning-only curator to improve one pending record for review."""
+    entries = {entry["id"]: entry for entry in list_learned_information()}
+    entry = entries.get(entry_id)
+    if not entry:
+        raise KeyError(entry_id)
+    source_topic = str(entry.get("owner_topic") or entry.get("topic") or "Learned guidance")
+    source_guidance = str(entry.get("owner_guidance") or entry.get("text") or "").strip()
+    if not source_guidance:
+        raise ValueError("This learned entry has no text to redraft.")
+    structured = generate_manual_learning(source_topic, source_guidance)
+    text_parts = [
+        f"Topic: {structured['topic']}",
+        f"Applies when: {structured['applies_when']}",
+        f"Instruction: {structured['instruction']}",
+    ]
+    if structured.get("example_reply"):
+        text_parts.append(f"Example reply: {structured['example_reply']}")
+    return replace_learned_information_entry(entry_id, {
+        "topic": structured["topic"],
+        "applies_when": structured["applies_when"],
+        "instruction": structured["instruction"],
+        "example_reply": structured.get("example_reply", ""),
+        "text": "\n".join(text_parts),
+        "review_status": "pending",
+        "retrieval_enabled": False,
+        "review_source": "ai-redrafted",
+    })
 
 
 def save_edited_draft_learning(db: Session, thread: Thread, draft: Message) -> Optional[Dict[str, Any]]:
@@ -2425,6 +2456,7 @@ def save_edited_draft_learning(db: Session, thread: Thread, draft: Message) -> O
         "updated_at": now,
         "review_status": "pending",
         "retrieval_enabled": False,
+        "review_source": "staff-edited-reply",
     }
     entry.update(
         classify_knowledge_entries([entry]).get(
@@ -11722,6 +11754,17 @@ def approve_learned_information(entry_id: str):
         entry = approve_learned_information_entry(entry_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Learned entry not found.")
+    return {"status": "success", "entry": entry}
+
+
+@app.post("/api/settings/learnings/{entry_id}/redraft")
+def redraft_learned_information(entry_id: str):
+    try:
+        entry = redraft_learned_information_entry(entry_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Learned entry not found.")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": "success", "entry": entry}
 
 

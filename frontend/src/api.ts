@@ -728,6 +728,7 @@ export interface LearnedInformationEntry extends Omit<ManualLearningEntry, 'scop
   retrieval_enabled?: boolean;
   category?: string;
   review_note?: string;
+  review_source?: 'ai-drafted' | 'ai-redrafted' | 'staff-edited-reply';
 }
 
 export async function getSettings(): Promise<SystemSettings> {
@@ -852,6 +853,12 @@ export async function updateLearnedInformation(entry: LearnedInformationEntry): 
 export async function approveLearnedInformation(id: string): Promise<LearnedInformationEntry> {
   const response = await apiFetch(`${API_BASE}/api/settings/learnings/${encodeURIComponent(id)}/approve`, { method: 'POST' });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to approve learned rule.');
+  return (await response.json()).entry;
+}
+
+export async function redraftLearnedInformation(id: string): Promise<LearnedInformationEntry> {
+  const response = await apiFetch(`${API_BASE}/api/settings/learnings/${encodeURIComponent(id)}/redraft`, { method: 'POST' });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to redraft learned rule.');
   return (await response.json()).entry;
 }
 

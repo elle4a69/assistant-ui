@@ -299,6 +299,27 @@ def test_approved_learning_is_retrievable_but_editing_returns_it_to_review(monke
     assert main.retrieve_knowledge_chunks("natural service", account_key="primary") == []
 
 
+def test_learning_redraft_stays_pending_and_is_labelled(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "openai_client", FakeLearningClient(json.dumps({
+        "topic": "Arrival timing",
+        "applies_when": "A customer asks when to arrive.",
+        "instruction": "Ask the customer to arrive at their booked appointment time.",
+        "example_reply": "Please arrive at your booked time.",
+    })))
+    main._upsert_learned_information_entry({
+        "id": "redraft-1", "topic": "arrival", "text": "Customers should arrive on time.",
+        "scope": "shared", "review_status": "pending", "retrieval_enabled": False,
+    })
+
+    redrafted = main.redraft_learned_information_entry("redraft-1")
+
+    assert redrafted["review_source"] == "ai-redrafted"
+    assert redrafted["review_status"] == "pending"
+    assert redrafted["retrieval_enabled"] is False
+    assert "Ask the customer to arrive" in redrafted["text"]
+
+
 def test_manual_learning_fails_closed_when_ai_is_unavailable(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "openai_client", None)
     monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
