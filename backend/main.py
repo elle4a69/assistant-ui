@@ -14,6 +14,8 @@ import uuid
 import secrets
 import string
 import json
+import csv
+import io
 import shutil
 import logging
 from datetime import datetime, timedelta, timezone
@@ -11582,6 +11584,61 @@ def update_line_profiles(payload: LineProfilesInput):
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to save line profiles.") from exc
     return {"status": "success", "profiles": profiles}
+
+
+@app.get("/api/settings/conversations/export.csv")
+def export_conversation_messages_csv(
+    smsAccountKey: Literal["all", "primary", "secondary"] = Query("all"),
+    db: Session = Depends(get_db),
+):
+    """Export admin-visible SMS messages, optionally restricted to one SMS line."""
+    query = db.query(Message, Thread).join(Thread, Message.thread_id == Thread.id)
+    if smsAccountKey != "all":
+        query = query.filter(Thread.sms_account_key == smsAccountKey)
+
+    rows = query.order_by(Message.at.asc(), Message.id.asc()).all()
+    line_profiles = load_line_profiles()
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\r\n")
+    writer.writerow([
+        "sms_account_key",
+        "line_display_name",
+        "conversation_id",
+        "message_id",
+        "direction",
+        "message_role",
+        "timestamp_utc",
+        "message_content",
+    ])
+    for message, thread in rows:
+        direction = {
+            "customer": "inbound",
+            "agent": "outbound",
+            "system": "outbound",
+            "draft": "draft",
+        }.get(message.role, "unknown")
+        profile = line_profiles.get(thread.sms_account_key, {})
+        writer.writerow([
+            thread.sms_account_key,
+            profile.get("displayName", thread.sms_account_key),
+            thread.id,
+            message.id,
+            direction,
+            message.role,
+            format_dt(message.at),
+            message.text,
+        ])
+
+    scope = "all-lines" if smsAccountKey == "all" else smsAccountKey
+    filename = f"conversation-messages-{scope}-{datetime.now(timezone.utc):%Y-%m-%d}.csv"
+    return Response(
+        content=output.getvalue().encode("utf-8-sig"),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.get("/api/settings")

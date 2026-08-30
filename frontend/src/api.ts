@@ -775,6 +775,21 @@ export async function updateSettings(settings: { openaiApiKey?: string; systemPr
   return result;
 }
 
+export async function downloadConversationCsv(
+  smsAccountKey: 'all' | 'primary' | 'secondary',
+): Promise<{ blob: Blob; filename: string }> {
+  const response = await apiFetch(
+    `${API_BASE}/api/settings/conversations/export.csv?smsAccountKey=${encodeURIComponent(smsAccountKey)}`,
+    { cache: 'no-store' },
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to export conversations: ${response.statusText}`);
+  }
+  const disposition = response.headers.get('content-disposition') || '';
+  const filename = disposition.match(/filename="([^"]+)"/i)?.[1] || 'conversation-messages.csv';
+  return { blob: await response.blob(), filename };
+}
+
 export interface BusinessVariable {
   key: string;
   token?: string;

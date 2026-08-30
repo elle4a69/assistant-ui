@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   getSettings,
   updateSettings,
+  downloadConversationCsv,
   getBusinessVariables,
   saveBusinessVariables,
   BusinessVariable,
@@ -80,7 +81,8 @@ import {
   Check,
   GripVertical,
   BellRing,
-  Volume2
+  Volume2,
+  Download
 } from 'lucide-react';
 import {
   getIncomingAlarmSettings,
@@ -140,6 +142,8 @@ export default function SettingsView() {
   const [hasGoogleCreds, setHasGoogleCreds] = useState(false);
   const [showMessageAvatars, setShowMessageAvatars] = useState(true);
   const [savingMessageDisplay, setSavingMessageDisplay] = useState(false);
+  const [conversationExportScope, setConversationExportScope] = useState<'all' | 'primary' | 'secondary'>('all');
+  const [exportingConversations, setExportingConversations] = useState(false);
   const [clearingPendingDrafts, setClearingPendingDrafts] = useState(false);
   const [clearingReviewTags, setClearingReviewTags] = useState(false);
   const [catchUpLookbackDays, setCatchUpLookbackDays] = useState(3);
@@ -502,6 +506,27 @@ export default function SettingsView() {
       element.focus();
       element.setSelectionRange(start + inserted.length, start + inserted.length);
     });
+  };
+
+  const handleConversationExport = async () => {
+    setExportingConversations(true);
+    try {
+      const { blob, filename } = await downloadConversationCsv(conversationExportScope);
+      const downloadUrl = URL.createObjectURL(blob);
+      const element = document.createElement('a');
+      element.href = downloadUrl;
+      element.download = filename;
+      document.body.appendChild(element);
+      element.click();
+      document.body.removeChild(element);
+      URL.revokeObjectURL(downloadUrl);
+      triggerBanner('success', 'Conversation CSV download started.');
+    } catch (err) {
+      console.error(err);
+      triggerBanner('error', 'Failed to export conversation data.');
+    } finally {
+      setExportingConversations(false);
+    }
   };
 
   const handleSaveBusinessVariables = async () => {
@@ -1429,6 +1454,42 @@ export default function SettingsView() {
                   </button>
                 </div>
                 <p className="text-[10px] text-slate-500 sm:pl-7">The device's physical volume and browser tab sound permission still control the maximum loudness.</p>
+              </div>
+            </details>
+
+            <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+              <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0">
+                  <Download className="w-4.5 h-4.5" />
+                </div>
+                <div>
+                  <h2 className="font-bold text-slate-800 text-sm">Conversation Data Export</h2>
+                  <p className="text-[10px] text-slate-500 mt-0.5">Download permitted SMS conversation messages as a UTF-8 CSV.</p>
+                </div>
+              </summary>
+              <div className="p-4 flex flex-col sm:flex-row sm:items-end justify-between gap-3">
+                <label className="flex flex-col gap-1 text-[10px] font-bold text-slate-600">
+                  SMS line
+                  <select
+                    value={conversationExportScope}
+                    onChange={(event) => setConversationExportScope(event.target.value as 'all' | 'primary' | 'secondary')}
+                    aria-label="Conversation export SMS line"
+                    className="min-w-48 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800"
+                  >
+                    <option value="all">All permitted lines</option>
+                    <option value="primary">{lineProfiles.primary.displayName} (primary)</option>
+                    <option value="secondary">{lineProfiles.secondary.displayName} (secondary)</option>
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  disabled={exportingConversations}
+                  onClick={handleConversationExport}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-700 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
+                >
+                  {exportingConversations ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                  {exportingConversations ? 'Preparing CSV…' : 'Download conversation CSV'}
+                </button>
               </div>
             </details>
             
