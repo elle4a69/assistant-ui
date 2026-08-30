@@ -14,6 +14,8 @@ import uuid
 import secrets
 import string
 import json
+import csv
+import io
 import shutil
 import logging
 from datetime import datetime, timedelta, timezone
@@ -3637,6 +3639,49 @@ def to_naive_utc(dt: datetime) -> datetime:
     if dt.tzinfo is not None:
         return dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt
+
+
+MESSAGE_EXPORT_HEADERS = (
+    "message_id",
+    "thread_id",
+    "sms_account_key",
+    "customer_phone",
+    "role",
+    "text",
+    "sent_at",
+)
+
+
+def csv_safe_cell(value: Any) -> str:
+    """Return a CSV cell that spreadsheet programs cannot evaluate as a formula."""
+    text = "" if value is None else str(value)
+    candidate = text.lstrip(" \t\r\n")
+    if candidate.startswith(("=", "+", "-", "@")) or text.startswith(("\t", "\r", "\n")):
+        return f"'{text}"
+    return text
+
+
+def build_message_export_csv(db: Session) -> str:
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\r\n")
+    writer.writerow(MESSAGE_EXPORT_HEADERS)
+    rows = (
+        db.query(Message, Thread)
+        .join(Thread, Message.thread_id == Thread.id)
+        .order_by(Message.at.asc(), Message.id.asc())
+        .all()
+    )
+    for message, thread in rows:
+        writer.writerow(csv_safe_cell(value) for value in (
+            message.id,
+            thread.id,
+            thread.sms_account_key,
+            thread.customer_phone,
+            message.role,
+            message.text,
+            format_dt(message.at),
+        ))
+    return output.getvalue()
 
 
 def current_business_time() -> datetime:
@@ -11631,6 +11676,15 @@ def get_settings():
         "showMessageAvatars": load_message_ui_settings()["showMessageAvatars"],
         "catchUpLookbackDays": load_message_ui_settings()["catchUpLookbackDays"],
     }
+
+
+@app.get("/api/settings/messages/export")
+def export_messages_csv(db: Session = Depends(get_db)):
+    return Response(
+        content=build_message_export_csv(db),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="messages.csv"'},
+    )
 
 
 @app.post("/api/settings")

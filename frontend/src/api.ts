@@ -757,6 +757,16 @@ export async function getSettings(): Promise<SystemSettings> {
   return response.json();
 }
 
+export async function exportMessagesCsv(): Promise<Blob> {
+  const response = await apiFetch(`${API_BASE}/api/settings/messages/export`, {
+    credentials: 'same-origin',
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to export messages: ${response.statusText}`);
+  }
+  return response.blob();
+}
+
 export async function updateSettings(settings: { openaiApiKey?: string; systemPrompt?: string; userPrompt?: string; autoReplyGlobalEnabled?: boolean; trainingModeEnabled?: boolean; showMessageAvatars?: boolean; catchUpLookbackDays?: number }): Promise<{ status: string }> {
   const response = await apiFetch(`${API_BASE}/api/settings`, {
     method: 'POST',

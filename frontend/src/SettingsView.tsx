@@ -52,6 +52,7 @@ import {
   FirstContactAutoresponderSettings,
   clearPendingDrafts,
   clearReviewOnlyThreads,
+  exportMessagesCsv,
   getSmsLineProfiles,
   saveSmsLineProfiles,
   SmsLineProfile
@@ -80,7 +81,8 @@ import {
   Check,
   GripVertical,
   BellRing,
-  Volume2
+  Volume2,
+  Download
 } from 'lucide-react';
 import {
   getIncomingAlarmSettings,
@@ -142,6 +144,7 @@ export default function SettingsView() {
   const [savingMessageDisplay, setSavingMessageDisplay] = useState(false);
   const [clearingPendingDrafts, setClearingPendingDrafts] = useState(false);
   const [clearingReviewTags, setClearingReviewTags] = useState(false);
+  const [exportingMessages, setExportingMessages] = useState(false);
   const [catchUpLookbackDays, setCatchUpLookbackDays] = useState(3);
   const [savingCatchUpWindow, setSavingCatchUpWindow] = useState(false);
   const [incomingAlarmEnabled, setIncomingAlarmEnabledState] = useState(() => getIncomingAlarmSettings().enabled);
@@ -502,6 +505,27 @@ export default function SettingsView() {
       element.focus();
       element.setSelectionRange(start + inserted.length, start + inserted.length);
     });
+  };
+
+  const handleExportMessages = async () => {
+    setExportingMessages(true);
+    try {
+      const file = await exportMessagesCsv();
+      const url = URL.createObjectURL(file);
+      const element = document.createElement('a');
+      element.href = url;
+      element.download = 'messages.csv';
+      document.body.appendChild(element);
+      element.click();
+      element.remove();
+      URL.revokeObjectURL(url);
+      triggerBanner('success', 'Message CSV download started.');
+    } catch (error) {
+      console.error('Failed to export messages:', error);
+      triggerBanner('error', 'Failed to export messages. Please try again.');
+    } finally {
+      setExportingMessages(false);
+    }
   };
 
   const handleSaveBusinessVariables = async () => {
@@ -1314,6 +1338,25 @@ export default function SettingsView() {
                   className={`relative h-6 w-11 shrink-0 rounded-full border-none p-0 transition-colors cursor-pointer disabled:opacity-50 ${showMessageAvatars ? 'bg-indigo-600' : 'bg-slate-300'}`}
                 >
                   <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${showMessageAvatars ? 'translate-x-5' : 'translate-x-0'}`} />
+                </button>
+              </div>
+
+              <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100">
+                <div className="flex items-start gap-3 min-w-0">
+                  <Download className="w-4 h-4 text-indigo-600 mt-0.5 shrink-0" />
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-slate-800">Export messages</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Download permitted SMS message records as a spreadsheet-safe CSV file.</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={exportingMessages}
+                  onClick={handleExportMessages}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-indigo-200 bg-white px-3 py-2 text-[10px] font-bold text-indigo-700 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer shrink-0"
+                >
+                  {exportingMessages ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                  {exportingMessages ? 'Exporting…' : 'Download CSV'}
                 </button>
               </div>
 
