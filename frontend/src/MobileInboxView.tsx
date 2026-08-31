@@ -6,6 +6,8 @@ import {
   CheckCheck,
   DoorOpen,
   MessageCircle,
+  Ban,
+  Pin,
   RefreshCw,
   Search,
   Send,
@@ -19,6 +21,8 @@ import {
   listThreads,
   sendThreadReply,
   toggleAutoresponder,
+  setThreadBlocked,
+  setThreadPinned,
   updateSettings,
   catchUpMissedMessage,
   approveDraft,
@@ -76,6 +80,8 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const [loading, setLoading] = useState(true)
   const [sending, setSending] = useState(false)
   const [changingThreadAi, setChangingThreadAi] = useState(false)
+  const [changingPinned, setChangingPinned] = useState(false)
+  const [changingBlocked, setChangingBlocked] = useState(false)
   const [catchingUp, setCatchingUp] = useState(false)
   const [notice, setNotice] = useState('')
   const [reviewingDraftId, setReviewingDraftId] = useState<string | null>(null)
@@ -419,6 +425,40 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     }
   }
 
+  const togglePinned = async () => {
+    if (!thread || changingPinned) return
+    const pinned = !thread.pinned
+    setChangingPinned(true)
+    try {
+      const result = await setThreadPinned(thread.id, pinned)
+      setThread(current => current ? { ...current, pinned: result.pinned } : current)
+      await loadThreads()
+      setError('')
+    } catch {
+      setError('Could not change the pin for this conversation')
+    } finally {
+      setChangingPinned(false)
+    }
+  }
+
+  const toggleBlocked = async () => {
+    if (!thread || changingBlocked) return
+    const blocked = !thread.blocked
+    if (blocked && !window.confirm(`Block ${contactLabel(thread.customerPhone)} on ${thread.smsAccountKey === 'secondary' ? 'SMS line 2' : 'SMS line 1'}? Automated replies will stop for this contact.`)) return
+    setChangingBlocked(true)
+    try {
+      const result = await setThreadBlocked(thread.id, blocked)
+      setThread(current => current ? { ...current, blocked: result.blocked } : current)
+      await loadThreads()
+      setNotice(result.blocked ? 'Contact blocked. Automated replies are suppressed.' : 'Contact unblocked.')
+      setError('')
+    } catch {
+      setError(`Could not ${blocked ? 'block' : 'unblock'} this contact`)
+    } finally {
+      setChangingBlocked(false)
+    }
+  }
+
   const openBookingForThread = () => {
     if (!thread) return
     const params = new URLSearchParams({
@@ -524,6 +564,19 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
 
           {/* Right: compact actions and Training Mode */}
           <div className="flex shrink-0 items-center justify-end gap-1">
+            {thread && (
+              <button
+                type="button"
+                onClick={togglePinned}
+                disabled={changingPinned}
+                aria-pressed={thread.pinned}
+                aria-label={thread.pinned ? 'Unpin conversation' : 'Pin conversation'}
+                title={thread.pinned ? 'Unpin conversation' : 'Pin conversation'}
+                className={`grid h-8 w-8 place-items-center rounded-full ${thread.pinned ? 'bg-indigo-100 text-indigo-700' : 'text-slate-500'}`}
+              >
+                <Pin className={`h-4 w-4 ${thread.pinned ? 'fill-current' : ''}`} />
+              </button>
+            )}
             {!selectedId && (
               <button
                 type="button"
@@ -612,6 +665,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <p className="truncate text-[15px] font-semibold">{contactLabel(item.customerPhone)}</p>
+                        {item.pinned && <Pin className="h-3.5 w-3.5 shrink-0 fill-indigo-600 text-indigo-600" aria-label="Pinned" />}
                         <span className="shrink-0 rounded-full border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wide text-indigo-700">
                           {item.smsAccountKey === 'secondary' ? 'Line 2' : 'Line 1'}
                         </span>
@@ -628,6 +682,11 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                           >
                             <span className="grid h-3.5 w-3.5 place-items-center rounded-full bg-rose-600 text-[10px] leading-none text-white">?</span>
                             {item.lastMessageRole === 'draft' ? 'Draft' : 'Review'}
+                          </span>
+                        )}
+                        {item.blocked && (
+                          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-rose-100 px-1.5 py-0.5 text-[9px] font-black uppercase text-rose-700">
+                            <Ban className="h-3 w-3" /> Blocked
                           </span>
                         )}
                         <time className="ml-auto shrink-0 text-[10px] text-slate-400">{formatListTime(item.lastMessageAt)}</time>
@@ -806,13 +865,22 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                     type="button"
                     role="switch"
                     aria-checked={thread?.autoReplyEnabled ?? false}
-                    disabled={changingThreadAi || !thread}
+                    disabled={changingThreadAi || !thread || thread.blocked}
                     onClick={toggleThreadAi}
                     className={`relative h-4 w-7 rounded-full p-0 transition-colors ${thread?.autoReplyEnabled ? 'bg-emerald-500' : 'bg-slate-300'}`}
                   >
                     <span className={`absolute left-0.5 top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${thread?.autoReplyEnabled ? 'translate-x-3' : 'translate-x-0'}`} />
                   </button>
                 </label>
+                <button
+                  type="button"
+                  onClick={toggleBlocked}
+                  disabled={changingBlocked || !thread}
+                  aria-pressed={thread?.blocked ?? false}
+                  className={`ml-auto flex h-6 items-center gap-1 rounded-md px-2 text-[10px] font-extrabold ${thread?.blocked ? 'bg-rose-100 text-rose-700' : 'text-slate-500'}`}
+                >
+                  <Ban className="h-3 w-3" /> {thread?.blocked ? 'Blocked · Unblock' : 'Block'}
+                </button>
                 <button
                   type="button"
                   onClick={openBookingForThread}

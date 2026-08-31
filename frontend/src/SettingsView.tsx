@@ -55,7 +55,10 @@ import {
   clearReviewOnlyThreads,
   getSmsLineProfiles,
   saveSmsLineProfiles,
-  SmsLineProfile
+  SmsLineProfile,
+  listBlockedContacts,
+  unblockContact,
+  BlockedContact,
 } from './api';
 import {
   Key,
@@ -82,7 +85,8 @@ import {
   GripVertical,
   BellRing,
   Volume2,
-  Download
+  Download,
+  Ban,
 } from 'lucide-react';
 import {
   getIncomingAlarmSettings,
@@ -252,6 +256,8 @@ export default function SettingsView() {
     labels: { primary: 'Line 1', secondary: 'Line 2' }
   });
   const [savingFirstContact, setSavingFirstContact] = useState(false);
+  const [blockedContacts, setBlockedContacts] = useState<BlockedContact[]>([]);
+  const [unblockingContactId, setUnblockingContactId] = useState<string | null>(null);
 
   // Banners
   const [banner, setBanner] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -297,6 +303,7 @@ export default function SettingsView() {
     try { setFirstContactConfig(await retryOnce(getFirstContactAutoresponder)); } catch (e) { console.error('first-contact auto-responder fetch failed:', e); }
     try { setLineProfiles(await retryOnce(getSmsLineProfiles)); } catch (e) { console.error('line profile fetch failed:', e); }
     try { setLearnedEntries(await retryOnce(listLearnedInformation)); } catch (e) { console.error('learned rules fetch failed:', e); }
+    try { setBlockedContacts(await retryOnce(listBlockedContacts)); } catch (e) { console.error('blocked contacts fetch failed:', e); }
   }, []);
 
   const fetchKnowledgeFilesList = useCallback(async () => {
@@ -505,6 +512,19 @@ export default function SettingsView() {
       element.focus();
       element.setSelectionRange(start + inserted.length, start + inserted.length);
     });
+  };
+
+  const handleUnblockContact = async (contact: BlockedContact) => {
+    setUnblockingContactId(contact.id);
+    try {
+      await unblockContact(contact.smsAccountKey, contact.customerPhone);
+      setBlockedContacts(current => current.filter(item => item.id !== contact.id));
+      triggerBanner('success', `${contact.customerPhone} was unblocked on ${contact.smsAccountKey === 'secondary' ? 'Line 2' : 'Line 1'}.`);
+    } catch {
+      triggerBanner('error', 'Failed to unblock the contact.');
+    } finally {
+      setUnblockingContactId(null);
+    }
   };
 
   const handleExportMessages = async () => {
@@ -1613,6 +1633,42 @@ export default function SettingsView() {
                         {savingBusinessVariables ? 'Saving...' : 'Save Variables'}
                       </button>
                     </div>
+                  </div>
+                )}
+              </div>
+            </details>
+
+            {/* Blocked SMS contacts */}
+            <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+              <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
+                <Ban className="w-5 h-5 text-rose-600" />
+                <div>
+                  <h2 className="font-bold text-slate-800 text-sm">Blocked callers</h2>
+                  <p className="text-[10px] text-slate-500">Automated SMS handling is suppressed only for the contact and line shown.</p>
+                </div>
+              </summary>
+              <div className="p-3 sm:p-5">
+                {blockedContacts.length === 0 ? (
+                  <p className="text-xs text-slate-500">No blocked callers.</p>
+                ) : (
+                  <div className="divide-y divide-slate-100 rounded-lg border border-slate-200">
+                    {blockedContacts.map(contact => (
+                      <div key={contact.id} className="flex items-center gap-3 p-3">
+                        <Ban className="h-4 w-4 shrink-0 text-rose-600" />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-xs font-bold text-slate-800">{contact.customerPhone}</p>
+                          <p className="text-[10px] text-slate-500">{contact.smsAccountKey === 'secondary' ? 'SMS Line 2' : 'SMS Line 1'}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleUnblockContact(contact)}
+                          disabled={unblockingContactId === contact.id}
+                          className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-[10px] font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                        >
+                          {unblockingContactId === contact.id ? 'Unblocking...' : 'Unblock'}
+                        </button>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>

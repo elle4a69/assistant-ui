@@ -88,6 +88,8 @@ export interface ThreadListItem {
   assignedAgentId: string | null;
   sla: ThreadSLA;
   autoReplyEnabled: boolean;
+  pinned: boolean;
+  blocked: boolean;
 }
 
 export interface Message {
@@ -127,6 +129,8 @@ export interface ThreadDetail {
   notes: Note[];
   events: ThreadEvent[];
   autoReplyEnabled: boolean;
+  pinned: boolean;
+  blocked: boolean;
   pendingArrivalSessionId: string | null;
   pendingArrivalEventId: string | null;
   pendingArrivalAt: string | null;
@@ -695,6 +699,41 @@ export interface ManualLearningEntry {
   created_at: string;
   updated_at: string;
   scope?: 'shared' | 'primary' | 'secondary';
+}
+
+export async function setThreadPinned(threadId: string, pinned: boolean): Promise<{ status: string; pinned: boolean }> {
+  const response = await apiFetch(`${API_BASE}/api/threads/${threadId}/pin`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pinned }),
+  });
+  if (!response.ok) throw new Error(`Failed to update pin: ${response.statusText}`);
+  return response.json();
+}
+
+export async function setThreadBlocked(threadId: string, blocked: boolean): Promise<{ status: string; blocked: boolean }> {
+  const response = await apiFetch(`${API_BASE}/api/threads/${threadId}/block`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ blocked }),
+  });
+  if (!response.ok) throw new Error(`Failed to update blocked contact: ${response.statusText}`);
+  return response.json();
+}
+
+export interface BlockedContact {
+  id: string;
+  smsAccountKey: 'primary' | 'secondary';
+  customerPhone: string;
+  blockedAt: string;
+}
+
+export async function listBlockedContacts(): Promise<BlockedContact[]> {
+  const response = await apiFetch(`${API_BASE}/api/settings/blocked-contacts`, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`Failed to list blocked contacts: ${response.statusText}`);
+  return response.json();
+}
+
+export async function unblockContact(smsAccountKey: 'primary' | 'secondary', customerPhone: string): Promise<void> {
+  const query = new URLSearchParams({ smsAccountKey, customerPhone });
+  const response = await apiFetch(`${API_BASE}/api/settings/blocked-contacts?${query}`, { method: 'DELETE' });
+  if (!response.ok) throw new Error(`Failed to unblock contact: ${response.statusText}`);
 }
 
 export interface SmsLineProfile {
