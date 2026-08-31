@@ -30,11 +30,12 @@ def _export_client(monkeypatch):
             yield db
 
     main.app.dependency_overrides[main.get_db] = override_db
+    monkeypatch.setattr(main, "AUTH_USERNAME", "admin")
     monkeypatch.setattr(main, "AUTH_PASSWORD", "export-test-password")
     return TestClient(main.app), testing_session
 
 
-def test_message_csv_export_requires_auth_and_safely_exports_all_thread_fields(monkeypatch):
+def test_message_csv_export_requires_auth_and_safely_exports_allowed_accounts(monkeypatch):
     client, testing_session = _export_client(monkeypatch)
     now = datetime(2026, 8, 30, 12, 30, 0)
     try:
@@ -50,6 +51,12 @@ def test_message_csv_export_requires_auth_and_safely_exports_all_thread_fields(m
                     id="=unsafe-conversation",
                     customer_phone="@unsafe-contact",
                     sms_account_key="secondary",
+                    sla_due_at=now + timedelta(hours=1),
+                ),
+                main.Thread(
+                    id="out-of-scope-conversation",
+                    customer_phone="+61400000000",
+                    sms_account_key="unconfigured-account",
                     sla_due_at=now + timedelta(hours=1),
                 ),
             ])
@@ -69,10 +76,21 @@ def test_message_csv_export_requires_auth_and_safely_exports_all_thread_fields(m
                     text="  =HYPERLINK(\"https://example.invalid\")",
                     at=now + timedelta(seconds=1),
                 ),
+                main.Message(
+                    id="message-out-of-scope",
+                    thread_id="out-of-scope-conversation",
+                    role="customer",
+                    text="Must not be exported",
+                    at=now + timedelta(seconds=2),
+                ),
             ])
             db.commit()
 
         assert client.get("/api/settings/messages/export.csv").status_code == 401
+        assert client.get(
+            "/api/settings/messages/export.csv",
+            headers=_basic_auth("wrong-password"),
+        ).status_code == 401
 
         response = client.get(
             "/api/settings/messages/export.csv",
@@ -80,9 +98,9 @@ def test_message_csv_export_requires_auth_and_safely_exports_all_thread_fields(m
         )
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/csv")
-        assert response.headers["content-disposition"].startswith(
-            'attachment; filename="messages-export-'
-        )
+        disposition = response.headers["content-disposition"]
+        assert disposition.startswith('attachment; filename="messages-export-')
+        assert "; filename*=UTF-8''messages-export-" in disposition
         rows = list(csv.DictReader(io.StringIO(response.text)))
         assert rows == [
             {
@@ -104,6 +122,22 @@ def test_message_csv_export_requires_auth_and_safely_exports_all_thread_fields(m
         ]
     finally:
         main.app.dependency_overrides.clear()
+
+
+def test_safe_csv_cell_blocks_formula_and_control_character_prefixes():
+    for unsafe in (
+        "=formula",
+        "+formula",
+        "-formula",
+        "@formula",
+        " \t=formula",
+        "\tplain text",
+        "\rplain text",
+        "\nplain text",
+    ):
+        assert main._safe_csv_cell(unsafe) == f"'{unsafe}"
+
+    assert main._safe_csv_cell("ordinary text") == "ordinary text"
 
 
 def test_message_csv_export_empty_dataset_returns_header_only(monkeypatch):

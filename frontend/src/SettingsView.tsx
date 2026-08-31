@@ -509,21 +509,23 @@ export default function SettingsView() {
 
   const handleExportMessages = async () => {
     setExportingMessages(true);
+    let downloadUrl: string | null = null;
+    let link: HTMLAnchorElement | null = null;
     try {
       const { blob, filename } = await downloadMessagesCsv();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
+      downloadUrl = URL.createObjectURL(blob);
+      link = document.createElement('a');
+      link.href = downloadUrl;
       link.download = filename;
       document.body.appendChild(link);
       link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
       triggerBanner('success', 'Message CSV export downloaded.');
     } catch (err) {
       console.error(err);
       triggerBanner('error', 'Failed to export messages. Please try again.');
     } finally {
+      link?.remove();
+      if (downloadUrl) URL.revokeObjectURL(downloadUrl);
       setExportingMessages(false);
     }
   };

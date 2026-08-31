@@ -12032,7 +12032,7 @@ def _safe_csv_cell(value: Any) -> str:
     """Prevent exported values from being interpreted as spreadsheet formulas."""
     text = "" if value is None else str(value)
     first_content_character = text.lstrip(" \t\r\n")[:1]
-    if first_content_character in {"=", "+", "-", "@"}:
+    if text[:1] in {"\t", "\r", "\n"} or first_content_character in {"=", "+", "-", "@"}:
         return f"'{text}"
     return text
 
@@ -12041,6 +12041,7 @@ def render_message_export_csv(db: Session) -> str:
     rows = (
         db.query(Message, Thread)
         .join(Thread, Thread.id == Message.thread_id)
+        .filter(Thread.sms_account_key.in_(FIRST_CONTACT_ACCOUNT_KEYS))
         .order_by(Message.at.asc(), Message.id.asc())
         .all()
     )
@@ -12080,7 +12081,11 @@ def export_messages_csv(db: Session = Depends(get_db)):
     return Response(
         content=content,
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{filename}"; filename*=UTF-8\'\'{filename}'
+            )
+        },
     )
 
 

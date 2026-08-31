@@ -13,7 +13,10 @@ test('settings message export uses the authenticated CSV endpoint', () => {
 
   assert.match(exportClient, /apiFetch\(`\$\{API_BASE\}\/api\/settings\/messages\/export\.csv/);
   assert.match(exportClient, /credentials: 'same-origin'/);
+  assert.match(exportClient, /includes\('text\/csv'\)/);
   assert.match(exportClient, /content-disposition/);
+  assert.match(exportClient, /filename\\\*/);
+  assert.match(exportClient, /decodeURIComponent/);
   assert.match(exportClient, /response\.blob\(\)/);
 });
 
@@ -23,4 +26,5 @@ test('settings exposes export progress and clear success and error feedback', ()
   assert.match(settingsSource, /await downloadMessagesCsv\(\)/);
   assert.match(settingsSource, /Message CSV export downloaded/);
   assert.match(settingsSource, /Failed to export messages/);
+  assert.match(settingsSource, /URL\.revokeObjectURL\(downloadUrl\)/);
 });

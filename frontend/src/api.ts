@@ -765,8 +765,23 @@ export async function downloadMessagesCsv(): Promise<{ blob: Blob; filename: str
     const payload = await response.json().catch(() => null);
     throw new Error(payload?.detail || `Message export failed: ${response.statusText}`);
   }
+  if (!response.headers.get('content-type')?.toLowerCase().includes('text/csv')) {
+    throw new Error('Message export returned an unexpected response.');
+  }
   const disposition = response.headers.get('content-disposition') || '';
-  const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || 'messages-export.csv';
+  const encodedFilename = disposition.match(/filename\*\s*=\s*UTF-8''([^;]+)/i)?.[1];
+  const plainFilename = disposition.match(/filename\s*=\s*"([^"]+)"/i)?.[1]
+    || disposition.match(/filename\s*=\s*([^;\s]+)/i)?.[1];
+  let filename = plainFilename || 'messages-export.csv';
+  if (encodedFilename) {
+    try {
+      filename = decodeURIComponent(encodedFilename.trim());
+    } catch {
+      // Keep the safe ASCII filename supplied alongside filename*.
+    }
+  }
+  filename = filename.split(/[\\/]/).pop()?.replace(/[\u0000-\u001f\u007f]/g, '').trim()
+    || 'messages-export.csv';
   return { blob: await response.blob(), filename };
 }
 
