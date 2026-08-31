@@ -998,6 +998,7 @@ class Thread(Base):
     sla_due_at = Column(DateTime, nullable=False)
     unread_count = Column(Integer, default=0, nullable=False)
     auto_reply_enabled = Column(Boolean, default=True, nullable=False)
+    contact_blocked = Column(Boolean, default=False, nullable=False)
     pending_slots = Column(Text, nullable=True) # Legacy field; availability options are never retained.
     pending_booking = Column(Text, nullable=True)  # JSON proposal awaiting explicit customer confirmation
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -1322,6 +1323,7 @@ def init_db():
                             sla_due_at DATETIME NOT NULL,
                             unread_count INTEGER NOT NULL DEFAULT 0,
                             auto_reply_enabled BOOLEAN NOT NULL DEFAULT 1,
+                            contact_blocked BOOLEAN NOT NULL DEFAULT 0,
                             pending_slots TEXT,
                             pending_booking TEXT,
                             created_at DATETIME NOT NULL,
@@ -1331,17 +1333,18 @@ def init_db():
                         )
                     """)
                     pending_booking_expr = "pending_booking" if "pending_booking" in thread_columns else "NULL"
+                    contact_blocked_expr = "contact_blocked" if "contact_blocked" in thread_columns else "0"
                     sms_account_expr = "COALESCE(sms_account_key, 'primary')" if "sms_account_key" in thread_columns else "'primary'"
                     cursor.execute(f"""
                         INSERT INTO threads_dual_sms (
                             id, customer_phone, sms_account_key, state, priority,
                             assigned_agent_id, sla_due_at, unread_count,
-                            auto_reply_enabled, pending_slots, pending_booking,
+                            auto_reply_enabled, contact_blocked, pending_slots, pending_booking,
                             created_at, updated_at
                         )
                         SELECT id, customer_phone, {sms_account_expr}, state, priority,
                                assigned_agent_id, sla_due_at, unread_count,
-                               auto_reply_enabled, pending_slots, {pending_booking_expr},
+                               auto_reply_enabled, {contact_blocked_expr}, pending_slots, {pending_booking_expr},
                                created_at, updated_at
                         FROM threads
                     """)
@@ -1359,6 +1362,10 @@ def init_db():
                     raw.close()
             elif "pending_booking" not in thread_columns:
                 conn.exec_driver_sql("ALTER TABLE threads ADD COLUMN pending_booking TEXT")
+            if "contact_blocked" not in thread_columns and not needs_sms_rebuild:
+                conn.exec_driver_sql(
+                    "ALTER TABLE threads ADD COLUMN contact_blocked BOOLEAN NOT NULL DEFAULT 0"
+                )
             # Availability is authoritative only at the time it is read from the
             # calendar. Older releases retained offered times, which could become stale.
             cleared_pending_slots = conn.exec_driver_sql(
@@ -3267,6 +3274,9 @@ class ResolveInput(BaseModel):
 class AutoresponderInput(BaseModel):
     enabled: bool
 
+class ContactBlockInput(BaseModel):
+    blocked: bool
+
 class FirstContactAutoresponderInput(BaseModel):
     enabled: bool = False
     cooldownDays: int = Field(default=30, ge=1, le=3650)
@@ -4275,6 +4285,31 @@ def toggle_autoresponder(thread_id: str, payload: AutoresponderInput, db: Sessio
     return {"status": "success", "autoReplyEnabled": thread.auto_reply_enabled}
 
 
+@app.post("/api/threads/{thread_id}/contact-block")
+def set_contact_blocked(thread_id: str, payload: ContactBlockInput, db: Session = Depends(get_db)):
+    """Block automated handling for exactly one account-scoped contact thread."""
+    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    thread.contact_blocked = payload.blocked
+    thread.updated_at = datetime.utcnow()
+    db.add(ThreadEvent(
+        id=str(uuid.uuid4()),
+        thread_id=thread.id,
+        type="contact-blocked" if payload.blocked else "contact-unblocked",
+        agent_id=None,
+        meta=json.dumps({
+            "blocked": payload.blocked,
+            "smsAccountKey": thread.sms_account_key,
+        }),
+        at=datetime.utcnow(),
+    ))
+    db.commit()
+
+    return {"status": "success", "contactBlocked": bool(thread.contact_blocked)}
+
+
 @app.get("/api/calendar/bookings")
 def get_bookings(
     db: Session = Depends(get_db),
@@ -4742,6 +4777,9 @@ def run_sms_reply_logic(
     import json
     thread = db.query(Thread).filter(Thread.id == thread_id).first()
     if not thread:
+        return False, False
+    if thread.contact_blocked:
+        print(f"[Conversational AI Skipped] Contact is blocked for {thread_id}.")
         return False, False
     if not account_allows_conversational_ai(thread.sms_account_key):
         print(f"[Conversational AI Skipped] Disabled for {thread.sms_account_key}.")
@@ -5271,6 +5309,20 @@ def run_sms_reply_logic(
     # A newer fragment may arrive while the model is working. The newer job owns
     # the combined reply; this result must not create a draft, failure, or SMS.
     db.expire_all()
+    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+    if not thread or thread.contact_blocked:
+        db.rollback()
+        if thread:
+            db.add(ThreadEvent(
+                id=str(uuid.uuid4()),
+                thread_id=thread_id,
+                type="ai-reply-cancelled",
+                agent_id=None,
+                meta=json.dumps({"reason": "contact-blocked-during-generation"}),
+                at=datetime.utcnow(),
+            ))
+            db.commit()
+        return False, False
     if not is_latest_customer_turn(db, thread_id, provider_message_id, received_at_naive, body):
         db.rollback()
         db.add(ThreadEvent(
@@ -5545,6 +5597,7 @@ def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
         ranked_messages.c.row_number == 1,
         Message.role == "customer",
         Thread.auto_reply_enabled.is_(True),
+        Thread.contact_blocked.is_(False),
         Thread.state.in_(["auto-reply", "resolved", "taken-over"]),
     ).all()
     if not rows:
@@ -5702,6 +5755,9 @@ def _process_first_contact_auto_reply(
             return
         if human_replied_after(db, thread_id, customer_message.at):
             print(f"[First Contact Delay] Human already replied on {thread_id}. Reply canceled.")
+            return
+        if thread.contact_blocked:
+            print(f"[First Contact Delay] Contact is blocked for {thread_id}. Reply canceled.")
             return
         if not thread.auto_reply_enabled or thread.state == "taken-over":
             print(f"[First Contact Delay] Automatic replies are off for {thread_id}. Reply canceled.")
@@ -6636,6 +6692,10 @@ def _process_sms_reply_unlocked(
             print(f"[Conversational AI Delay] Thread auto_reply_enabled is false. Reply cancelled for {thread_id}.")
             return
 
+        if thread.contact_blocked:
+            print(f"[Conversational AI Delay] Contact is blocked for {thread_id}. Reply cancelled.")
+            return
+
         if thread.state == "taken-over":
             print(f"[Conversational AI Delay] Thread is taken over. Reply cancelled for {thread_id}.")
             return
@@ -6830,6 +6890,7 @@ def process_inbound_sms(
             thread.state = "auto-reply"
     if (
         thread
+        and not thread.contact_blocked
         and first_contact_config["enabled"]
         and first_contact_config["message"]
         and thread.auto_reply_enabled
@@ -6861,6 +6922,7 @@ def process_inbound_sms(
         first_contact_eligible = (
             first_contact_config["enabled"]
             and bool(first_contact_config["message"])
+            and not thread.contact_blocked
             and thread.auto_reply_enabled
             and thread.state != "taken-over"
         )
@@ -6876,7 +6938,7 @@ def process_inbound_sms(
     )
     db.add(customer_message)
 
-    if is_clear_customer_arrival(payload.body):
+    if not thread.contact_blocked and is_clear_customer_arrival(payload.body):
         record_customer_arrival_event(
             db,
             thread,
@@ -6887,7 +6949,12 @@ def process_inbound_sms(
     # Increment unread_count
     thread.unread_count += 1
     thread.updated_at = datetime.utcnow()
-    if not AUTO_REPLY_GLOBAL_ENABLED and thread.auto_reply_enabled and thread.state != "taken-over":
+    if (
+        not thread.contact_blocked
+        and not AUTO_REPLY_GLOBAL_ENABLED
+        and thread.auto_reply_enabled
+        and thread.state != "taken-over"
+    ):
         db.add(ThreadEvent(
             id=str(uuid.uuid4()),
             thread_id=thread.id,
@@ -6897,7 +6964,27 @@ def process_inbound_sms(
             at=received_at_naive,
         ))
     db.commit()
-    
+
+    if thread.contact_blocked:
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread.id,
+            type="automated-handling-skipped",
+            agent_id=None,
+            meta=json.dumps({
+                "message_id": customer_message.id,
+                "reason": "contact-blocked",
+                "sms_account_key": thread.sms_account_key,
+            }),
+            at=received_at_naive,
+        ))
+        db.commit()
+        return {
+            "status": "success",
+            "thread_id": thread.id,
+            "contact_blocked": True,
+        }
+
     is_testing = "pytest" in sys.modules or any("test" in arg for arg in sys.argv)
     if first_contact_eligible:
         background_tasks.add_task(
@@ -7142,6 +7229,7 @@ def get_threads(
             "assignedAgentName": assigned_agent_name,
             "assignedAgentId": t.assigned_agent_id,
             "autoReplyEnabled": t.auto_reply_enabled,
+            "contactBlocked": bool(t.contact_blocked),
             "sla": {
                 "dueAt": format_dt(t.sla_due_at),
                 "level": t.priority
@@ -7292,6 +7380,7 @@ def get_thread_detail(thread_id: str, db: Session = Depends(get_db)):
         "state": thread.state,
         "assignedAgent": assigned_agent,
         "autoReplyEnabled": thread.auto_reply_enabled,
+        "contactBlocked": bool(thread.contact_blocked),
         "pendingArrivalSessionId": pending_arrival.id if pending_arrival else None,
         "pendingArrivalEventId": pending_arrival.arrival_event_id if pending_arrival else None,
         "pendingArrivalAt": format_dt(pending_arrival.activated_at) if pending_arrival else None,

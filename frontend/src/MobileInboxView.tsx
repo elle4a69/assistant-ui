@@ -18,6 +18,7 @@ import {
   listArrivalSessions,
   listThreads,
   sendThreadReply,
+  setContactBlocked,
   toggleAutoresponder,
   updateSettings,
   catchUpMissedMessage,
@@ -76,6 +77,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const [loading, setLoading] = useState(true)
   const [sending, setSending] = useState(false)
   const [changingThreadAi, setChangingThreadAi] = useState(false)
+  const [changingContactBlock, setChangingContactBlock] = useState(false)
   const [catchingUp, setCatchingUp] = useState(false)
   const [notice, setNotice] = useState('')
   const [reviewingDraftId, setReviewingDraftId] = useState<string | null>(null)
@@ -416,6 +418,32 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
       setError('Could not change AI for this conversation')
     } finally {
       setChangingThreadAi(false)
+    }
+  }
+
+  const toggleContactBlock = async () => {
+    if (!thread || changingContactBlock) return
+    const blocked = !thread.contactBlocked
+    if (
+      blocked
+      && !window.confirm(`Block ${contactLabel(thread.customerPhone)}? Automated handling and replies will stop for this contact on this SMS line.`)
+    ) return
+
+    const threadId = thread.id
+    setChangingContactBlock(true)
+    setThread(current => current?.id === threadId ? { ...current, contactBlocked: blocked } : current)
+    try {
+      const result = await setContactBlocked(threadId, blocked)
+      setThread(current => current?.id === threadId
+        ? { ...current, contactBlocked: result.contactBlocked }
+        : current)
+      await loadThreads()
+      setError('')
+    } catch (err) {
+      setThread(current => current?.id === threadId ? { ...current, contactBlocked: !blocked } : current)
+      setError(err instanceof Error ? err.message : 'Could not change contact block status')
+    } finally {
+      setChangingContactBlock(false)
     }
   }
 
@@ -820,6 +848,20 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                 >
                   <CalendarPlus className="h-3 w-3" /> Booking
                 </button>
+                <label className="ml-auto flex items-center gap-1.5 text-[10px] font-extrabold text-slate-500">
+                  {thread?.contactBlocked ? 'Unblock contact' : 'Block contact'}
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-label={thread?.contactBlocked ? 'Unblock contact' : 'Block contact'}
+                    aria-checked={thread?.contactBlocked ?? false}
+                    disabled={changingContactBlock || !thread}
+                    onClick={toggleContactBlock}
+                    className={`relative h-4 w-7 rounded-full p-0 transition-colors ${thread?.contactBlocked ? 'bg-rose-500' : 'bg-slate-300'}`}
+                  >
+                    <span className={`absolute left-0.5 top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${thread?.contactBlocked ? 'translate-x-3' : 'translate-x-0'}`} />
+                  </button>
+                </label>
               </div>
               <div className="flex items-end gap-2">
                 <textarea

@@ -88,6 +88,7 @@ export interface ThreadListItem {
   assignedAgentId: string | null;
   sla: ThreadSLA;
   autoReplyEnabled: boolean;
+  contactBlocked: boolean;
 }
 
 export interface Message {
@@ -127,6 +128,7 @@ export interface ThreadDetail {
   notes: Note[];
   events: ThreadEvent[];
   autoReplyEnabled: boolean;
+  contactBlocked: boolean;
   pendingArrivalSessionId: string | null;
   pendingArrivalEventId: string | null;
   pendingArrivalAt: string | null;
@@ -459,6 +461,19 @@ export async function toggleAutoresponder(threadId: string, enabled: boolean): P
   });
   if (!response.ok) {
     throw new Error(`Failed to toggle autoresponder: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function setContactBlocked(threadId: string, blocked: boolean): Promise<{ status: string; contactBlocked: boolean }> {
+  const response = await apiFetch(`${API_BASE}/api/threads/${threadId}/contact-block`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ blocked }),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || 'Failed to change contact block status');
   }
   return response.json();
 }
