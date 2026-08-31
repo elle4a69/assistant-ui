@@ -9290,6 +9290,28 @@ def _operations_code_task_guard(timeout_seconds: Optional[float] = None):
             _operations_code_task_lock.release()
 
 
+def _operations_request_immediate_worker() -> Dict[str, Any]:
+    """Best-effort wake-up after commit; never undo or misreport queued work."""
+    try:
+        operations_github_client.dispatch_workflow()
+    except Exception as exc:
+        # Even an unexpected transport failure must not turn a durable queue
+        # submission into a reported failure that invites duplicate work.
+        logger.warning("Operations immediate worker request failed (%s); scheduled recovery remains active.", type(exc).__name__)
+        return {
+            "worker_requested": False,
+            "worker_request_error": (
+                str(exc) if isinstance(exc, OperationsGitHubError)
+                else "The immediate GitHub worker request could not be completed."
+            ),
+            "worker_request_message": "The immediate worker request failed; the five-minute scheduled queue remains active as recovery.",
+        }
+    return {
+        "worker_requested": True,
+        "worker_request_message": "An immediate GitHub worker was requested; the five-minute scheduled queue remains active as recovery.",
+    }
+
+
 def _operations_start_coding_task(
     db: Session,
     title: str,
@@ -9359,15 +9381,17 @@ def _operations_start_coding_task(
         )
         db.add(action)
         db.commit()
+    worker_request = _operations_request_immediate_worker()
     return {
         "status": "started",
+        **worker_request,
         # Use the pre-commit identifier.  A successful commit must never be
         # reported as failed because of a post-commit refresh/read.
         "task_id": action_id,
         "title": title,
         "isolation": "GitHub-hosted runner with a dedicated review branch",
         "deployment": "not authorised; this task cannot change main or deploy",
-        "next_step": "The GitHub queue collects tasks every five minutes; use inspect_coding_task to check progress.",
+        "next_step": worker_request["worker_request_message"] + " Use inspect_coding_task to check progress.",
     }
 
 
@@ -9817,11 +9841,13 @@ def _operations_execute_code_deployment(
             action.executed_at = datetime.utcnow()
             db.commit()
             return {"status": "failed", "action_id": action.id, "reason": str(exc)}
+    worker_request = _operations_request_immediate_worker()
     return {
         "status": "deployment_queued",
-        "action_id": action.id,
+        **worker_request,
+        "action_id": action_id,
         "commit": expected_commit,
-        "next_step": "The GitHub queue will promote this commit, then use inspect_deployments to verify Fly health.",
+        "next_step": worker_request["worker_request_message"] + " Use inspect_deployments to verify promotion and Fly health.",
     }
 
 

@@ -1,8 +1,9 @@
-"""Bounded, read-only GitHub transport for Operations AI cloud tasks.
+"""Bounded GitHub transport for Operations AI cloud tasks.
 
 The production application uses this client to verify GitHub-hosted queue
-workers and inspect their review branches. Repository writes are performed by
-short-lived GitHub Actions job tokens, never by the production application.
+workers, request an immediate queue worker and inspect review branches.
+Repository content writes are performed by short-lived GitHub Actions job
+tokens, never by the production application.
 This client never logs or returns its configured GitHub token.
 """
 
@@ -163,6 +164,20 @@ class OperationsGitHubClient:
         if not isinstance(value, dict):
             raise OperationsGitHubError("GitHub returned an unexpected response.")
         return value
+
+    def dispatch_workflow(self) -> None:
+        """Wake only the trusted Operations queue on main, without task inputs.
+
+        Dispatch does not authorise coding or deployment: the worker must still
+        authenticate and atomically claim an already-audited backend action.
+        """
+        repository = self._validated_configuration().repository
+        self._request(
+            "POST",
+            f"/repos/{repository}/actions/workflows/{OPERATIONS_CODE_WORKFLOW}/dispatches",
+            {"ref": "main"},
+            timeout_seconds=5.0,
+        )
 
     def list_workflow_runs(
         self,

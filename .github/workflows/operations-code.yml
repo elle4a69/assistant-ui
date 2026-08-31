@@ -15,9 +15,8 @@ permissions:
   id-token: write
   statuses: write
 
-concurrency:
-  group: operations-cloud-coding
-  cancel-in-progress: false
+# The backend atomic queue claim is the sole single-task guard. Overlapping
+# wake-ups must be free to claim work or reconcile an earlier failed worker.
 
 jobs:
   process-queue:
@@ -123,7 +122,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: main
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Python
@@ -194,7 +193,9 @@ jobs:
       - name: Create isolated review branch
         if: env.WORK_KIND == 'coding'
         shell: bash
-        run: git switch --create "$TASK_BRANCH"
+        run: |
+          git switch --create "$TASK_BRANCH"
+          echo "OPERATIONS_REVIEW_BASE=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Install worker and project dependencies
         if: env.WORK_KIND == 'coding'
@@ -237,20 +238,48 @@ jobs:
             - < "$RUNNER_TEMP/operations-prompt.txt"
           unset CODEX_API_KEY
 
+      - name: Rebase worker changes onto current main
+        if: env.WORK_KIND == 'coding'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$OPERATIONS_REVIEW_BASE"
+          gh auth setup-git
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          latest_main=$(git rev-parse refs/remotes/origin/main)
+          temporary_commit=false
+          if [ "$latest_main" != "$OPERATIONS_REVIEW_BASE" ]; then
+            git config user.name "Tori Operations AI"
+            git config user.email "operations-ai@users.noreply.github.com"
+            git add -A
+            git commit --allow-empty -m "Temporary Operations worker changes before rebase"
+            # Keep an empty result as a review commit; never amend main itself.
+            # A real conflict must fail, with no automatic conflict resolution.
+            git rebase --empty=keep --reapply-cherry-picks "$latest_main"
+            temporary_commit=true
+          fi
+          echo "OPERATIONS_REVIEW_BASE=$latest_main" >> "$GITHUB_ENV"
+          echo "OPERATIONS_TEMP_COMMIT=$temporary_commit" >> "$GITHUB_ENV"
+
       - name: Run independent application checks
         if: env.WORK_KIND == 'coding'
         shell: bash
         run: |
+          set -euo pipefail
           python -m pytest backend -q
           npm run build --prefix frontend
-          git diff --check
+          git diff --check "$OPERATIONS_REVIEW_BASE"
 
       - name: Validate and commit bounded changes
         if: env.WORK_KIND == 'coding'
         shell: bash
         run: |
+          set -euo pipefail
           git add -A
           python - <<'PY'
+          import os
           import re
           import subprocess
           from pathlib import PurePosixPath
@@ -265,8 +294,9 @@ jobs:
               "node_modules",
           }
           blocked_names = {".env", "credentials.json", "service_account.json", "settings.json"}
+          base = os.environ["OPERATIONS_REVIEW_BASE"]
           names_raw = subprocess.check_output(
-              ["git", "-c", "core.quotepath=false", "diff", "--cached", "--name-only", "-z"]
+              ["git", "-c", "core.quotepath=false", "diff", "--cached", base, "--name-only", "-z"]
           )
           names = [item.decode("utf-8") for item in names_raw.split(b"\0") if item]
           if len(names) > 100:
@@ -283,7 +313,7 @@ jobs:
               if path.name not in allowed_names and path.suffix.lower() not in allowed_suffixes:
                   raise SystemExit(f"Unsupported changed file type: {raw}")
 
-          diff_raw = subprocess.check_output(["git", "diff", "--cached", "--unified=0", "--no-ext-diff"])
+          diff_raw = subprocess.check_output(["git", "diff", "--cached", base, "--unified=0", "--no-ext-diff"])
           if len(diff_raw) > 2_000_000:
               raise SystemExit("The coding task diff is too large")
           added_lines = "\n".join(
@@ -301,10 +331,17 @@ jobs:
           if any(re.search(pattern, added_lines) for pattern in secret_patterns):
               raise SystemExit("The coding result contains a secret-shaped value")
           PY
-          git diff --cached --check
+          git diff --cached --check "$OPERATIONS_REVIEW_BASE"
           git config user.name "Tori Operations AI"
           git config user.email "operations-ai@users.noreply.github.com"
-          git commit --allow-empty --file "$RUNNER_TEMP/operations-commit-message.txt"
+          if [ "$OPERATIONS_TEMP_COMMIT" = "true" ]; then
+            test "$(git rev-list --count "$OPERATIONS_REVIEW_BASE..HEAD")" = "1"
+            test "$(git rev-parse HEAD^)" = "$OPERATIONS_REVIEW_BASE"
+            git commit --amend --allow-empty --file "$RUNNER_TEMP/operations-commit-message.txt"
+          else
+            test "$(git rev-parse HEAD)" = "$OPERATIONS_REVIEW_BASE"
+            git commit --allow-empty --file "$RUNNER_TEMP/operations-commit-message.txt"
+          fi
 
       - name: Push review branch only
         if: env.WORK_KIND == 'coding'
