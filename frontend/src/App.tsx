@@ -35,7 +35,9 @@ class BootcampErrorBoundary extends Component<{ children: ReactNode }, { failed:
 
 function PortalApp({ onLogout }: { onLogout: () => void }) {
   const isEmbeddedBooking = typeof window !== 'undefined' && window.location.pathname.startsWith('/v2');
-  const isStandaloneBooking = typeof window !== 'undefined' && (window.location.pathname === '/booking' || isEmbeddedBooking);
+  const isBookingRoute = typeof window !== 'undefined' && window.location.pathname === '/booking';
+  const [bookingAdminAuthenticated, setBookingAdminAuthenticated] = useState(false);
+  const isStandaloneBooking = isEmbeddedBooking || (isBookingRoute && !bookingAdminAuthenticated);
   const isStandaloneArrival = typeof window !== 'undefined' && window.location.pathname === '/arrival';
   const initialPath = typeof window !== 'undefined' ? window.location.pathname : '/';
 
@@ -61,6 +63,21 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
       : initialPath === '/settings' ? 'settings'
       : 'agent'
   )
+
+  useEffect(() => {
+    if (!isBookingRoute || isEmbeddedBooking) return;
+    let active = true;
+    void getAdminAuthStatus()
+      .then(result => {
+        if (active) setBookingAdminAuthenticated(result.authenticated);
+      })
+      .catch(() => {
+        if (active) setBookingAdminAuthenticated(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [isBookingRoute, isEmbeddedBooking]);
 
   // Listen to browser history navigation (back/forward buttons)
   useEffect(() => {

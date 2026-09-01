@@ -45,6 +45,14 @@ test('installed PWA anchors to the viewport without double-counting the lower in
   assert.match(styles, /html, body, #root \{[\s\S]*background-color: #0f172a/);
 });
 
+test('authenticated internal booking form restores the app menu without exposing it in public embeds', () => {
+  assert.match(app, /const isBookingRoute =[^\n]+window\.location\.pathname === '\/booking'/);
+  assert.match(app, /const \[bookingAdminAuthenticated, setBookingAdminAuthenticated\] = useState\(false\)/);
+  assert.match(app, /getAdminAuthStatus\(\)[\s\S]*setBookingAdminAuthenticated\(result\.authenticated\)/);
+  assert.match(app, /isStandaloneBooking = isEmbeddedBooking \|\| \(isBookingRoute && !bookingAdminAuthenticated\)/);
+  assert.match(app, /window\.location\.pathname\.startsWith\('\/v2'\)/);
+});
+
 test('Return inserts a new line and sending requires the Send button', () => {
   assert.match(inbox, /enterKeyHint="enter"/);
   assert.doesNotMatch(inbox, /requestSubmit\(\)/);
