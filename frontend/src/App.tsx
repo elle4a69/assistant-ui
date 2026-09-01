@@ -399,7 +399,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
       {/* Mobile Bottom Navigation Bar (the final row of the full-height app) */}
       {!isStandalone && (
         <nav data-testid="mobile-bottom-nav" className="mobile-bottom-nav flex h-16 w-full shrink-0 border-t border-slate-800 bg-slate-900 text-white shadow-lg sm:hidden z-40 select-none">
-          <div className="flex w-full items-center justify-around px-1 overflow-x-auto">
+          <div className="mobile-bottom-nav-items flex w-full items-center justify-around px-1 overflow-x-auto">
             {[
               { id: 'agent', label: 'Console', icon: <UserCheck className="w-4.5 h-4.5" />, action: () => navigateTo('agent', '/') },
               { id: 'runner', label: 'Agent', icon: <SquareTerminal className="w-4.5 h-4.5" />, action: () => navigateTo('runner', '/agent-console') },

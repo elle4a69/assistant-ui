@@ -50,6 +50,8 @@ test('installed iOS PWA offsets the measured lower viewport gap with a negative 
   assert.match(app, /PWA_BOTTOM_GAP_LIMIT = 120/);
   assert.match(app, /--pwa-bottom-gap/);
   assert.match(styles, /\.mobile-bottom-nav \{[\s\S]*margin-bottom: calc\(-1 \* var\(--pwa-bottom-gap, 0px\)\)/);
+  assert.match(app, /className="mobile-bottom-nav-items flex/);
+  assert.match(styles, /\.mobile-bottom-nav-items \{[\s\S]*transform: translateY\(var\(--pwa-bottom-gap, 0px\)\)/);
 });
 
 test('authenticated internal booking form restores the app menu without exposing it in public embeds', () => {
