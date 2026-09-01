@@ -27,15 +27,6 @@ html, body, #root {
   background-color: #0f172a;
 }
 
-/* Pull the installed iOS PWA navigation into WebKit's lower viewport gap. */
-.mobile-bottom-nav {
-  margin-bottom: calc(-1 * var(--pwa-bottom-gap, 0px));
-}
-
-.mobile-bottom-nav-items {
-  transform: translateY(var(--pwa-bottom-gap, 0px));
-}
-
 html, body {
   overscroll-behavior: none;
   overscroll-behavior-y: none;
