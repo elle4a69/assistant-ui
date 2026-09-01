@@ -4,6 +4,7 @@ import test from 'node:test';
 
 const inbox = await readFile(new URL('../src/MobileInboxView.tsx', import.meta.url), 'utf8');
 const app = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
+const styles = await readFile(new URL('../src/index.css', import.meta.url), 'utf8');
 const settings = await readFile(new URL('../src/SettingsView.tsx', import.meta.url), 'utf8');
 const api = await readFile(new URL('../src/api.ts', import.meta.url), 'utf8');
 
@@ -35,6 +36,14 @@ test('mobile composer grows above controls and the app nav occupies the bottom r
   assert.match(app, /data-testid="mobile-bottom-nav"/);
   assert.doesNotMatch(app, /overflow-hidden pb-16 sm:pb-0/);
   assert.doesNotMatch(app, /sm:hidden fixed bottom-0/);
+});
+
+test('installed PWA fills the lower safe area and Return inserts a new line', () => {
+  assert.match(app, /h-\[calc\(4rem\+env\(safe-area-inset-bottom\)\)\]/);
+  assert.match(app, /pb-\[env\(safe-area-inset-bottom\)\]/);
+  assert.match(styles, /html, body, #root \{[\s\S]*background-color: #0f172a/);
+  assert.match(inbox, /enterKeyHint="enter"/);
+  assert.doesNotMatch(inbox, /requestSubmit\(\)/);
 });
 
 test('Settings lists blocked callers by SMS account and can unblock them', () => {

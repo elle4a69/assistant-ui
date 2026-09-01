@@ -864,12 +864,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                   data-testid="message-composer"
                   value={composer}
                   onChange={event => setComposer(event.target.value)}
-                  onKeyDown={event => {
-                    if (event.key === 'Enter' && !event.shiftKey) {
-                      event.preventDefault()
-                      event.currentTarget.form?.requestSubmit()
-                    }
-                  }}
+                  enterKeyHint="enter"
                   rows={1}
                   placeholder="Message"
                   className="max-h-36 min-h-11 flex-1 resize-none overflow-y-hidden rounded-3xl border border-slate-300 bg-slate-50 px-4 py-2.5 text-[15px] outline-none focus:border-emerald-500 focus:bg-white"
