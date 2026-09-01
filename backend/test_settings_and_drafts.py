@@ -118,6 +118,39 @@ def test_line_profiles_persist_and_supply_line_variables(monkeypatch, tmp_path):
     assert main.get_line_business_variable_values("secondary")["line_provider_name"] == "Anonymous"
 
 
+def test_quick_replies_are_saved_independently_per_sms_line(monkeypatch, tmp_path):
+    quick_replies_path = tmp_path / "quick_replies.json"
+    monkeypatch.setattr(main, "QUICK_REPLIES_PATH", str(quick_replies_path))
+
+    defaults = main.get_quick_replies("primary")
+    result = main.update_quick_reply(
+        "primary",
+        0,
+        main.QuickReplyInput(label="PLACE", content="12 Example Street\nMelbourne VIC"),
+    )
+
+    assert [reply["label"] for reply in defaults["replies"]] == ["ADDR", "LINK", "INFO"]
+    assert result["replies"][0] == {
+        "label": "PLACE",
+        "content": "12 Example Street\nMelbourne VIC",
+    }
+    assert main.get_quick_replies("secondary")["replies"] == [
+        {"label": "ADDR", "content": ""},
+        {"label": "LINK", "content": ""},
+        {"label": "INFO", "content": ""},
+    ]
+    assert json.loads(quick_replies_path.read_text(encoding="utf-8"))["accounts"]["primary"][0]["label"] == "PLACE"
+
+
+def test_quick_reply_rejects_unknown_slot(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "QUICK_REPLIES_PATH", str(tmp_path / "quick_replies.json"))
+
+    with pytest.raises(main.HTTPException) as error:
+        main.update_quick_reply("primary", 3, main.QuickReplyInput(label="INFO", content="Saved text"))
+
+    assert error.value.status_code == 404
+
+
 def test_clear_pending_drafts_removes_all_drafts_and_updates_threads():
     db = make_db()
     add_thread(db, "thread-001")

@@ -540,6 +540,38 @@ export async function getFreeBusy(duration?: number): Promise<FreeBusySlot[]> {
   return response.json();
 }
 
+export interface QuickReply {
+  label: string;
+  content: string;
+}
+
+export async function getQuickReplies(accountKey: 'primary' | 'secondary'): Promise<QuickReply[]> {
+  const response = await apiFetch(`${API_BASE}/api/settings/quick-replies/${accountKey}`, { cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error(`Failed to load quick replies: ${response.statusText}`);
+  }
+  const payload: { replies: QuickReply[] } = await response.json();
+  return payload.replies;
+}
+
+export async function saveQuickReply(
+  accountKey: 'primary' | 'secondary',
+  slotIndex: number,
+  reply: QuickReply,
+): Promise<QuickReply[]> {
+  const response = await apiFetch(`${API_BASE}/api/settings/quick-replies/${accountKey}/${slotIndex}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(reply),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Failed to save quick reply: ${response.statusText}`);
+  }
+  const payload: { replies: QuickReply[] } = await response.json();
+  return payload.replies;
+}
+
 export interface SystemSettings {
   openaiApiKey: string;
   systemPrompt: string;
