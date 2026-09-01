@@ -564,19 +564,6 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
 
           {/* Right: compact actions and Training Mode */}
           <div className="flex shrink-0 items-center justify-end gap-1">
-            {thread && (
-              <button
-                type="button"
-                onClick={togglePinned}
-                disabled={changingPinned}
-                aria-pressed={thread.pinned}
-                aria-label={thread.pinned ? 'Unpin conversation' : 'Pin conversation'}
-                title={thread.pinned ? 'Unpin conversation' : 'Pin conversation'}
-                className={`grid h-8 w-8 place-items-center rounded-full ${thread.pinned ? 'bg-indigo-100 text-indigo-700' : 'text-slate-500'}`}
-              >
-                <Pin className={`h-4 w-4 ${thread.pinned ? 'fill-current' : ''}`} />
-              </button>
-            )}
             {!selectedId && (
               <button
                 type="button"
@@ -609,6 +596,33 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
             </label>
           </div>
         </header>
+
+        {thread && (
+          <div className="flex shrink-0 items-center justify-center gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2" aria-label="Conversation controls">
+            <button
+              type="button"
+              onClick={togglePinned}
+              disabled={changingPinned}
+              aria-pressed={thread.pinned}
+              aria-label={changingPinned ? 'Updating pinned conversation' : thread.pinned ? 'Unpin conversation' : 'Pin conversation'}
+              className={`inline-flex min-h-9 items-center justify-center gap-1.5 rounded-lg border px-3 text-xs font-bold disabled:cursor-not-allowed disabled:opacity-50 ${thread.pinned ? 'border-indigo-200 bg-indigo-100 text-indigo-700' : 'border-slate-300 bg-white text-slate-700'}`}
+            >
+              {changingPinned ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Pin className={`h-3.5 w-3.5 ${thread.pinned ? 'fill-current' : ''}`} />}
+              {changingPinned ? (thread.pinned ? 'Unpinning…' : 'Pinning…') : thread.pinned ? 'Unpin' : 'Pin'}
+            </button>
+            <button
+              type="button"
+              onClick={toggleBlocked}
+              disabled={changingBlocked}
+              aria-pressed={thread.blocked}
+              aria-label={changingBlocked ? 'Updating blocked contact' : thread.blocked ? 'Unblock contact' : 'Block contact'}
+              className={`inline-flex min-h-9 items-center justify-center gap-1.5 rounded-lg border px-3 text-xs font-bold disabled:cursor-not-allowed disabled:opacity-50 ${thread.blocked ? 'border-rose-200 bg-rose-100 text-rose-700' : 'border-slate-300 bg-white text-slate-700'}`}
+            >
+              {changingBlocked ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Ban className="h-3.5 w-3.5" />}
+              {changingBlocked ? (thread.blocked ? 'Unblocking…' : 'Blocking…') : thread.blocked ? 'Unblock' : 'Block'}
+            </button>
+          </div>
+        )}
 
         <span className="sr-only" aria-live="polite">{notice}</span>
 
@@ -872,15 +886,6 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                     <span className={`absolute left-0.5 top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${thread?.autoReplyEnabled ? 'translate-x-3' : 'translate-x-0'}`} />
                   </button>
                 </label>
-                <button
-                  type="button"
-                  onClick={toggleBlocked}
-                  disabled={changingBlocked || !thread}
-                  aria-pressed={thread?.blocked ?? false}
-                  className={`ml-auto flex h-6 items-center gap-1 rounded-md px-2 text-[10px] font-extrabold ${thread?.blocked ? 'bg-rose-100 text-rose-700' : 'text-slate-500'}`}
-                >
-                  <Ban className="h-3 w-3" /> {thread?.blocked ? 'Blocked · Unblock' : 'Block'}
-                </button>
                 <button
                   type="button"
                   onClick={openBookingForThread}

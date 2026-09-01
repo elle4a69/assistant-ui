@@ -257,6 +257,8 @@ export default function SettingsView() {
   });
   const [savingFirstContact, setSavingFirstContact] = useState(false);
   const [blockedContacts, setBlockedContacts] = useState<BlockedContact[]>([]);
+  const [loadingBlockedContacts, setLoadingBlockedContacts] = useState(true);
+  const [blockedContactsError, setBlockedContactsError] = useState(false);
   const [unblockingContactId, setUnblockingContactId] = useState<string | null>(null);
 
   // Banners
@@ -266,6 +268,19 @@ export default function SettingsView() {
     setBanner({ type, message });
     setTimeout(() => setBanner(null), 5000);
   };
+
+  const loadBlockedContacts = useCallback(async () => {
+    setLoadingBlockedContacts(true);
+    setBlockedContactsError(false);
+    try {
+      setBlockedContacts(await retryOnce(listBlockedContacts));
+    } catch (error) {
+      console.error('blocked contacts fetch failed:', error);
+      setBlockedContactsError(true);
+    } finally {
+      setLoadingBlockedContacts(false);
+    }
+  }, []);
 
   // Fetch initial data — load independently so one failure doesn't blank everything
   const loadAllSettings = useCallback(async () => {
@@ -303,8 +318,8 @@ export default function SettingsView() {
     try { setFirstContactConfig(await retryOnce(getFirstContactAutoresponder)); } catch (e) { console.error('first-contact auto-responder fetch failed:', e); }
     try { setLineProfiles(await retryOnce(getSmsLineProfiles)); } catch (e) { console.error('line profile fetch failed:', e); }
     try { setLearnedEntries(await retryOnce(listLearnedInformation)); } catch (e) { console.error('learned rules fetch failed:', e); }
-    try { setBlockedContacts(await retryOnce(listBlockedContacts)); } catch (e) { console.error('blocked contacts fetch failed:', e); }
-  }, []);
+    await loadBlockedContacts();
+  }, [loadBlockedContacts]);
 
   const fetchKnowledgeFilesList = useCallback(async () => {
     setLoadingFiles(true);
@@ -1639,17 +1654,32 @@ export default function SettingsView() {
             </details>
 
             {/* Blocked SMS contacts */}
-            <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+            <details id="blocked-contacts" name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
               <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
                 <Ban className="w-5 h-5 text-rose-600" />
                 <div>
-                  <h2 className="font-bold text-slate-800 text-sm">Blocked callers</h2>
-                  <p className="text-[10px] text-slate-500">Automated SMS handling is suppressed only for the contact and line shown.</p>
+                  <h2 className="font-bold text-slate-800 text-sm">Blocked contacts / numbers</h2>
+                  <p className="text-[10px] text-slate-500">View and unblock SMS contacts. Automated handling is suppressed only for the contact and line shown.</p>
                 </div>
               </summary>
               <div className="p-3 sm:p-5">
-                {blockedContacts.length === 0 ? (
-                  <p className="text-xs text-slate-500">No blocked callers.</p>
+                {loadingBlockedContacts ? (
+                  <p className="flex items-center gap-2 text-xs font-semibold text-slate-500" role="status">
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" /> Loading blocked contacts…
+                  </p>
+                ) : blockedContactsError ? (
+                  <div className="flex flex-col items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">
+                    <p>Blocked contacts could not be loaded.</p>
+                    <button
+                      type="button"
+                      onClick={loadBlockedContacts}
+                      className="rounded-lg border border-rose-300 bg-white px-3 py-1.5 text-[10px] font-bold hover:bg-rose-100"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : blockedContacts.length === 0 ? (
+                  <p className="text-xs text-slate-500">No blocked contacts or numbers.</p>
                 ) : (
                   <div className="divide-y divide-slate-100 rounded-lg border border-slate-200">
                     {blockedContacts.map(contact => (
@@ -1663,9 +1693,10 @@ export default function SettingsView() {
                           type="button"
                           onClick={() => handleUnblockContact(contact)}
                           disabled={unblockingContactId === contact.id}
-                          className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-[10px] font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                          aria-label={`Unblock ${contact.customerPhone} on ${contact.smsAccountKey === 'secondary' ? 'SMS Line 2' : 'SMS Line 1'}`}
+                          className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-[10px] font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                         >
-                          {unblockingContactId === contact.id ? 'Unblocking...' : 'Unblock'}
+                          {unblockingContactId === contact.id ? 'Unblocking…' : 'Unblock'}
                         </button>
                       </div>
                     ))}
