@@ -40,8 +40,10 @@ test('mobile composer grows above controls and the app nav occupies the bottom r
 test('installed PWA fixes the menu background to the bottom and keeps controls above the safe area', () => {
   assert.match(app, /isEmbeddedBooking \? 'min-h-0 overflow-visible' : 'fixed inset-0 overflow-hidden'/);
   assert.match(app, /data-testid="mobile-bottom-nav" className="fixed bottom-0 left-0 right-0/);
-  assert.match(app, /h-\[calc\(4rem\+env\(safe-area-inset-bottom,0px\)\)\]/);
   assert.match(app, /pb-\[env\(safe-area-inset-bottom,0px\)\]/);
+  assert.doesNotMatch(app, /mobile-bottom-nav[^\n]+h-\[calc\(4rem\+env\(safe-area-inset-bottom,0px\)\)\]/);
+  assert.match(app, /className="flex h-16 w-full items-center justify-around px-1 overflow-x-auto/);
+  assert.match(app, /\[scrollbar-width:none\] \[-ms-overflow-style:none\] \[&::\-webkit-scrollbar\]:hidden/);
   assert.match(styles, /html, body, #root \{[\s\S]*background-color: #0f172a/);
 });
 

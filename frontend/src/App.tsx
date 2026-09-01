@@ -365,8 +365,8 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
 
       {/* Fixed mobile navigation paints to the physical bottom; controls stay above the Home Indicator. */}
       {!isStandalone && (
-        <nav data-testid="mobile-bottom-nav" className="fixed bottom-0 left-0 right-0 z-40 flex h-[calc(4rem+env(safe-area-inset-bottom,0px))] w-full border-t border-slate-800 bg-slate-900 pb-[env(safe-area-inset-bottom,0px)] text-white shadow-lg sm:hidden select-none">
-          <div className="flex w-full items-center justify-around px-1 overflow-x-auto">
+        <nav data-testid="mobile-bottom-nav" className="fixed bottom-0 left-0 right-0 z-40 w-full border-t border-slate-800 bg-slate-900 pb-[env(safe-area-inset-bottom,0px)] text-white shadow-lg sm:hidden select-none">
+          <div className="flex h-16 w-full items-center justify-around px-1 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
             {[
               { id: 'agent', label: 'Console', icon: <UserCheck className="w-4.5 h-4.5" />, action: () => navigateTo('agent', '/') },
               { id: 'runner', label: 'Agent', icon: <SquareTerminal className="w-4.5 h-4.5" />, action: () => navigateTo('runner', '/agent-console') },
