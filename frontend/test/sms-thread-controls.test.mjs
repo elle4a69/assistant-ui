@@ -34,14 +34,14 @@ test('mobile composer grows above controls and the app nav occupies the bottom r
   assert.match(inbox, /useLayoutEffect\(\(\) => \{[\s\S]*textarea\.scrollHeight[\s\S]*\}, \[composer\]\)/);
   assert.match(inbox, /maximumHeight = 144/);
   assert.match(app, /data-testid="mobile-bottom-nav"/);
-  assert.doesNotMatch(app, /overflow-hidden pb-16 sm:pb-0/);
-  assert.doesNotMatch(app, /sm:hidden fixed bottom-0/);
+  assert.match(app, /pb-\[calc\(4rem\+env\(safe-area-inset-bottom,0px\)\)\] sm:pb-0/);
 });
 
-test('installed PWA anchors to the viewport without double-counting the lower inset', () => {
+test('installed PWA fixes the menu background to the bottom and keeps controls above the safe area', () => {
   assert.match(app, /isEmbeddedBooking \? 'min-h-0 overflow-visible' : 'fixed inset-0 overflow-hidden'/);
-  assert.match(app, /data-testid="mobile-bottom-nav" className="flex h-16/);
-  assert.doesNotMatch(app, /safe-area-inset-bottom/);
+  assert.match(app, /data-testid="mobile-bottom-nav" className="fixed bottom-0 left-0 right-0/);
+  assert.match(app, /h-\[calc\(4rem\+env\(safe-area-inset-bottom,0px\)\)\]/);
+  assert.match(app, /pb-\[env\(safe-area-inset-bottom,0px\)\]/);
   assert.match(styles, /html, body, #root \{[\s\S]*background-color: #0f172a/);
 });
 
