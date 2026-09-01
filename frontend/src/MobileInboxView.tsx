@@ -7,6 +7,7 @@ import {
   DoorOpen,
   MessageCircle,
   Ban,
+  PanelBottomOpen,
   Pin,
   RefreshCw,
   Search,
@@ -36,6 +37,7 @@ import {
 } from './api'
 import { formatMessageTimestamp } from './messageTimestamp'
 import { dismissArrivalPushNotification, stopIncomingAlarm } from './incomingMessageAlarm'
+import QuickToolsSheet from './QuickToolsSheet'
 
 const POLL_THREADS_MS = 10_000
 const POLL_MESSAGES_MS = 6_000
@@ -90,9 +92,11 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const [savingDraft, setSavingDraft] = useState(false)
   const [requestedInformation, setRequestedInformation] = useState('')
   const [submittingInformation, setSubmittingInformation] = useState(false)
+  const [quickToolsOpen, setQuickToolsOpen] = useState(false)
   const [error, setError] = useState('')
   const touchStartX = useRef<number | null>(null)
   const endRef = useRef<HTMLDivElement>(null)
+  const composerRef = useRef<HTMLTextAreaElement>(null)
   const sendingRef = useRef(false)
   const reviewingDraftRef = useRef<string | null>(null)
   const selectedIdRef = useRef(selectedId)
@@ -466,6 +470,27 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
       provider: thread.smsAccountKey === 'secondary' ? 'anonymous' : 'tori',
     })
     window.location.assign(`/booking?${params.toString()}`)
+  }
+
+  const insertQuickText = (content: string) => {
+    const textarea = composerRef.current
+    const selectionStart = textarea?.selectionStart ?? composer.length
+    const selectionEnd = textarea?.selectionEnd ?? composer.length
+    setComposer(current => {
+      const start = Math.min(selectionStart, current.length)
+      const end = Math.min(selectionEnd, current.length)
+      const before = current.slice(0, start)
+      const after = current.slice(end)
+      const prefix = before && !/\s$/.test(before) ? '\n' : ''
+      const suffix = after && !/^\s/.test(after) ? '\n' : ''
+      const next = `${before}${prefix}${content}${suffix}${after}`
+      const caret = before.length + prefix.length + content.length
+      window.requestAnimationFrame(() => {
+        textarea?.focus()
+        textarea?.setSelectionRange(caret, caret)
+      })
+      return next
+    })
   }
 
   const answerInformationRequest = async () => {
@@ -886,16 +911,27 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                     <span className={`absolute left-0.5 top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${thread?.autoReplyEnabled ? 'translate-x-3' : 'translate-x-0'}`} />
                   </button>
                 </label>
-                <button
-                  type="button"
-                  onClick={openBookingForThread}
-                  className="absolute left-1/2 flex h-6 -translate-x-1/2 items-center gap-1 rounded-md bg-indigo-50 px-2 text-[10px] font-extrabold text-indigo-700"
-                >
-                  <CalendarPlus className="h-3 w-3" /> Booking
-                </button>
+                <div className="absolute left-1/2 flex -translate-x-1/2 items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setQuickToolsOpen(true)}
+                    className="flex h-6 items-center gap-1 rounded-md bg-slate-900 px-2 text-[10px] font-extrabold text-white"
+                    aria-label="Open quick tools"
+                  >
+                    <PanelBottomOpen className="h-3 w-3" /> Tools
+                  </button>
+                  <button
+                    type="button"
+                    onClick={openBookingForThread}
+                    className="flex h-6 items-center gap-1 rounded-md bg-indigo-50 px-2 text-[10px] font-extrabold text-indigo-700"
+                  >
+                    <CalendarPlus className="h-3 w-3" /> Booking
+                  </button>
+                </div>
               </div>
               <div className="flex items-end gap-2">
                 <textarea
+                  ref={composerRef}
                   value={composer}
                   onChange={event => setComposer(event.target.value)}
                   onKeyDown={event => {
@@ -919,6 +955,14 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
               </div>
             </form>
           </section>
+        )}
+        {thread && (
+          <QuickToolsSheet
+            open={quickToolsOpen}
+            accountKey={thread.smsAccountKey}
+            onClose={() => setQuickToolsOpen(false)}
+            onInsert={insertQuickText}
+          />
         )}
       </div>
     </div>

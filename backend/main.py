@@ -7861,6 +7861,11 @@ class SettingsUpdateInput(BaseModel):
     catchUpLookbackDays: Optional[int] = Field(default=None, ge=1, le=30)
 
 
+class QuickReplyInput(BaseModel):
+    label: str = Field(min_length=1, max_length=6)
+    content: str = Field(default="", max_length=4000)
+
+
 class OperationsChatInput(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
 
@@ -7883,7 +7888,11 @@ class OperationsRealtimeTurnInput(BaseModel):
 
 
 MESSAGE_UI_SETTINGS_PATH = os.path.join(DATA_DIR, "message_ui_settings.json")
+QUICK_REPLIES_PATH = os.path.join(DATA_DIR, "quick_replies.json")
 DEFAULT_CATCH_UP_LOOKBACK_DAYS = 3
+QUICK_REPLY_ACCOUNT_KEYS = ("primary", "secondary")
+QUICK_REPLY_DEFAULT_LABELS = ("ADDR", "LINK", "INFO")
+_quick_replies_lock = threading.Lock()
 
 
 def load_message_ui_settings() -> Dict[str, Any]:
@@ -7908,6 +7917,47 @@ def load_message_ui_settings() -> Dict[str, Any]:
     except Exception:
         pass
     return defaults
+
+
+def default_quick_replies() -> Dict[str, List[Dict[str, str]]]:
+    return {
+        account_key: [
+            {"label": label, "content": ""}
+            for label in QUICK_REPLY_DEFAULT_LABELS
+        ]
+        for account_key in QUICK_REPLY_ACCOUNT_KEYS
+    }
+
+
+def load_quick_replies() -> Dict[str, List[Dict[str, str]]]:
+    defaults = default_quick_replies()
+    if not os.path.exists(QUICK_REPLIES_PATH):
+        return defaults
+    try:
+        with open(QUICK_REPLIES_PATH, "r", encoding="utf-8") as handle:
+            saved = json.load(handle)
+        accounts = saved.get("accounts", saved) if isinstance(saved, dict) else {}
+        normalized: Dict[str, List[Dict[str, str]]] = {}
+        for account_key in QUICK_REPLY_ACCOUNT_KEYS:
+            account_items = accounts.get(account_key, []) if isinstance(accounts, dict) else []
+            replies = []
+            for index, fallback in enumerate(defaults[account_key]):
+                item = account_items[index] if isinstance(account_items, list) and index < len(account_items) else {}
+                label = str(item.get("label") or fallback["label"]).strip()[:6] if isinstance(item, dict) else fallback["label"]
+                content = str(item.get("content") or "")[:4000] if isinstance(item, dict) else ""
+                replies.append({"label": label or fallback["label"], "content": content})
+            normalized[account_key] = replies
+        return normalized
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return defaults
+
+
+def save_quick_replies(replies: Dict[str, List[Dict[str, str]]]) -> None:
+    os.makedirs(os.path.dirname(QUICK_REPLIES_PATH), exist_ok=True)
+    temporary_path = f"{QUICK_REPLIES_PATH}.tmp"
+    with open(temporary_path, "w", encoding="utf-8") as handle:
+        json.dump({"accounts": replies}, handle, indent=2, ensure_ascii=False)
+    os.replace(temporary_path, QUICK_REPLIES_PATH)
 
 
 def serialize_operations_chat_message(message: OperationsChatMessage) -> Dict[str, str]:
@@ -11748,6 +11798,42 @@ def update_line_profiles(payload: LineProfilesInput):
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to save line profiles.") from exc
     return {"status": "success", "profiles": profiles}
+
+
+@app.get("/api/settings/quick-replies/{account_key}")
+def get_quick_replies(account_key: Literal["primary", "secondary"]):
+    return {
+        "accountKey": account_key,
+        "replies": load_quick_replies()[account_key],
+    }
+
+
+@app.put("/api/settings/quick-replies/{account_key}/{slot_index}")
+def update_quick_reply(
+    account_key: Literal["primary", "secondary"],
+    slot_index: int,
+    payload: QuickReplyInput,
+):
+    if slot_index < 0 or slot_index >= len(QUICK_REPLY_DEFAULT_LABELS):
+        raise HTTPException(status_code=404, detail="Quick-reply button not found.")
+    label = payload.label.strip()
+    if not label:
+        raise HTTPException(status_code=422, detail="Enter a button label.")
+    with _quick_replies_lock:
+        replies = load_quick_replies()
+        replies[account_key][slot_index] = {
+            "label": label,
+            "content": payload.content,
+        }
+        try:
+            save_quick_replies(replies)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="Failed to save the quick-reply button.") from exc
+    return {
+        "status": "success",
+        "accountKey": account_key,
+        "replies": replies[account_key],
+    }
 
 
 @app.get("/api/settings")
