@@ -38,10 +38,14 @@ test('mobile composer grows above controls and the app nav occupies the bottom r
   assert.doesNotMatch(app, /sm:hidden fixed bottom-0/);
 });
 
-test('installed PWA fills the lower safe area and Return inserts a new line', () => {
-  assert.match(app, /h-\[calc\(4rem\+env\(safe-area-inset-bottom\)\)\]/);
-  assert.match(app, /pb-\[env\(safe-area-inset-bottom\)\]/);
+test('installed PWA anchors to the viewport without double-counting the lower inset', () => {
+  assert.match(app, /isEmbeddedBooking \? 'min-h-0 overflow-visible' : 'fixed inset-0 overflow-hidden'/);
+  assert.match(app, /data-testid="mobile-bottom-nav" className="flex h-16/);
+  assert.doesNotMatch(app, /safe-area-inset-bottom/);
   assert.match(styles, /html, body, #root \{[\s\S]*background-color: #0f172a/);
+});
+
+test('Return inserts a new line and sending requires the Send button', () => {
   assert.match(inbox, /enterKeyHint="enter"/);
   assert.doesNotMatch(inbox, /requestSubmit\(\)/);
 });
