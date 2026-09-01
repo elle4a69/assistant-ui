@@ -84,6 +84,7 @@ def test_legacy_adapter_uses_service_duration_hours_and_busy_slots():
     )
 
     assert [slot["start_time"] for slot in slots] == [
+        "2026-08-12T09:30:00+10:00",
         "2026-08-12T09:45:00+10:00",
         "2026-08-12T10:00:00+10:00",
     ]
@@ -121,6 +122,8 @@ def test_one_hour_booking_requires_four_consecutive_fifteen_minute_increments():
     )
 
     assert [item["start_time"] for item in times] == [
+        "2026-08-13T13:00:00+10:00",
+        "2026-08-13T14:15:00+10:00",
         "2026-08-13T14:30:00+10:00",
         "2026-08-13T14:45:00+10:00",
         "2026-08-13T15:00:00+10:00",
@@ -134,7 +137,7 @@ def test_one_hour_booking_requires_four_consecutive_fifteen_minute_increments():
     )
 
 
-def test_legacy_adapter_requires_a_fifteen_minute_gap_on_both_sides():
+def test_legacy_adapter_allows_adjacent_slots_but_rejects_overlaps():
     busy_start = datetime(2026, 8, 12, 10, 0, tzinfo=TZ)
     provider = LegacyCalendarDiscoveryProvider(
         services_loader=lambda: [{"id": "service", "name": "Service", "duration": 30}],
@@ -148,10 +151,10 @@ def test_legacy_adapter_requires_a_fifteen_minute_gap_on_both_sides():
     )
 
     starts = [item["start_time"] for item in slots]
-    assert "2026-08-12T09:30:00+10:00" not in starts  # ends 15 minutes before the existing booking
-    assert "2026-08-12T10:30:00+10:00" not in starts  # starts immediately after it
-    assert "2026-08-12T09:15:00+10:00" in starts
-    assert "2026-08-12T10:45:00+10:00" in starts
+    assert "2026-08-12T09:30:00+10:00" in starts  # ends exactly when the existing booking starts
+    assert "2026-08-12T10:30:00+10:00" in starts  # starts exactly when the existing booking ends
+    assert "2026-08-12T09:45:00+10:00" not in starts
+    assert "2026-08-12T10:15:00+10:00" not in starts
 
 
 def test_execute_returns_safe_error_for_unknown_service():
