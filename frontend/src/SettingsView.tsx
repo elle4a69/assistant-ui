@@ -1249,6 +1249,16 @@ export default function SettingsView() {
           </button>
         </div>
 
+        <nav aria-label="Settings destinations" className="flex flex-wrap gap-2">
+          <a
+            href="#blocked-contacts"
+            className="flex min-h-10 items-center gap-2 rounded-lg border border-rose-200 bg-white px-3 text-xs font-bold text-rose-700 shadow-sm hover:bg-rose-50"
+          >
+            <Ban className="h-4 w-4" />
+            Blocked contacts &amp; numbers
+          </a>
+        </nav>
+
         {/* Quick Links */}
         <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-col md:flex-row gap-2 md:gap-4 text-xs shadow-xs">
           <span className="font-bold text-slate-800 shrink-0">Quick Access Links:</span>
@@ -1639,17 +1649,21 @@ export default function SettingsView() {
             </details>
 
             {/* Blocked SMS contacts */}
-            <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+            <details id="blocked-contacts" open className="settings-section scroll-mt-3 bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
               <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
                 <Ban className="w-5 h-5 text-rose-600" />
                 <div>
-                  <h2 className="font-bold text-slate-800 text-sm">Blocked callers</h2>
+                  <h2 className="font-bold text-slate-800 text-sm">Blocked contacts &amp; numbers</h2>
                   <p className="text-[10px] text-slate-500">Automated SMS handling is suppressed only for the contact and line shown.</p>
                 </div>
               </summary>
               <div className="p-3 sm:p-5">
                 {blockedContacts.length === 0 ? (
-                  <p className="text-xs text-slate-500">No blocked callers.</p>
+                  <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4 text-center">
+                    <Ban className="mx-auto mb-2 h-5 w-5 text-slate-400" />
+                    <p className="text-xs font-bold text-slate-700">No blocked contacts or numbers</p>
+                    <p className="mt-1 text-[10px] text-slate-500">Contacts blocked from an SMS conversation will appear here, grouped by SMS line.</p>
+                  </div>
                 ) : (
                   <div className="divide-y divide-slate-100 rounded-lg border border-slate-200">
                     {blockedContacts.map(contact => (
@@ -1663,6 +1677,7 @@ export default function SettingsView() {
                           type="button"
                           onClick={() => handleUnblockContact(contact)}
                           disabled={unblockingContactId === contact.id}
+                          aria-label={`Unblock ${contact.customerPhone} on ${contact.smsAccountKey === 'secondary' ? 'SMS Line 2' : 'SMS Line 1'}`}
                           className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-[10px] font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
                         >
                           {unblockingContactId === contact.id ? 'Unblocking...' : 'Unblock'}
