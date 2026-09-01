@@ -40,9 +40,16 @@ test('mobile composer grows above controls and the app nav occupies the bottom r
 
 test('installed PWA anchors to the viewport without double-counting the lower inset', () => {
   assert.match(app, /isEmbeddedBooking \? 'min-h-0 overflow-visible' : 'fixed inset-0 overflow-hidden'/);
-  assert.match(app, /data-testid="mobile-bottom-nav" className="flex h-16/);
+  assert.match(app, /data-testid="mobile-bottom-nav" className="mobile-bottom-nav flex h-16/);
   assert.doesNotMatch(app, /safe-area-inset-bottom/);
   assert.match(styles, /html, body, #root \{[\s\S]*background-color: #0f172a/);
+});
+
+test('installed iOS PWA offsets the measured lower viewport gap with a negative margin', () => {
+  assert.match(app, /window\.screen\.height - window\.innerHeight/);
+  assert.match(app, /PWA_BOTTOM_GAP_LIMIT = 120/);
+  assert.match(app, /--pwa-bottom-gap/);
+  assert.match(styles, /\.mobile-bottom-nav \{[\s\S]*margin-bottom: calc\(-1 \* var\(--pwa-bottom-gap, 0px\)\)/);
 });
 
 test('authenticated internal booking form restores the app menu without exposing it in public embeds', () => {

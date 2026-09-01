@@ -14,6 +14,26 @@ import { UserCheck, Smartphone, Settings, Calendar, MessagesSquare, CalendarChec
 
 const AgentConsole = lazy(() => import('./AgentConsole'))
 
+const PWA_BOTTOM_GAP_LIMIT = 120
+
+function syncInstalledPwaBottomGap() {
+  const navigatorWithStandalone = navigator as Navigator & { standalone?: boolean }
+  const isInstalled = window.matchMedia('(display-mode: standalone)').matches
+    || navigatorWithStandalone.standalone === true
+  const isAppleMobile = /iPhone|iPad|iPod/i.test(navigator.userAgent)
+
+  if (!isInstalled || !isAppleMobile) {
+    document.documentElement.style.setProperty('--pwa-bottom-gap', '0px')
+    return
+  }
+
+  const measuredGap = Math.round(window.screen.height - window.innerHeight)
+  const bottomGap = measuredGap > 0 && measuredGap <= PWA_BOTTOM_GAP_LIMIT
+    ? measuredGap
+    : 0
+  document.documentElement.style.setProperty('--pwa-bottom-gap', `${bottomGap}px`)
+}
+
 class BootcampErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
 
@@ -50,6 +70,19 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(getThreadIdFromUrl());
   const [newBookingAlert, setNewBookingAlert] = useState<CalendarBooking | null>(null);
   const [customerArrivalAlerts, setCustomerArrivalAlerts] = useState<ArrivalSession[]>([]);
+
+  useEffect(() => {
+    syncInstalledPwaBottomGap()
+    const syncAfterOrientationChange = () => window.setTimeout(syncInstalledPwaBottomGap, 250)
+    window.addEventListener('resize', syncInstalledPwaBottomGap)
+    window.addEventListener('orientationchange', syncAfterOrientationChange)
+    window.addEventListener('pageshow', syncInstalledPwaBottomGap)
+    return () => {
+      window.removeEventListener('resize', syncInstalledPwaBottomGap)
+      window.removeEventListener('orientationchange', syncAfterOrientationChange)
+      window.removeEventListener('pageshow', syncInstalledPwaBottomGap)
+    }
+  }, [])
 
   const [view, setView] = useState<'agent' | 'runner' | 'customer' | 'settings' | 'booking' | 'bookings' | 'chat' | 'bootcamp' | 'arrival' | 'arrivals'>(
     initialPath === '/arrival' ? 'arrival'
@@ -365,7 +398,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
 
       {/* Mobile Bottom Navigation Bar (the final row of the full-height app) */}
       {!isStandalone && (
-        <nav data-testid="mobile-bottom-nav" className="flex h-16 w-full shrink-0 border-t border-slate-800 bg-slate-900 text-white shadow-lg sm:hidden z-40 select-none">
+        <nav data-testid="mobile-bottom-nav" className="mobile-bottom-nav flex h-16 w-full shrink-0 border-t border-slate-800 bg-slate-900 text-white shadow-lg sm:hidden z-40 select-none">
           <div className="flex w-full items-center justify-around px-1 overflow-x-auto">
             {[
               { id: 'agent', label: 'Console', icon: <UserCheck className="w-4.5 h-4.5" />, action: () => navigateTo('agent', '/') },
