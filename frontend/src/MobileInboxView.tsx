@@ -1,13 +1,11 @@
 import { FormEvent, TouchEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
-  CalendarPlus,
   Check,
   CheckCheck,
   DoorOpen,
   MessageCircle,
   Ban,
-  PanelBottomOpen,
   Pin,
   RefreshCw,
   Search,
@@ -530,8 +528,8 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     <div className="flex-1 w-full flex flex-col overflow-hidden bg-[#f4f6f8] text-slate-900">
       <div className="mx-auto flex h-full w-full max-w-2xl flex-col bg-white shadow-2xl shadow-slate-300/40">
         <header className="sticky top-0 z-30 flex min-h-14 shrink-0 items-center gap-1 border-b border-slate-200 bg-white px-2 pt-[env(safe-area-inset-top)] select-none">
-          {/* Left: Back button + AI Toggle */}
-          <div className="flex shrink-0 items-center justify-start gap-1">
+          {/* Left: keep Back isolated from settings controls */}
+          <div className="flex shrink-0 items-center justify-start">
             {selectedId && (
               <button
                 type="button"
@@ -542,24 +540,6 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                 <ArrowLeft className="h-6 w-6" />
               </button>
             )}
-            <label className="flex items-center gap-1.5 cursor-pointer">
-              <span className={`text-[10px] font-extrabold uppercase tracking-wider ${aiEnabled ? 'text-emerald-700' : 'text-slate-400'}`}>
-                AI
-              </span>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={aiEnabled}
-                onClick={toggleAi}
-                className={`relative h-5 w-9 rounded-full transition-colors cursor-pointer border-none p-0 ${
-                  aiEnabled ? 'bg-emerald-500' : 'bg-slate-300'
-                }`}
-              >
-                <span className={`absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
-                  aiEnabled ? 'translate-x-4' : 'translate-x-0'
-                }`} />
-              </button>
-            </label>
           </div>
 
           {/* Center: compact search on the list, contact title inside a chat */}
@@ -587,7 +567,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
             )}
           </div>
 
-          {/* Right: Training Mode */}
+          {/* Right: global AI controls, safely away from Back */}
           <div className="flex shrink-0 items-center justify-end gap-1">
             {!selectedId && (
               <button
@@ -601,53 +581,24 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                 <RefreshCw className={`h-3.5 w-3.5 ${catchingUp ? 'animate-spin' : ''}`} />
               </button>
             )}
-            <label className="flex items-center gap-1.5 cursor-pointer">
-              <span className={`text-[10px] font-extrabold uppercase tracking-wider ${trainingEnabled ? 'text-amber-600' : 'text-slate-400'}`}>
-                Train
-              </span>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={trainingEnabled}
-                onClick={toggleTraining}
-                className={`relative h-5 w-9 rounded-full transition-colors cursor-pointer border-none p-0 ${
-                  trainingEnabled ? 'bg-amber-500' : 'bg-slate-300'
-                }`}
-              >
-                <span className={`absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
-                  trainingEnabled ? 'translate-x-4' : 'translate-x-0'
-                }`} />
-              </button>
-            </label>
+            <button
+              type="button"
+              aria-pressed={aiEnabled}
+              onClick={toggleAi}
+              className={`h-8 rounded-lg border px-2 text-[9px] font-extrabold transition active:scale-95 ${aiEnabled ? 'border-emerald-500 bg-emerald-500 text-white' : 'border-slate-300 bg-white text-slate-500'}`}
+            >
+              {aiEnabled ? 'AI On' : 'AI Off'}
+            </button>
+            <button
+              type="button"
+              aria-pressed={trainingEnabled}
+              onClick={toggleTraining}
+              className={`h-8 rounded-lg border px-2 text-[9px] font-extrabold transition active:scale-95 ${trainingEnabled ? 'border-amber-500 bg-amber-500 text-white' : 'border-slate-300 bg-white text-slate-500'}`}
+            >
+              {trainingEnabled ? 'Train On' : 'Train Off'}
+            </button>
           </div>
         </header>
-
-        {thread && (
-          <div className="flex shrink-0 items-center gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2" aria-label="Conversation controls">
-            <button
-              type="button"
-              onClick={togglePinned}
-              disabled={changingPinned}
-              aria-pressed={thread.pinned}
-              aria-label={thread.pinned ? 'Unpin conversation' : 'Pin conversation'}
-              className={`flex min-h-9 flex-1 items-center justify-center gap-2 rounded-lg border px-3 text-xs font-extrabold transition-colors disabled:opacity-50 ${thread.pinned ? 'border-indigo-200 bg-indigo-100 text-indigo-800' : 'border-slate-300 bg-white text-slate-700'}`}
-            >
-              <Pin className={`h-4 w-4 ${thread.pinned ? 'fill-current' : ''}`} />
-              {changingPinned ? 'Updating…' : thread.pinned ? 'Unpin conversation' : 'Pin conversation'}
-            </button>
-            <button
-              type="button"
-              onClick={toggleBlocked}
-              disabled={changingBlocked}
-              aria-pressed={thread.blocked}
-              aria-label={thread.blocked ? 'Unblock contact' : 'Block contact'}
-              className={`flex min-h-9 flex-1 items-center justify-center gap-2 rounded-lg border px-3 text-xs font-extrabold transition-colors disabled:opacity-50 ${thread.blocked ? 'border-rose-200 bg-rose-100 text-rose-800' : 'border-slate-300 bg-white text-slate-700'}`}
-            >
-              <Ban className="h-4 w-4" />
-              {changingBlocked ? 'Updating…' : thread.blocked ? 'Unblock contact' : 'Block contact'}
-            </button>
-          </div>
-        )}
 
         <span className="sr-only" aria-live="polite">{notice}</span>
 
@@ -897,37 +848,52 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
             )}
 
             <form onSubmit={sendMessage} className="shrink-0 border-t border-slate-200 bg-white px-3 pt-1 pb-0">
-              <div className="relative mb-0.5 flex h-6 items-center px-1">
-                <label className="flex items-center gap-1.5 text-[10px] font-extrabold text-slate-500">
-                  AI replies
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={thread?.autoReplyEnabled ?? false}
-                    disabled={changingThreadAi || !thread || thread.blocked}
-                    onClick={toggleThreadAi}
-                    className={`relative h-4 w-7 rounded-full p-0 transition-colors ${thread?.autoReplyEnabled ? 'bg-emerald-500' : 'bg-slate-300'}`}
-                  >
-                    <span className={`absolute left-0.5 top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${thread?.autoReplyEnabled ? 'translate-x-3' : 'translate-x-0'}`} />
-                  </button>
-                </label>
-                <div className="absolute left-1/2 flex -translate-x-1/2 items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => setQuickToolsOpen(true)}
-                    className="flex h-6 items-center gap-1 rounded-md bg-slate-900 px-2 text-[10px] font-extrabold text-white"
-                    aria-label="Open quick tools"
-                  >
-                    <PanelBottomOpen className="h-3 w-3" /> Tools
-                  </button>
-                  <button
-                    type="button"
-                    onClick={openBookingForThread}
-                    className="flex h-6 items-center gap-1 rounded-md bg-indigo-50 px-2 text-[10px] font-extrabold text-indigo-700"
-                  >
-                    <CalendarPlus className="h-3 w-3" /> Booking
-                  </button>
-                </div>
+              <div className="mb-1 grid grid-cols-5 gap-1" aria-label="Conversation controls">
+                <button
+                  type="button"
+                  aria-pressed={thread?.autoReplyEnabled ?? false}
+                  aria-label={thread?.autoReplyEnabled ? 'Turn AI replies off' : 'Turn AI replies on'}
+                  disabled={changingThreadAi || !thread || thread.blocked}
+                  onClick={toggleThreadAi}
+                  className={`h-7 rounded-md border px-1 text-[9px] font-extrabold transition active:scale-95 disabled:opacity-40 ${thread?.autoReplyEnabled ? 'border-emerald-500 bg-emerald-500 text-white' : 'border-slate-300 bg-white text-slate-600'}`}
+                >
+                  {changingThreadAi ? '…' : thread?.autoReplyEnabled ? 'AI On' : 'AI Off'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setQuickToolsOpen(true)}
+                  className="h-7 rounded-md border border-slate-900 bg-slate-900 px-1 text-[9px] font-extrabold text-white active:scale-95"
+                  aria-label="Open quick tools"
+                >
+                  Tools
+                </button>
+                <button
+                  type="button"
+                  onClick={openBookingForThread}
+                  className="h-7 rounded-md border border-indigo-200 bg-indigo-50 px-1 text-[9px] font-extrabold text-indigo-700 active:scale-95"
+                >
+                  Booking
+                </button>
+                <button
+                  type="button"
+                  onClick={togglePinned}
+                  disabled={changingPinned || !thread}
+                  aria-pressed={thread?.pinned ?? false}
+                  aria-label={thread?.pinned ? 'Unpin conversation' : 'Pin conversation'}
+                  className={`h-7 rounded-md border px-1 text-[9px] font-extrabold transition active:scale-95 disabled:opacity-50 ${thread?.pinned ? 'border-indigo-500 bg-indigo-500 text-white' : 'border-slate-300 bg-white text-slate-600'}`}
+                >
+                  {changingPinned ? '…' : thread?.pinned ? 'Unpin' : 'Pin'}
+                </button>
+                <button
+                  type="button"
+                  onClick={toggleBlocked}
+                  disabled={changingBlocked || !thread}
+                  aria-pressed={thread?.blocked ?? false}
+                  aria-label={thread?.blocked ? 'Unblock contact' : 'Block contact'}
+                  className={`h-7 rounded-md border px-1 text-[9px] font-extrabold transition active:scale-95 disabled:opacity-50 ${thread?.blocked ? 'border-rose-500 bg-rose-500 text-white' : 'border-slate-300 bg-white text-slate-600'}`}
+                >
+                  {changingBlocked ? '…' : thread?.blocked ? 'Unblock' : 'Block'}
+                </button>
               </div>
               <div className="flex items-end gap-2">
                 <textarea
