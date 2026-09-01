@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 const inbox = await readFile(new URL('../src/MobileInboxView.tsx', import.meta.url), 'utf8');
+const app = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
 const settings = await readFile(new URL('../src/SettingsView.tsx', import.meta.url), 'utf8');
 const api = await readFile(new URL('../src/api.ts', import.meta.url), 'utf8');
 
@@ -22,6 +23,18 @@ test('SMS thread controls expose persisted pin and confirmed account-scoped bloc
   assert.doesNotMatch(inbox, /role="switch"/);
   assert.match(api, /\/api\/threads\/\$\{threadId\}\/pin/);
   assert.match(api, /\/api\/threads\/\$\{threadId\}\/block/);
+});
+
+test('mobile composer grows above controls and the app nav occupies the bottom row', () => {
+  const composerPosition = inbox.indexOf('data-testid="message-composer"');
+  const controlsPosition = inbox.indexOf('aria-label="Conversation controls"');
+  assert.ok(composerPosition >= 0);
+  assert.ok(controlsPosition > composerPosition);
+  assert.match(inbox, /useLayoutEffect\(\(\) => \{[\s\S]*textarea\.scrollHeight[\s\S]*\}, \[composer\]\)/);
+  assert.match(inbox, /maximumHeight = 144/);
+  assert.match(app, /data-testid="mobile-bottom-nav"/);
+  assert.doesNotMatch(app, /overflow-hidden pb-16 sm:pb-0/);
+  assert.doesNotMatch(app, /sm:hidden fixed bottom-0/);
 });
 
 test('Settings lists blocked callers by SMS account and can unblock them', () => {

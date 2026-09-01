@@ -328,8 +328,8 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
         </header>
       )}
 
-      {/* View Content (Adding bottom padding on mobile to account for sticky nav bar) */}
-      <main className={`${isEmbeddedBooking ? 'flex flex-col overflow-visible' : 'flex-1 flex flex-col overflow-hidden pb-16 sm:pb-0'}`}>
+      {/* View content shares the viewport with the mobile nav, so no duplicate spacer is needed. */}
+      <main className={`${isEmbeddedBooking ? 'flex flex-col overflow-visible' : 'min-h-0 flex-1 flex flex-col overflow-hidden'}`}>
         {view === 'agent' && <SmsTriageDashboard />}
         {view === 'runner' && (
           <Suspense fallback={<div className="flex flex-1 items-center justify-center bg-slate-950 text-sm font-bold text-slate-400">Loading Coding Agent…</div>}>
@@ -346,9 +346,9 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
         {view === 'arrivals' && <ArrivalProviderView />}
       </main>
 
-      {/* Mobile Bottom Navigation Bar (Fixed at very bottom of viewport) */}
+      {/* Mobile Bottom Navigation Bar (the final row of the full-height app) */}
       {!isStandalone && (
-        <nav className="flex sm:hidden fixed bottom-0 left-0 right-0 bg-slate-900 border-t border-slate-800 text-white z-40 select-none shrink-0 h-16 shadow-lg">
+        <nav data-testid="mobile-bottom-nav" className="flex h-16 w-full shrink-0 border-t border-slate-800 bg-slate-900 text-white shadow-lg sm:hidden z-40 select-none">
           <div className="flex w-full items-center justify-around px-1 overflow-x-auto">
             {[
               { id: 'agent', label: 'Console', icon: <UserCheck className="w-4.5 h-4.5" />, action: () => navigateTo('agent', '/') },
