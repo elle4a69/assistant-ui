@@ -7862,7 +7862,7 @@ class SettingsUpdateInput(BaseModel):
 
 
 class QuickReplyInput(BaseModel):
-    label: str = Field(min_length=1, max_length=6)
+    label: str = Field(min_length=1, max_length=8)
     content: str = Field(default="", max_length=4000)
 
 
@@ -7891,7 +7891,7 @@ MESSAGE_UI_SETTINGS_PATH = os.path.join(DATA_DIR, "message_ui_settings.json")
 QUICK_REPLIES_PATH = os.path.join(DATA_DIR, "quick_replies.json")
 DEFAULT_CATCH_UP_LOOKBACK_DAYS = 3
 QUICK_REPLY_ACCOUNT_KEYS = ("primary", "secondary")
-QUICK_REPLY_DEFAULT_LABELS = ("ADDR", "LINK", "INFO")
+QUICK_REPLY_DEFAULT_LABELS = ("ADDR", "LINK", "INFO", "TEXT 4", "TEXT 5")
 _quick_replies_lock = threading.Lock()
 
 
@@ -7943,7 +7943,7 @@ def load_quick_replies() -> Dict[str, List[Dict[str, str]]]:
             replies = []
             for index, fallback in enumerate(defaults[account_key]):
                 item = account_items[index] if isinstance(account_items, list) and index < len(account_items) else {}
-                label = str(item.get("label") or fallback["label"]).strip()[:6] if isinstance(item, dict) else fallback["label"]
+                label = str(item.get("label") or fallback["label"]).strip()[:8] if isinstance(item, dict) else fallback["label"]
                 content = str(item.get("content") or "")[:4000] if isinstance(item, dict) else ""
                 replies.append({"label": label or fallback["label"], "content": content})
             normalized[account_key] = replies

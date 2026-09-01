@@ -6,12 +6,16 @@ const sheet = await readFile(new URL('../src/QuickToolsSheet.tsx', import.meta.u
 const inbox = await readFile(new URL('../src/MobileInboxView.tsx', import.meta.url), 'utf8')
 const api = await readFile(new URL('../src/api.ts', import.meta.url), 'utf8')
 
-test('quick tools provides three editable persisted text buttons', () => {
+test('quick tools provides five compact editable persisted text buttons', () => {
   assert.match(sheet, /const LONG_PRESS_MS = 520/)
   assert.match(sheet, /label: 'ADDR'/)
   assert.match(sheet, /label: 'LINK'/)
   assert.match(sheet, /label: 'INFO'/)
-  assert.match(sheet, /maxLength=\{6\}/)
+  assert.match(sheet, /label: 'TEXT 4'/)
+  assert.match(sheet, /label: 'TEXT 5'/)
+  assert.match(sheet, /grid-cols-5/)
+  assert.match(sheet, /maxLength=\{8\}/)
+  assert.doesNotMatch(sheet, /reply\.content \|\| 'Hold to add text'/)
   assert.match(sheet, /saveQuickReply\(accountKey, editingIndex/)
   assert.match(sheet, /onInsert\(reply\.content\)[\s\S]*onClose\(\)/)
 })

@@ -129,7 +129,7 @@ def test_quick_replies_are_saved_independently_per_sms_line(monkeypatch, tmp_pat
         main.QuickReplyInput(label="PLACE", content="12 Example Street\nMelbourne VIC"),
     )
 
-    assert [reply["label"] for reply in defaults["replies"]] == ["ADDR", "LINK", "INFO"]
+    assert [reply["label"] for reply in defaults["replies"]] == ["ADDR", "LINK", "INFO", "TEXT 4", "TEXT 5"]
     assert result["replies"][0] == {
         "label": "PLACE",
         "content": "12 Example Street\nMelbourne VIC",
@@ -138,6 +138,8 @@ def test_quick_replies_are_saved_independently_per_sms_line(monkeypatch, tmp_pat
         {"label": "ADDR", "content": ""},
         {"label": "LINK", "content": ""},
         {"label": "INFO", "content": ""},
+        {"label": "TEXT 4", "content": ""},
+        {"label": "TEXT 5", "content": ""},
     ]
     assert json.loads(quick_replies_path.read_text(encoding="utf-8"))["accounts"]["primary"][0]["label"] == "PLACE"
 
@@ -146,7 +148,7 @@ def test_quick_reply_rejects_unknown_slot(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "QUICK_REPLIES_PATH", str(tmp_path / "quick_replies.json"))
 
     with pytest.raises(main.HTTPException) as error:
-        main.update_quick_reply("primary", 3, main.QuickReplyInput(label="INFO", content="Saved text"))
+        main.update_quick_reply("primary", 5, main.QuickReplyInput(label="INFO", content="Saved text"))
 
     assert error.value.status_code == 404
 
