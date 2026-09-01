@@ -3,7 +3,6 @@ import {
   CalendarDays,
   ChevronLeft,
   Clock3,
-  Pencil,
   Save,
   Sparkles,
   X,
@@ -25,6 +24,8 @@ const DEFAULT_REPLIES: QuickReply[] = [
   { label: 'ADDR', content: '' },
   { label: 'LINK', content: '' },
   { label: 'INFO', content: '' },
+  { label: 'TEXT 4', content: '' },
+  { label: 'TEXT 5', content: '' },
 ]
 const MELBOURNE_TIME_ZONE = 'Australia/Melbourne'
 const LONG_PRESS_MS = 520
@@ -102,7 +103,7 @@ export default function QuickToolsSheet({ open, accountKey, onClose, onInsert }:
     setRepliesLoading(true)
     getQuickReplies(accountKey)
       .then(items => {
-        if (active) setReplies(items.length === 3 ? items : DEFAULT_REPLIES)
+        if (active) setReplies(items.length === 5 ? items : DEFAULT_REPLIES)
       })
       .catch(() => {
         if (active) setError('Quick buttons could not be loaded.')
@@ -269,7 +270,7 @@ export default function QuickToolsSheet({ open, accountKey, onClose, onInsert }:
                   <p className="text-xs font-black uppercase tracking-wider text-slate-500">Saved text</p>
                   <p className="text-[10px] font-semibold text-slate-400">Tap to paste · hold to edit</p>
                 </div>
-                <div className="grid grid-cols-3 gap-2">
+                <div className="grid grid-cols-5 gap-1.5">
                   {replies.map((reply, index) => (
                     <button
                       key={index}
@@ -282,16 +283,10 @@ export default function QuickToolsSheet({ open, accountKey, onClose, onInsert }:
                       onClick={() => useReply(index)}
                       disabled={repliesLoading}
                       aria-label={`${reply.label || `Button ${index + 1}`}. Tap to paste. Hold to edit.`}
-                      className="group min-h-24 select-none rounded-2xl border border-indigo-100 bg-gradient-to-b from-indigo-50 to-white p-3 text-left shadow-sm transition active:scale-[0.97] disabled:opacity-50"
+                      className="min-h-9 min-w-0 select-none rounded-lg border border-indigo-100 bg-indigo-50 px-1.5 py-2 text-center shadow-sm transition active:scale-[0.96] disabled:opacity-50"
                       style={{ touchAction: 'manipulation' }}
                     >
-                      <span className="flex items-center justify-between gap-1">
-                        <span className="truncate text-sm font-black tracking-wide text-indigo-800">{reply.label}</span>
-                        <Pencil className="h-3.5 w-3.5 shrink-0 text-indigo-300 transition group-hover:text-indigo-500" />
-                      </span>
-                      <span className="mt-2 block line-clamp-2 text-[10px] font-medium leading-4 text-slate-500">
-                        {reply.content || 'Hold to add text'}
-                      </span>
+                      <span className="block truncate text-[10px] font-black leading-4 text-indigo-800">{reply.label}</span>
                     </button>
                   ))}
                 </div>
@@ -321,11 +316,11 @@ export default function QuickToolsSheet({ open, accountKey, onClose, onInsert }:
                 <p className="mt-1 text-[10px] leading-4 text-indigo-600">Give it a short label, then save the exact text you want inserted into the message box.</p>
               </div>
               <label className="block text-xs font-black text-slate-700">
-                Button label <span className="font-medium text-slate-400">({draftLabel.length}/6)</span>
+                Button label <span className="font-medium text-slate-400">({draftLabel.length}/8)</span>
                 <input
                   value={draftLabel}
-                  onChange={event => setDraftLabel(event.target.value.slice(0, 6))}
-                  maxLength={6}
+                  onChange={event => setDraftLabel(event.target.value.slice(0, 8))}
+                  maxLength={8}
                   autoCapitalize="characters"
                   placeholder="ADDR"
                   className="mt-1.5 min-h-12 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 text-base font-black tracking-wide outline-none focus:border-indigo-500 focus:bg-white"
