@@ -1,4 +1,4 @@
-import { FormEvent, TouchEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { FormEvent, TouchEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
   Check,
@@ -103,6 +103,16 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const acknowledgedArrivalsRef = useRef(new Set<string>())
   const arrivalOpenIntentRef = useRef<{ threadId: string; sessionId: string } | null>(null)
   selectedIdRef.current = selectedId
+
+  useLayoutEffect(() => {
+    const textarea = composerRef.current
+    if (!textarea) return
+    const maximumHeight = 144
+    textarea.style.height = 'auto'
+    textarea.style.height = `${Math.min(textarea.scrollHeight, maximumHeight)}px`
+    textarea.style.overflowY = textarea.scrollHeight > maximumHeight ? 'auto' : 'hidden'
+  }, [composer])
+
   const loadThreads = useCallback(async () => {
     const requestId = ++threadsRequestRef.current
     try {
@@ -848,7 +858,32 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
             )}
 
             <form onSubmit={sendMessage} className="shrink-0 border-t border-slate-200 bg-white px-3 pt-1 pb-0">
-              <div className="mb-1 grid grid-cols-5 gap-1" aria-label="Conversation controls">
+              <div className="flex items-end gap-2">
+                <textarea
+                  ref={composerRef}
+                  data-testid="message-composer"
+                  value={composer}
+                  onChange={event => setComposer(event.target.value)}
+                  onKeyDown={event => {
+                    if (event.key === 'Enter' && !event.shiftKey) {
+                      event.preventDefault()
+                      event.currentTarget.form?.requestSubmit()
+                    }
+                  }}
+                  rows={1}
+                  placeholder="Message"
+                  className="max-h-36 min-h-11 flex-1 resize-none overflow-y-hidden rounded-3xl border border-slate-300 bg-slate-50 px-4 py-2.5 text-[15px] outline-none focus:border-emerald-500 focus:bg-white"
+                />
+                <button
+                  type="submit"
+                  disabled={!composer.trim() || sending}
+                  className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-emerald-600 text-white shadow-sm disabled:bg-slate-300"
+                  aria-label="Send message"
+                >
+                  {sending ? <Wifi className="h-4 w-4 animate-pulse" /> : <Send className="h-5 w-5" />}
+                </button>
+              </div>
+              <div className="mt-1 grid grid-cols-5 gap-1" aria-label="Conversation controls">
                 <button
                   type="button"
                   aria-pressed={thread?.autoReplyEnabled ?? false}
@@ -893,30 +928,6 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                   className={`h-7 rounded-md border px-1 text-[9px] font-extrabold transition active:scale-95 disabled:opacity-50 ${thread?.blocked ? 'border-rose-500 bg-rose-500 text-white' : 'border-slate-300 bg-white text-slate-600'}`}
                 >
                   {changingBlocked ? '…' : thread?.blocked ? 'Unblock' : 'Block'}
-                </button>
-              </div>
-              <div className="flex items-end gap-2">
-                <textarea
-                  ref={composerRef}
-                  value={composer}
-                  onChange={event => setComposer(event.target.value)}
-                  onKeyDown={event => {
-                    if (event.key === 'Enter' && !event.shiftKey) {
-                      event.preventDefault()
-                      event.currentTarget.form?.requestSubmit()
-                    }
-                  }}
-                  rows={1}
-                  placeholder="Message"
-                  className="max-h-28 min-h-11 flex-1 resize-none rounded-3xl border border-slate-300 bg-slate-50 px-4 py-2.5 text-[15px] outline-none focus:border-emerald-500 focus:bg-white"
-                />
-                <button
-                  type="submit"
-                  disabled={!composer.trim() || sending}
-                  className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-emerald-600 text-white shadow-sm disabled:bg-slate-300"
-                  aria-label="Send message"
-                >
-                  {sending ? <Wifi className="h-4 w-4 animate-pulse" /> : <Send className="h-5 w-5" />}
                 </button>
               </div>
             </form>
