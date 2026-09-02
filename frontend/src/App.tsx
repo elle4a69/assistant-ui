@@ -227,7 +227,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
   };
 
   return (
-    <div className={`portal-app-shell flex w-full flex-col bg-slate-900 ${isEmbeddedBooking ? 'min-h-0 overflow-visible' : 'fixed inset-0 overflow-hidden'}`}>
+    <div className={`flex w-full flex-col bg-slate-900 ${isEmbeddedBooking ? 'min-h-0 overflow-visible' : 'h-[100dvh] overflow-hidden'}`}>
       
       {/* Top Portal Header (Desktop Only) */}
       {!isStandalone && (
@@ -345,8 +345,8 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
         </header>
       )}
 
-      {/* Fixed mobile navigation overlays the viewport, so authenticated views reserve its 64px row. */}
-      <main className={`${isEmbeddedBooking ? 'flex flex-col overflow-visible' : `min-h-0 flex-1 flex flex-col overflow-hidden ${isStandalone ? '' : 'pb-16 sm:pb-0'}`}`}>
+      {/* View content shares the viewport with the mobile nav, so no duplicate spacer is needed. */}
+      <main className={`${isEmbeddedBooking ? 'flex flex-col overflow-visible' : 'min-h-0 flex-1 flex flex-col overflow-hidden'}`}>
         {view === 'agent' && <SmsTriageDashboard />}
         {view === 'runner' && (
           <Suspense fallback={<div className="flex flex-1 items-center justify-center bg-slate-950 text-sm font-bold text-slate-400">Loading Coding Agent…</div>}>
@@ -363,10 +363,10 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
         {view === 'arrivals' && <ArrivalProviderView />}
       </main>
 
-      {/* Fill the already-reserved 64px black strip at the visible viewport bottom. */}
+      {/* Mobile Bottom Navigation Bar (the final row of the full-height app) */}
       {!isStandalone && (
-        <nav data-testid="mobile-bottom-nav" className="fixed bottom-0 left-0 right-0 z-40 h-16 w-full border-t border-slate-800 bg-slate-900 text-white shadow-lg sm:hidden select-none">
-          <div className="flex h-full w-full items-center justify-around px-1 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+        <nav data-testid="mobile-bottom-nav" className="flex h-16 w-full shrink-0 border-t border-slate-800 bg-slate-900 text-white shadow-lg sm:hidden z-40 select-none">
+          <div className="flex w-full items-center justify-around px-1 overflow-x-auto">
             {[
               { id: 'agent', label: 'Console', icon: <UserCheck className="w-4.5 h-4.5" />, action: () => navigateTo('agent', '/') },
               { id: 'runner', label: 'Agent', icon: <SquareTerminal className="w-4.5 h-4.5" />, action: () => navigateTo('runner', '/agent-console') },
