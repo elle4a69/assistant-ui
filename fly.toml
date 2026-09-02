@@ -32,5 +32,5 @@ primary_region = "syd"
 
 [vm]
   cpu_kind = "shared"
-  cpus = 1
-  memory = "1gb"
+  cpus = 2
+  memory = "2gb"
