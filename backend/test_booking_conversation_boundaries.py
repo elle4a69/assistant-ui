@@ -36,7 +36,18 @@ def write_services(tmp_path):
 
 def test_catalogue_context_exposes_only_customer_visible_details(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "LINE_PROFILES_PATH", str(tmp_path / "sms_line_profiles.json"))
     write_services(tmp_path)
+    main.save_line_profiles({
+        "primary": {
+            "displayName": "Line 1", "providerName": "Tori",
+            "informationUrl": "https://line-one.example/info", "userPrompt": "",
+        },
+        "secondary": {
+            "displayName": "Line 2", "providerName": "Anonymous",
+            "informationUrl": "https://line-two.example/info", "userPrompt": "",
+        },
+    })
 
     context = main.get_live_services_context("primary")
 
@@ -127,6 +138,9 @@ def test_secondary_account_receives_its_own_services_but_not_primary_knowledge_o
     assert "Private Line Two Service" in str(calls[0]["input"])
     assert "Scalp Care" not in str(calls[0]["input"])
     assert "Tori" not in calls[0]["instructions"]
+    assert "https://line-two.example/info" in calls[0]["instructions"]
+    assert "https://line-one.example/info" not in calls[0]["instructions"]
+    assert "https://assistant-ui-hub.fly.dev/" not in calls[0]["instructions"]
     # The shared system fallback must stay identity-neutral. The selected line's
     # identity belongs to its separately persisted line prompt/profile, not here.
     assert "Anonymous" not in calls[0]["instructions"]
