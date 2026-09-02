@@ -1908,11 +1908,18 @@ def get_line_business_variable_values(account_key: str) -> Dict[str, str]:
     """Add the selected line's identity fields without changing shared values."""
     values = get_business_variable_values()
     profile = get_line_profile(account_key)
+    information_url = profile["informationUrl"].strip()
+    if information_url:
+        # Historical approved examples use {website}. For an SMS conversation,
+        # that token must resolve to the receiving line's saved information link,
+        # never a shared or other-line URL.
+        values["website"] = information_url
+        values["booking_url"] = information_url
     values.update({
         "line_key": account_key,
         "line_display_name": profile["displayName"],
         "line_provider_name": profile["providerName"],
-        "line_information_url": profile["informationUrl"],
+        "line_information_url": information_url,
     })
     return values
 
