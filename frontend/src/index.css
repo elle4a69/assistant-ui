@@ -27,13 +27,6 @@ html, body, #root {
   background-color: #0f172a;
 }
 
-/* iOS standalone can report a viewport shorter than the visible screen. Anchor
-   the top and grow the whole app through that lower region; the absolute nav
-   then follows the expanded body's real bottom. */
-.portal-app-shell {
-  height: calc(100% + var(--ios-standalone-bottom-gap, 0px));
-}
-
 html, body {
   overscroll-behavior: none;
   overscroll-behavior-y: none;

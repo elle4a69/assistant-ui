@@ -14,26 +14,6 @@ import { UserCheck, Smartphone, Settings, Calendar, MessagesSquare, CalendarChec
 
 const AgentConsole = lazy(() => import('./AgentConsole'))
 
-const IOS_STANDALONE_BOTTOM_GAP_LIMIT = 120
-
-function syncIosStandaloneBottomGap() {
-  const standaloneNavigator = navigator as Navigator & { standalone?: boolean }
-  const standalone = window.matchMedia('(display-mode: standalone)').matches
-    || standaloneNavigator.standalone === true
-  const appleMobile = /iPhone|iPad|iPod/i.test(navigator.userAgent)
-
-  if (!standalone || !appleMobile) {
-    document.documentElement.style.setProperty('--ios-standalone-bottom-gap', '0px')
-    return
-  }
-
-  const measuredGap = Math.round(window.screen.height - window.innerHeight)
-  const bottomGap = measuredGap > 0 && measuredGap <= IOS_STANDALONE_BOTTOM_GAP_LIMIT
-    ? measuredGap
-    : 0
-  document.documentElement.style.setProperty('--ios-standalone-bottom-gap', `${bottomGap}px`)
-}
-
 class BootcampErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
 
@@ -70,19 +50,6 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(getThreadIdFromUrl());
   const [newBookingAlert, setNewBookingAlert] = useState<CalendarBooking | null>(null);
   const [customerArrivalAlerts, setCustomerArrivalAlerts] = useState<ArrivalSession[]>([]);
-
-  useEffect(() => {
-    syncIosStandaloneBottomGap()
-    const syncAfterOrientationChange = () => window.setTimeout(syncIosStandaloneBottomGap, 250)
-    window.addEventListener('resize', syncIosStandaloneBottomGap)
-    window.addEventListener('orientationchange', syncAfterOrientationChange)
-    window.addEventListener('pageshow', syncIosStandaloneBottomGap)
-    return () => {
-      window.removeEventListener('resize', syncIosStandaloneBottomGap)
-      window.removeEventListener('orientationchange', syncAfterOrientationChange)
-      window.removeEventListener('pageshow', syncIosStandaloneBottomGap)
-    }
-  }, [])
 
   const [view, setView] = useState<'agent' | 'runner' | 'customer' | 'settings' | 'booking' | 'bookings' | 'chat' | 'bootcamp' | 'arrival' | 'arrivals'>(
     initialPath === '/arrival' ? 'arrival'
@@ -260,7 +227,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
   };
 
   return (
-    <div className={`flex w-full flex-col bg-slate-900 ${isEmbeddedBooking ? 'min-h-0 overflow-visible' : 'portal-app-shell fixed left-0 right-0 top-0 overflow-hidden'}`}>
+    <div className={`flex w-full flex-col bg-slate-900 ${isEmbeddedBooking ? 'min-h-0 overflow-visible' : 'fixed inset-0 overflow-hidden'}`}>
       
       {/* Top Portal Header (Desktop Only) */}
       {!isStandalone && (
@@ -396,10 +363,10 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
         {view === 'arrivals' && <ArrivalProviderView />}
       </main>
 
-      {/* The expanded app shell moves the complete 64px row to the physical bottom. */}
+      {/* Fill the already-reserved 64px black strip at the visible viewport bottom. */}
       {!isStandalone && (
-        <nav data-testid="mobile-bottom-nav" className="absolute bottom-0 left-0 right-0 z-[110] h-16 w-full border-t border-slate-800 bg-slate-900 text-white shadow-lg sm:hidden select-none">
-          <div className="relative z-[1] flex h-full w-full items-center justify-around px-1 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+        <nav data-testid="mobile-bottom-nav" className="fixed bottom-0 left-0 right-0 z-40 h-16 w-full border-t border-slate-800 bg-slate-900 text-white shadow-lg sm:hidden select-none">
+          <div className="flex h-full w-full items-center justify-around px-1 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
             {[
               { id: 'agent', label: 'Console', icon: <UserCheck className="w-4.5 h-4.5" />, action: () => navigateTo('agent', '/') },
               { id: 'runner', label: 'Agent', icon: <SquareTerminal className="w-4.5 h-4.5" />, action: () => navigateTo('runner', '/agent-console') },
@@ -417,7 +384,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
                 <button
                   key={tab.id}
                   onClick={tab.action}
-                  className={`relative z-[2] flex flex-col items-center justify-center flex-1 min-w-[54px] py-1 transition-colors cursor-pointer bg-transparent border-none ${
+                  className={`flex flex-col items-center justify-center flex-1 min-w-[54px] py-1 transition-colors cursor-pointer bg-transparent border-none ${
                     active ? 'text-indigo-400 font-bold' : 'text-slate-400'
                   }`}
                 >
