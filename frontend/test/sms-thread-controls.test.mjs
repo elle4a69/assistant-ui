@@ -39,12 +39,14 @@ test('mobile composer grows above controls and the app nav occupies the bottom r
 
 test('installed PWA keeps the complete menu inside the reserved visible bottom strip', () => {
   assert.match(app, /isEmbeddedBooking \? 'min-h-0 overflow-visible' : 'fixed inset-0 overflow-hidden'/);
+  assert.match(app, /portal-app-shell flex w-full flex-col/);
   assert.doesNotMatch(app, /window\.screen\.height - window\.innerHeight/);
   assert.doesNotMatch(app, /IOS_STANDALONE_BOTTOM_GAP_LIMIT/);
   assert.match(app, /data-testid="mobile-bottom-nav" className="fixed bottom-0 left-0 right-0 z-40 h-16/);
   assert.doesNotMatch(app, /mobile-bottom-nav[^\n]+safe-area-inset-bottom/);
+  assert.match(styles, /@media \(max-width: 639px\) and \(display-mode: standalone\)/);
+  assert.match(styles, /\.portal-app-shell\s*\{\s*transform: translateY\(60px\);/);
   assert.match(app, /className="flex h-full w-full items-center justify-around px-1 overflow-x-auto/);
-  assert.doesNotMatch(styles, /\.portal-app-shell/);
   assert.match(app, /\[scrollbar-width:none\] \[-ms-overflow-style:none\] \[&::\-webkit-scrollbar\]:hidden/);
   assert.match(styles, /html, body, #root \{[\s\S]*background-color: #0f172a/);
 });
