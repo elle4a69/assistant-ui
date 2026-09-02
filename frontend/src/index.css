@@ -43,6 +43,17 @@ html.booking-embed body {
   overflow: visible;
 }
 
+/*
+ * iOS standalone lays this fixed frame one status-bar height too high. Move the
+ * complete authenticated UI together so the header clears the status bar and
+ * the existing 64px navigation row lands in the visible bottom strip.
+ */
+@media (max-width: 639px) and (display-mode: standalone) {
+  .portal-app-shell {
+    transform: translateY(60px);
+  }
+}
+
 /* Enable momentum scrolling ONLY inside scrollable panels */
 .overflow-y-auto, .overflow-auto {
   overscroll-behavior: contain;
