@@ -153,6 +153,62 @@ def test_first_contact_greeting_is_selected_by_inbound_sms_account(monkeypatch):
     db.close()
 
 
+def test_first_contact_fixed_responder_bypasses_ai_training_approval(monkeypatch):
+    db = make_db()
+    now = datetime.utcnow()
+    thread = main.Thread(
+        id="training-first-contact",
+        customer_phone="+61412345678",
+        sms_account_key="secondary",
+        state="auto-reply",
+        priority="medium",
+        sla_due_at=now,
+        unread_count=1,
+        auto_reply_enabled=True,
+        created_at=now,
+        updated_at=now,
+    )
+    customer = Message(
+        id="training-first-contact-inbound",
+        thread_id=thread.id,
+        role="customer",
+        text="Hi",
+        provider_message_id="provider-first-contact",
+        at=now,
+    )
+    db.add_all([thread, customer])
+    db.commit()
+
+    sent = []
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", True)
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "send_sms",
+        lambda phone, text, **kwargs: sent.append((phone, text, kwargs)) or {"status": "success"},
+    )
+    monkeypatch.setattr(main.mobilemessage_service, "delivery_error", lambda _result: None)
+
+    main.send_first_contact_auto_reply(
+        db,
+        thread,
+        customer,
+        {"message": "Fixed welcome", "cooldownDays": 30},
+        dispatch_sms=True,
+    )
+
+    outbound = db.query(Message).filter(Message.thread_id == thread.id, Message.role == "system").one()
+    assert outbound.text == "Fixed welcome"
+    assert thread.state == "auto-reply"
+    assert sent == [(
+        "+61412345678",
+        "Fixed welcome",
+        {"idempotency_key": outbound.id, "account_key": "secondary"},
+    )]
+    event = db.query(main.ThreadEvent).filter(main.ThreadEvent.thread_id == thread.id).one()
+    assert event.type == "auto-reply-sent"
+    assert '"source": "first-contact-auto-responder"' in event.meta
+    db.close()
+
 def test_both_account_scoped_lines_can_use_conversational_ai(monkeypatch):
     db = make_db()
     monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
