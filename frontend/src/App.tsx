@@ -227,7 +227,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
   };
 
   return (
-    <div className={`flex w-full flex-col bg-slate-900 ${isEmbeddedBooking ? 'min-h-0 overflow-visible' : 'fixed inset-0 overflow-hidden'}`}>
+    <div className={`portal-app-shell flex w-full flex-col bg-slate-900 ${isEmbeddedBooking ? 'min-h-0 overflow-visible' : 'fixed inset-0 overflow-hidden'}`}>
       
       {/* Top Portal Header (Desktop Only) */}
       {!isStandalone && (
