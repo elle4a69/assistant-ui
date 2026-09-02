@@ -13,6 +13,7 @@ from main import (
     Message,
     Thread,
     booking_availability_error,
+    asks_for_secondary_booking_confirmation,
     confirm_conversational_booking,
     current_business_time,
     is_explicit_booking_confirmation,
@@ -121,6 +122,27 @@ def test_ambiguous_or_changed_details_are_not_confirmation(message):
 @pytest.mark.parametrize("message", ["no", "No thanks", "cancel it", "that's wrong"])
 def test_explicit_rejection_phrases_clear_authorization(message):
     assert is_explicit_booking_rejection(message) is True
+
+
+@pytest.mark.parametrize("message", [
+    "Those are the details. Reply yes to confirm.",
+    "Is that all correct?",
+    "Please confirm those details.",
+    "Would you like me to book that in?",
+    "Shall I lock it in?",
+])
+def test_secondary_booking_confirmation_requests_are_prohibited(message):
+    assert asks_for_secondary_booking_confirmation(message) is True
+
+
+@pytest.mark.parametrize("message", [
+    "What name should I put the booking under?",
+    "Which service were you after?",
+    "What time suits you?",
+    "All good, see you then.",
+])
+def test_questions_for_missing_booking_details_remain_allowed(message):
+    assert asks_for_secondary_booking_confirmation(message) is False
 
 
 def test_proposal_then_later_confirmation_books_without_a_web_form(tmp_path, monkeypatch):
@@ -731,12 +753,15 @@ def test_live_flow_rejects_contradiction_of_one_hour_provider_slot(monkeypatch):
     db.close()
 
 
-def test_assistant_uses_two_stage_booking_tools_and_no_form_link():
+def test_assistant_uses_immediate_booking_tool_and_no_form_or_confirmation_tool():
     source = Path(main.__file__).read_text(encoding="utf-8")
     discovery_tool_names = {tool["name"] for tool in BOOKING_DISCOVERY_TOOL_SCHEMAS}
+    schema_start = source.index("flat_tools = [")
+    schema_end = source.index("examples = []", schema_start)
+    live_tool_schema = source[schema_start:schema_end]
 
-    assert '"name": "propose_booking"' in source
-    assert '"name": "confirm_booking"' in source
+    assert '"name": "propose_booking"' in live_tool_schema
+    assert '"name": "confirm_booking"' not in live_tool_schema
     assert discovery_tool_names == {
         "get_current_time",
         "list_booking_services",
@@ -747,9 +772,83 @@ def test_assistant_uses_two_stage_booking_tools_and_no_form_link():
     assert '"name": "create_booking_form_link"' not in source
     assert "pending_booking_at_turn_start" in source
     assert "Hard calendar authority" in source
+    assert 'tool_choice="required" if booking_or_availability_turn else "auto"' in source
+    assert "never ask for a secondary confirmation" in source
     assert "thread.pending_slots = None" in source
     assert "pending_slots = json.dumps(verified_slots)" not in source
     assert 'assistant_reply = f"All booked for' not in source
+
+
+def test_secondary_confirmation_is_retried_as_a_required_booking_tool_call(tmp_path, monkeypatch):
+    service = {"id": "service", "name": "Service", "duration": 30, "price": 100}
+    (tmp_path / "services.json").write_text(json.dumps([service]), encoding="utf-8")
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "load_working_hours", lambda: [
+        {"day": day, "enabled": True, "open": "00:00", "close": "23:59"}
+        for day in main.DAY_NAMES
+    ])
+    calendar = FakeCalendar()
+    monkeypatch.setattr(main, "calendar_service", calendar)
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
+    start = (current_business_time() + timedelta(days=2)).replace(
+        hour=14, minute=0, second=0, microsecond=0,
+    )
+
+    class LiveSlotSuite:
+        def execute(self, tool_name, arguments):
+            assert tool_name == "get_times_today"
+            return {"status": "ok", "service_id": "service", "slots": [{
+                "service_id": "service",
+                "start_time": start.isoformat(),
+                "end_time": (start + timedelta(minutes=30)).isoformat(),
+            }]}
+
+    monkeypatch.setattr(main, "get_booking_tool_suite", lambda: LiveSlotSuite())
+    db = make_db()
+    thread = add_thread(db)
+    customer = Message(
+        id="no-secondary-confirmation-message",
+        thread_id=thread.id,
+        role="customer",
+        text="Book Service at 2pm. My name is Example Customer.",
+        provider_message_id="no-secondary-confirmation-provider",
+        at=main.datetime.utcnow(),
+    )
+    db.add(customer)
+    db.commit()
+    client = SequenceClient([
+        FakeResponse(output_text="Service at 2pm. Reply yes to confirm."),
+        FakeResponse(output=[FakeFunctionCall(
+            "get_times_today", {"service_id": "service"}, "availability-call",
+        )]),
+        FakeResponse(output=[FakeFunctionCall(
+            "propose_booking",
+            {
+                "service_id": "service",
+                "start_time": start.isoformat(),
+                "customer_name": "Example Customer",
+                "notes": None,
+            },
+            "proposal-call",
+        )]),
+        FakeResponse(output_text="All good, see you then."),
+    ])
+    monkeypatch.setattr(main, "openai_client", client)
+
+    booked, _ = run_sms_reply_logic(
+        db, thread.id, customer.text, customer.provider_message_id,
+        customer.at, dispatch_sms=False,
+    )
+
+    assert booked is True
+    assert len(calendar.created) == 1
+    assert client.calls[0]["tool_choice"] == "required"
+    assert client.calls[1]["tool_choice"] == "required"
+    assert all(
+        not asks_for_secondary_booking_confirmation(message.text)
+        for message in db.query(Message).filter(Message.role.in_(["agent", "draft"])).all()
+    )
+    db.close()
 
 
 def test_stored_availability_is_discarded_and_cannot_be_sent_without_live_lookup(monkeypatch):
