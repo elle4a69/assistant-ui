@@ -115,7 +115,11 @@ def test_line_profiles_persist_and_supply_line_variables(monkeypatch, tmp_path):
 
     assert main.get_line_profile("secondary")["userPrompt"] == "Anonymous prompt"
     assert main.effective_line_user_prompt("secondary", "Shared prompt") == "Anonymous prompt"
-    assert main.get_line_business_variable_values("secondary")["line_provider_name"] == "Anonymous"
+    variables = main.get_line_business_variable_values("secondary")
+    assert variables["line_provider_name"] == "Anonymous"
+    assert variables["line_information_url"] == "https://anonymous.example"
+    assert variables["website"] == "https://anonymous.example"
+    assert variables["booking_url"] == "https://anonymous.example"
 
 
 def test_quick_replies_are_saved_independently_per_sms_line(monkeypatch, tmp_path):
