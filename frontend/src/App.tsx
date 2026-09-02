@@ -398,8 +398,8 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
 
       {/* The expanded app shell moves the complete 64px row to the physical bottom. */}
       {!isStandalone && (
-        <nav data-testid="mobile-bottom-nav" className="absolute bottom-0 left-0 right-0 z-40 h-16 w-full border-t border-slate-800 bg-slate-900 text-white shadow-lg sm:hidden select-none">
-          <div className="flex h-full w-full items-center justify-around px-1 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+        <nav data-testid="mobile-bottom-nav" className="absolute bottom-0 left-0 right-0 z-[110] h-16 w-full border-t border-slate-800 bg-slate-900 text-white shadow-lg sm:hidden select-none">
+          <div className="relative z-[1] flex h-full w-full items-center justify-around px-1 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
             {[
               { id: 'agent', label: 'Console', icon: <UserCheck className="w-4.5 h-4.5" />, action: () => navigateTo('agent', '/') },
               { id: 'runner', label: 'Agent', icon: <SquareTerminal className="w-4.5 h-4.5" />, action: () => navigateTo('runner', '/agent-console') },
@@ -417,7 +417,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
                 <button
                   key={tab.id}
                   onClick={tab.action}
-                  className={`flex flex-col items-center justify-center flex-1 min-w-[54px] py-1 transition-colors cursor-pointer bg-transparent border-none ${
+                  className={`relative z-[2] flex flex-col items-center justify-center flex-1 min-w-[54px] py-1 transition-colors cursor-pointer bg-transparent border-none ${
                     active ? 'text-indigo-400 font-bold' : 'text-slate-400'
                   }`}
                 >
