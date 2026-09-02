@@ -345,8 +345,8 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
         </header>
       )}
 
-      {/* Fixed mobile navigation overlays the viewport, so authenticated views reserve its exact height. */}
-      <main className={`${isEmbeddedBooking ? 'flex flex-col overflow-visible' : `min-h-0 flex-1 flex flex-col overflow-hidden ${isStandalone ? '' : 'pb-[calc(4rem+env(safe-area-inset-bottom,0px))] sm:pb-0'}`}`}>
+      {/* Fixed mobile navigation overlays the viewport, so authenticated views reserve its 64px row. */}
+      <main className={`${isEmbeddedBooking ? 'flex flex-col overflow-visible' : `min-h-0 flex-1 flex flex-col overflow-hidden ${isStandalone ? '' : 'pb-16 sm:pb-0'}`}`}>
         {view === 'agent' && <SmsTriageDashboard />}
         {view === 'runner' && (
           <Suspense fallback={<div className="flex flex-1 items-center justify-center bg-slate-950 text-sm font-bold text-slate-400">Loading Coding Agent…</div>}>
@@ -363,10 +363,10 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
         {view === 'arrivals' && <ArrivalProviderView />}
       </main>
 
-      {/* Fixed mobile navigation paints to the physical bottom; controls stay above the Home Indicator. */}
+      {/* One 64px row pinned to the physical bottom with no additional iOS dead-space strip. */}
       {!isStandalone && (
-        <nav data-testid="mobile-bottom-nav" className="fixed bottom-0 left-0 right-0 z-40 w-full border-t border-slate-800 bg-slate-900 pb-[env(safe-area-inset-bottom,0px)] text-white shadow-lg sm:hidden select-none">
-          <div className="flex h-16 w-full items-center justify-around px-1 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+        <nav data-testid="mobile-bottom-nav" className="fixed bottom-0 left-0 right-0 z-40 h-16 w-full border-t border-slate-800 bg-slate-900 text-white shadow-lg sm:hidden select-none">
+          <div className="flex h-full w-full items-center justify-around px-1 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
             {[
               { id: 'agent', label: 'Console', icon: <UserCheck className="w-4.5 h-4.5" />, action: () => navigateTo('agent', '/') },
               { id: 'runner', label: 'Agent', icon: <SquareTerminal className="w-4.5 h-4.5" />, action: () => navigateTo('runner', '/agent-console') },
