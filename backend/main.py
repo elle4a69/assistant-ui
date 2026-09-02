@@ -3453,12 +3453,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+PORTAL_SPA_PATHS = {
+    "/agent-console",
+    "/arrivals",
+    "/bookings",
+    "/bootcamp",
+    "/chat",
+    "/settings",
+    "/sim",
+}
+
 
 @app.middleware("http")
 async def disable_api_response_caching(request: Request, call_next):
     """Keep shared API state and stable live booking entry points fresh."""
     response = await call_next(request)
-    stable_live_paths = {"/", "/landing.html", "/booking", "/booking-inline.js"}
+    stable_live_paths = {"/", "/landing.html", "/booking", "/booking-inline.js"} | PORTAL_SPA_PATHS
     if request.url.path.startswith("/api/") or request.url.path in stable_live_paths:
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
@@ -3545,6 +3555,8 @@ def is_public_request(request: Request) -> bool:
     method = request.method.upper()
 
     if path in PUBLIC_EXACT_PATHS:
+        return True
+    if method == "GET" and path in PORTAL_SPA_PATHS:
         return True
     if path == "/v2" or path.startswith("/v2/"):
         return True
