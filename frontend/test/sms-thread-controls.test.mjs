@@ -37,13 +37,14 @@ test('mobile composer grows above controls and the app nav occupies the bottom r
   assert.match(app, /pb-16 sm:pb-0/);
 });
 
-test('installed PWA pins one 64px menu row to the physical bottom without a safe-area spacer', () => {
-  assert.match(app, /isEmbeddedBooking \? 'min-h-0 overflow-visible' : 'fixed inset-0 overflow-hidden'/);
-  assert.match(app, /data-testid="mobile-bottom-nav" className="fixed bottom-0 left-0 right-0/);
-  assert.match(app, /mobile-bottom-nav" className="[^\"]*h-16/);
+test('installed PWA expands the body and moves the complete menu to its new bottom', () => {
+  assert.match(app, /isEmbeddedBooking \? 'min-h-0 overflow-visible' : 'portal-app-shell fixed left-0 right-0 top-0 overflow-hidden'/);
+  assert.match(app, /window\.screen\.height - window\.innerHeight/);
+  assert.match(app, /measuredGap > 0 && measuredGap <= IOS_STANDALONE_BOTTOM_GAP_LIMIT/);
+  assert.match(app, /data-testid="mobile-bottom-nav" className="absolute bottom-0 left-0 right-0/);
   assert.doesNotMatch(app, /mobile-bottom-nav[^\n]+safe-area-inset-bottom/);
-  assert.doesNotMatch(app, /mobile-bottom-nav[^\n]+h-\[calc\(4rem\+env\(safe-area-inset-bottom,0px\)\)\]/);
   assert.match(app, /className="flex h-full w-full items-center justify-around px-1 overflow-x-auto/);
+  assert.match(styles, /\.portal-app-shell \{[\s\S]*height: calc\(100% \+ var\(--ios-standalone-bottom-gap, 0px\)\);/);
   assert.match(app, /\[scrollbar-width:none\] \[-ms-overflow-style:none\] \[&::\-webkit-scrollbar\]:hidden/);
   assert.match(styles, /html, body, #root \{[\s\S]*background-color: #0f172a/);
 });
