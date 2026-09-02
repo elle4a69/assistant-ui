@@ -3729,6 +3729,25 @@ def is_explicit_booking_rejection(message: str) -> bool:
     ))
 
 
+def asks_for_secondary_booking_confirmation(message: str) -> bool:
+    """Reject the artificial extra approval step after booking details are complete."""
+    normalized = re.sub(
+        r"[^a-z0-9' ]+",
+        " ",
+        (message or "").casefold().replace("’", "'"),
+    )
+    normalized = " ".join(normalized.split())
+    return any(re.search(pattern, normalized) for pattern in (
+        r"\b(?:reply|respond|say) (?:with )?(?:yes|yep|yeah)\b",
+        r"\b(?:is|are) (?:that|those|these|the details) (?:all )?(?:correct|right|okay|ok)\b",
+        r"\b(?:please |just )?confirm (?:that|those|these|the|your) details\b",
+        r"\b(?:would you like|do you want|want) me to (?:book|lock) (?:that|it) (?:in)?\b",
+        r"\bshall i (?:book|lock) (?:that|it) (?:in)?\b",
+        r"\b(?:if|once|when) (?:that is|that's|those are|the details are) "
+        r"(?:correct|right|okay|ok)\b",
+    ))
+
+
 def get_service_for_booking(service_id: str) -> Optional[Dict[str, Any]]:
     return next((
         service for service in load_all_line_services()
@@ -5048,7 +5067,8 @@ def run_sms_reply_logic(
                         "Validate a booking after the customer has supplied an exact service, offered start "
                         "time, and first name. In a live reply, a successful call completes the booking after "
                         "one final live-calendar check. Reply with a short natural confirmation, not a recap. "
-                        "Use the exact Booking service ID from the live services context."
+                        "Use the exact Booking service ID from the live services context. Never ask the "
+                        "customer to reply yes or confirm the details first."
                     ),
                     "parameters": {
                         "type": "object",
@@ -5062,22 +5082,6 @@ def run_sms_reply_logic(
                             "notes": {"type": ["string", "null"]},
                         },
                         "required": ["service_id", "start_time", "customer_name", "notes"],
-                        "additionalProperties": False,
-                    },
-                    "strict": True,
-                },
-                {
-                    "type": "function",
-                    "name": "confirm_booking",
-                    "description": (
-                        "Create the previously proposed booking only when the customer's latest message "
-                        "explicitly confirms the complete details that were presented on the preceding turn. "
-                        "Never use this on the same turn as propose_booking or after an ambiguous response."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {},
-                        "required": [],
                         "additionalProperties": False,
                     },
                     "strict": True,
@@ -5117,8 +5121,9 @@ def run_sms_reply_logic(
                 "Use the booking discovery tools for the current time, services, and live availability; "
                 "never invent a service or time. "
                 "Once the customer has supplied their first name, exact service, and exact offered time, "
-                "call propose_booking. A successful live call completes the booking: do not recap the service "
-                "or ask a second confirmation question. Reply only with a short, informal confirmation such "
+                "call propose_booking immediately. Do not ask them to reply yes, confirm the details, approve "
+                "the booking, or repeat information they already supplied. A successful live call completes "
+                "the booking: do not recap the service or ask a second confirmation question. Reply only with a short, informal confirmation such "
                 "as 'All good, see you tomorrow.' Never ask the customer to visit a form or webpage. "
                 "Never claim a booking is confirmed unless propose_booking reports confirmed or already_confirmed."
             )
@@ -5141,6 +5146,7 @@ def run_sms_reply_logic(
                 instructions=instructions,
                 input=input_history,
                 tools=flat_tools,
+                tool_choice="required" if booking_or_availability_turn else "auto",
                 store=False
             )
 
@@ -5162,13 +5168,36 @@ def run_sms_reply_logic(
 
             max_tool_rounds = 6
             tool_round = 0
+            secondary_confirmation_retries = 0
             while True:
                 tool_calls = [
                     item for item in (response.output or [])
                     if item.type == "function_call"
                 ]
                 if not tool_calls:
-                    assistant_reply = response.output_text
+                    candidate_reply = response.output_text
+                    if (
+                        booking_or_availability_turn
+                        and asks_for_secondary_booking_confirmation(candidate_reply)
+                        and secondary_confirmation_retries < 2
+                    ):
+                        secondary_confirmation_retries += 1
+                        response = openai_client.responses.create(
+                            model="gpt-5.6-terra",
+                            instructions=(
+                                instructions
+                                + "\n\nCorrection: never ask for a secondary confirmation or tell the "
+                                "customer to reply yes. The customer has already supplied the booking "
+                                "details. Use the live booking tools now and complete the booking if the "
+                                "required details and availability are present."
+                            ),
+                            input=input_history,
+                            tools=flat_tools,
+                            tool_choice="required",
+                            store=False,
+                        )
+                        continue
+                    assistant_reply = candidate_reply
                     break
                 if tool_round >= max_tool_rounds:
                     rejected_reply_reason = "AI exceeded the safe booking tool-step limit"
@@ -5350,7 +5379,12 @@ def run_sms_reply_logic(
             assistant_reply = None
 
     if assistant_reply:
-        availability_error = unsafe_ai_reply_reason(
+        availability_error = (
+            "AI requested a prohibited secondary booking confirmation"
+            if booking_or_availability_turn
+            and asks_for_secondary_booking_confirmation(assistant_reply)
+            else None
+        ) or unsafe_ai_reply_reason(
             assistant_reply,
             requested_booking_confirmed=requested_booking_confirmed or booking_confirmed,
             internal_instructions=outbound_instruction_reference,
