@@ -34,15 +34,16 @@ test('mobile composer grows above controls and the app nav occupies the bottom r
   assert.match(inbox, /useLayoutEffect\(\(\) => \{[\s\S]*textarea\.scrollHeight[\s\S]*\}, \[composer\]\)/);
   assert.match(inbox, /maximumHeight = 144/);
   assert.match(app, /data-testid="mobile-bottom-nav"/);
-  assert.match(app, /pb-\[calc\(4rem\+env\(safe-area-inset-bottom,0px\)\)\] sm:pb-0/);
+  assert.match(app, /pb-16 sm:pb-0/);
 });
 
-test('installed PWA fixes the menu background to the bottom and keeps controls above the safe area', () => {
+test('installed PWA pins one 64px menu row to the physical bottom without a safe-area spacer', () => {
   assert.match(app, /isEmbeddedBooking \? 'min-h-0 overflow-visible' : 'fixed inset-0 overflow-hidden'/);
   assert.match(app, /data-testid="mobile-bottom-nav" className="fixed bottom-0 left-0 right-0/);
-  assert.match(app, /pb-\[env\(safe-area-inset-bottom,0px\)\]/);
+  assert.match(app, /mobile-bottom-nav" className="[^\"]*h-16/);
+  assert.doesNotMatch(app, /mobile-bottom-nav[^\n]+safe-area-inset-bottom/);
   assert.doesNotMatch(app, /mobile-bottom-nav[^\n]+h-\[calc\(4rem\+env\(safe-area-inset-bottom,0px\)\)\]/);
-  assert.match(app, /className="flex h-16 w-full items-center justify-around px-1 overflow-x-auto/);
+  assert.match(app, /className="flex h-full w-full items-center justify-around px-1 overflow-x-auto/);
   assert.match(app, /\[scrollbar-width:none\] \[-ms-overflow-style:none\] \[&::\-webkit-scrollbar\]:hidden/);
   assert.match(styles, /html, body, #root \{[\s\S]*background-color: #0f172a/);
 });
