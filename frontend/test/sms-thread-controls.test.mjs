@@ -26,7 +26,7 @@ test('SMS thread controls expose persisted pin and confirmed account-scoped bloc
   assert.match(api, /\/api\/threads\/\$\{threadId\}\/block/);
 });
 
-test('mobile composer grows above controls and the app nav occupies the bottom row', () => {
+test('mobile composer grows above controls and the app nav occupies the final flex row', () => {
   const composerPosition = inbox.indexOf('data-testid="message-composer"');
   const controlsPosition = inbox.indexOf('aria-label="Conversation controls"');
   assert.ok(composerPosition >= 0);
@@ -34,21 +34,19 @@ test('mobile composer grows above controls and the app nav occupies the bottom r
   assert.match(inbox, /useLayoutEffect\(\(\) => \{[\s\S]*textarea\.scrollHeight[\s\S]*\}, \[composer\]\)/);
   assert.match(inbox, /maximumHeight = 144/);
   assert.match(app, /data-testid="mobile-bottom-nav"/);
-  assert.match(app, /pb-16 sm:pb-0/);
+  assert.doesNotMatch(app, /pb-16 sm:pb-0/);
 });
 
-test('installed PWA keeps the complete menu inside the reserved visible bottom strip', () => {
-  assert.match(app, /isEmbeddedBooking \? 'min-h-0 overflow-visible' : 'fixed inset-0 overflow-hidden'/);
-  assert.match(app, /portal-app-shell flex w-full flex-col/);
+test('installed PWA uses the known-good pre-offset flex-column navigation layout', () => {
+  assert.match(app, /isEmbeddedBooking \? 'min-h-0 overflow-visible' : 'h-\[100dvh\] overflow-hidden'/);
   assert.doesNotMatch(app, /window\.screen\.height - window\.innerHeight/);
   assert.doesNotMatch(app, /IOS_STANDALONE_BOTTOM_GAP_LIMIT/);
-  assert.match(app, /data-testid="mobile-bottom-nav" className="fixed bottom-0 left-0 right-0 z-40 h-16/);
+  assert.match(app, /data-testid="mobile-bottom-nav" className="flex h-16 w-full shrink-0/);
+  assert.doesNotMatch(app, /data-testid="mobile-bottom-nav" className="fixed/);
   assert.doesNotMatch(app, /mobile-bottom-nav[^\n]+safe-area-inset-bottom/);
-  assert.match(styles, /@media \(max-width: 639px\) and \(display-mode: standalone\)/);
-  assert.match(styles, /\.portal-app-shell\s*\{\s*transform: translateY\(60px\);/);
-  assert.match(app, /className="flex h-full w-full items-center justify-around px-1 overflow-x-auto/);
-  assert.match(app, /\[scrollbar-width:none\] \[-ms-overflow-style:none\] \[&::\-webkit-scrollbar\]:hidden/);
-  assert.match(styles, /html, body, #root \{[\s\S]*background-color: #0f172a/);
+  assert.match(app, /className="flex w-full items-center justify-around px-1 overflow-x-auto/);
+  assert.doesNotMatch(styles, /\.portal-app-shell/);
+  assert.doesNotMatch(styles, /translateY\(60px\)/);
 });
 
 test('authenticated internal booking form restores the app menu without exposing it in public embeds', () => {
