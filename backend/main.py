@@ -5757,12 +5757,23 @@ def send_first_contact_auto_reply(
     outbound = Message(
         id=str(uuid.uuid4()),
         thread_id=thread.id,
-        role="draft" if TRAINING_MODE_ENABLED else "system",
+        role="system",
         text=reply_text,
         at=reply_at,
     )
 
-    if TRAINING_MODE_ENABLED:
+    delivery_failure = None
+    if dispatch_sms:
+        dispatch_result = mobilemessage_service.send_sms(
+            thread.customer_phone,
+            reply_text,
+            idempotency_key=outbound.id,
+            account_key=thread.sms_account_key,
+        )
+        delivery_failure = mobilemessage_service.delivery_error(dispatch_result)
+
+    if delivery_failure:
+        outbound.role = "draft"
         thread.state = "needs-review"
         event_log = ThreadEvent(
             id=str(uuid.uuid4()),
@@ -5771,56 +5782,29 @@ def send_first_contact_auto_reply(
             agent_id=None,
             meta=json.dumps({
                 "message_id": outbound.id,
-                "source": "first-contact-auto-responder",
+                "source": "first-contact-sms-delivery-failed",
+                "reason": delivery_failure[:500],
                 "customer_message_id": customer_message.id,
             }),
             at=reply_at,
         )
     else:
-        delivery_failure = None
-        if dispatch_sms:
-            dispatch_result = mobilemessage_service.send_sms(
-                thread.customer_phone,
-                reply_text,
-                idempotency_key=outbound.id,
-                account_key=thread.sms_account_key,
-            )
-            delivery_failure = mobilemessage_service.delivery_error(dispatch_result)
-
-        if delivery_failure:
-            outbound.role = "draft"
-            thread.state = "needs-review"
-            event_log = ThreadEvent(
-                id=str(uuid.uuid4()),
-                thread_id=thread.id,
-                type="draft-created",
-                agent_id=None,
-                meta=json.dumps({
-                    "message_id": outbound.id,
-                    "source": "first-contact-sms-delivery-failed",
-                    "reason": delivery_failure[:500],
-                    "customer_message_id": customer_message.id,
-                }),
-                at=reply_at,
-            )
-        else:
-            event_log = ThreadEvent(
-                id=str(uuid.uuid4()),
-                thread_id=thread.id,
-                type="auto-reply-sent",
-                agent_id=None,
-                meta=json.dumps({
-                    "source": "first-contact-auto-responder",
-                    "cooldownDays": config["cooldownDays"],
-                    "customer_message_id": customer_message.id,
-                }),
-                at=reply_at,
-            )
+        event_log = ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread.id,
+            type="auto-reply-sent",
+            agent_id=None,
+            meta=json.dumps({
+                "source": "first-contact-auto-responder",
+                "cooldownDays": config["cooldownDays"],
+                "customer_message_id": customer_message.id,
+            }),
+            at=reply_at,
+        )
 
     db.add(outbound)
     db.add(event_log)
     db.commit()
-
 
 def _process_first_contact_auto_reply(
     thread_id: str,
