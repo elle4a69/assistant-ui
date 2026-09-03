@@ -7,7 +7,7 @@ import main
 
 
 client = TestClient(main.app)
-TEST_IDS = {"alert-feed-past", "alert-feed-current"}
+TEST_IDS = {"alert-feed-past", "alert-feed-current", "booking-amount-update"}
 
 
 def _cleanup() -> None:
@@ -57,6 +57,46 @@ def test_default_booking_feed_excludes_history_but_history_view_can_request_it(m
         assert history_response.status_code == 200
         history_ids = {booking["id"] for booking in history_response.json()}
         assert TEST_IDS <= history_ids
+    finally:
+        db.close()
+        _cleanup()
+
+
+def test_booking_amount_can_be_corrected_without_changing_other_fields(monkeypatch):
+    _cleanup()
+    monkeypatch.setattr(main.calendar_service, "service", None)
+    start = datetime.now(ZoneInfo("Australia/Hobart")).replace(tzinfo=None)
+    db = main.SessionLocal()
+    try:
+        db.add(main.CalendarEvent(
+            id="booking-amount-update",
+            summary="Customer - Full Service",
+            start_time=start,
+            end_time=start + timedelta(minutes=30),
+            status="completed",
+            notes="Existing notes",
+        ))
+        db.commit()
+
+        response = client.put(
+            "/api/calendar/bookings/booking-amount-update",
+            json={"amount": 250},
+        )
+        assert response.status_code == 200
+        assert response.json()["amount"] == 250
+
+        booking = db.query(main.CalendarEvent).filter_by(id="booking-amount-update").one()
+        db.refresh(booking)
+        assert booking.amount == 250
+        assert booking.summary == "Customer - Full Service"
+        assert booking.status == "completed"
+        assert booking.notes == "Existing notes"
+
+        invalid = client.put(
+            "/api/calendar/bookings/booking-amount-update",
+            json={"amount": -1},
+        )
+        assert invalid.status_code == 422
     finally:
         db.close()
         _cleanup()

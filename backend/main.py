@@ -4544,6 +4544,7 @@ class UpdateBookingInput(BaseModel):
     endTime: Optional[str] = None
     status: Optional[str] = None
     notes: Optional[str] = None
+    amount: Optional[int] = None
 
 
 @app.put("/api/calendar/bookings/{booking_id}")
@@ -4579,6 +4580,10 @@ def update_booking_endpoint(booking_id: str, payload: UpdateBookingInput, db: Se
         booking.status = payload.status
     if payload.notes is not None:
         booking.notes = payload.notes
+    if payload.amount is not None:
+        if payload.amount < 0:
+            raise HTTPException(status_code=422, detail="Booking amount must be zero or greater")
+        booking.amount = payload.amount
         
     if payload.startTime is not None:
         try:
