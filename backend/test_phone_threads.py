@@ -209,7 +209,7 @@ def test_thread_list_orders_conversations_by_latest_message_not_thread_update():
     db.close()
 
 
-def test_thread_search_matches_message_body_not_just_phone_number():
+def test_thread_search_matches_message_body_but_not_phone_number():
     test_engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=test_engine)
     db = sessionmaker(bind=test_engine)()
@@ -253,6 +253,16 @@ def test_thread_search_matches_message_body_not_just_phone_number():
     )
 
     assert [item["id"] for item in items] == [thread.id]
+
+    phone_items = get_threads(
+        search="412345678",
+        filterStatus=None,
+        filterPriority=None,
+        onlyUnread=None,
+        db=db,
+    )
+
+    assert phone_items == []
     db.close()
 
 
