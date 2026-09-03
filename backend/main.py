@@ -1298,6 +1298,23 @@ def init_db():
                 conn.exec_driver_sql("ALTER TABLE calendar_events ADD COLUMN thread_id VARCHAR")
             if "amount" not in col_names:
                 conn.exec_driver_sql("ALTER TABLE calendar_events ADD COLUMN amount INTEGER")
+            # Persist verified prices for legacy service labels that predate the
+            # booking amount snapshot. Deliberately exclude custom/test labels.
+            legacy_booking_prices = (
+                ("% - my friend is offerring this anonymously", 200),
+                ("% - my friend is offerring this anonymously (anonymous)", 200),
+                ("% - my friend is offerring this anonymously (tori)", 200),
+                ("% - deepthroat  bbbj cim", 200),
+                ("% - full service", 250),
+                ("% - full service (tori)", 250),
+                ("% - girlfriend experience (gfe) (tori)", 300),
+            )
+            for summary_pattern, verified_amount in legacy_booking_prices:
+                conn.exec_driver_sql(
+                    "UPDATE calendar_events SET amount = ? "
+                    "WHERE amount IS NULL AND lower(trim(summary)) LIKE ?",
+                    (verified_amount, summary_pattern),
+                )
             conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS ix_calendar_events_sms_account_key "
                 "ON calendar_events (sms_account_key)"
