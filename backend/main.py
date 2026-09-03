@@ -4453,6 +4453,19 @@ def get_bookings(
         )
         if saved_amount is not None:
             return provider_name, saved_amount
+        normalized_service_name = " ".join(service_name.casefold().split())
+        for provider_suffix in (" (anonymous)", " (tori)"):
+            if normalized_service_name.endswith(provider_suffix):
+                normalized_service_name = normalized_service_name[:-len(provider_suffix)].strip()
+                break
+        verified_legacy_prices = {
+            "my friend is offerring this anonymously": 200,
+            "deepthroat bbbj cim": 200,
+            "full service": 250,
+            "girlfriend experience (gfe)": 300,
+        }
+        if normalized_service_name in verified_legacy_prices:
+            return provider_name, verified_legacy_prices[normalized_service_name]
         # Compatibility for bookings created before price snapshots existed.
         for service in load_line_services(account_key):
             if str(service.get("name") or "").strip().casefold() == service_name.casefold():
