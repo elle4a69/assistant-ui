@@ -7206,12 +7206,8 @@ def get_threads(
         query = query.filter(Thread.unread_count > 0)
     
     if search:
-        from sqlalchemy import or_
         query = query.filter(
-            or_(
-                Thread.customer_phone.ilike(f"%{search}%"),
-                Thread.messages.any(Message.text.ilike(f"%{search}%")),
-            )
+            Thread.messages.any(Message.text.ilike(f"%{search}%"))
         )
         
     thread_rows = query.all()
