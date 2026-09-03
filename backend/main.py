@@ -3766,10 +3766,8 @@ def booking_availability_error(start: datetime, duration: int) -> Optional[str]:
     """Return a customer-safe reason when an exact proposed slot cannot be booked."""
     now = current_business_time()
     end = start + timedelta(minutes=duration)
-    minimum_start = now + timedelta(minutes=30)
-    buffer = timedelta(minutes=15)
-    if start < minimum_start:
-        return "Bookings need at least 30 minutes' notice."
+    if start < now:
+        return "Bookings cannot be made in the past."
     if start > now + timedelta(days=180):
         return "Bookings can only be made up to 180 days ahead."
 
@@ -3801,14 +3799,14 @@ def booking_availability_error(start: datetime, duration: int) -> Optional[str]:
         calendar_service.get_busy_slots,
     )
     try:
-        busy_slots = authoritative_loader(start - buffer, end + buffer)
+        busy_slots = authoritative_loader(start, end)
     except (OSError, RuntimeError):
         return "Live calendar availability could not be verified. No booking was made."
     if any(
-        start < busy["end"] + buffer and end > busy["start"] - buffer
+        start < busy["end"] and end > busy["start"]
         for busy in busy_slots
     ):
-        return "That time needs a 15-minute gap before and after another booking."
+        return "That time overlaps another booking."
     return None
 
 
@@ -4668,16 +4666,12 @@ def get_free_slots_endpoint(duration: int = Query(30), db: Session = Depends(get
     tz_hobart = ZoneInfo("Australia/Hobart")
 
     now = datetime.now(tz_hobart)
-    buffer = timedelta(minutes=15)
-    dt = now + timedelta(minutes=30)
+    dt = now
 
     minutes = 15 * ((dt.minute + 14) // 15)
     dt = dt.replace(minute=0, second=0, microsecond=0) + timedelta(minutes=minutes)
 
-    busy_slots = calendar_service.get_busy_slots(
-        dt - buffer,
-        dt + timedelta(days=14) + buffer,
-    )
+    busy_slots = calendar_service.get_busy_slots(dt, dt + timedelta(days=14))
     free_slots = []
     limit_dt = dt + timedelta(days=14)
 
@@ -4698,7 +4692,7 @@ def get_free_slots_endpoint(duration: int = Query(30), db: Session = Depends(get
             if dt_mins >= open_mins and slot_end_mins <= close_mins:
                 overlap = False
                 for busy in busy_slots:
-                    if dt < busy["end"] + buffer and slot_end > busy["start"] - buffer:
+                    if dt < busy["end"] and slot_end > busy["start"]:
                         overlap = True
                         break
                 if not overlap:
