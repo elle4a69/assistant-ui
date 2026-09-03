@@ -264,7 +264,7 @@ def test_availability_is_rechecked_after_confirmation(tmp_path, monkeypatch):
     assert confirmed is False
     assert result == {
         "status": "rejected",
-        "reason": "That time needs a 15-minute gap before and after another booking.",
+        "reason": "That time overlaps another booking.",
     }
     assert calendar.created == []
     assert thread.pending_booking is None
@@ -890,7 +890,7 @@ def test_stored_availability_is_discarded_and_cannot_be_sent_without_live_lookup
     db.close()
 
 
-def test_booking_requires_thirty_minutes_notice_and_fifteen_minute_buffer(monkeypatch):
+def test_booking_allows_immediate_and_back_to_back_times_but_rejects_overlap(monkeypatch):
     now = main.parse_business_datetime("2026-08-12T10:00:00+10:00")
     monkeypatch.setattr(main, "current_business_time", lambda: now)
     monkeypatch.setattr(main, "load_working_hours", lambda: [
@@ -900,12 +900,15 @@ def test_booking_requires_thirty_minutes_notice_and_fifteen_minute_buffer(monkey
     calendar = FakeCalendar()
     monkeypatch.setattr(main, "calendar_service", calendar)
 
-    assert booking_availability_error(now + timedelta(minutes=29), 30) == "Bookings need at least 30 minutes' notice."
+    assert booking_availability_error(now + timedelta(minutes=1), 30) is None
+    assert booking_availability_error(now - timedelta(minutes=1), 30) == "Bookings cannot be made in the past."
     candidate = now + timedelta(hours=2)
     calendar.busy = [{"start": candidate - timedelta(minutes=40), "end": candidate - timedelta(minutes=10)}]
-    assert booking_availability_error(candidate, 30) == "That time needs a 15-minute gap before and after another booking."
+    assert booking_availability_error(candidate, 30) is None
     calendar.busy = [{"start": candidate + timedelta(minutes=40), "end": candidate + timedelta(minutes=70)}]
-    assert booking_availability_error(candidate, 30) == "That time needs a 15-minute gap before and after another booking."
+    assert booking_availability_error(candidate, 30) is None
+    calendar.busy = [{"start": candidate + timedelta(minutes=15), "end": candidate + timedelta(minutes=45)}]
+    assert booking_availability_error(candidate, 30) == "That time overlaps another booking."
 
 
 def test_conversational_booking_uses_saved_system_confirmation_template(tmp_path, monkeypatch):

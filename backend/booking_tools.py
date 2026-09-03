@@ -15,9 +15,6 @@ from urllib import error, parse, request
 from zoneinfo import ZoneInfo
 
 
-MINIMUM_BOOKING_NOTICE = timedelta(minutes=30)
-BOOKING_BUFFER = timedelta(minutes=15)
-
 
 class BookingToolError(RuntimeError):
     """A safe, expected failure while querying a booking provider."""
@@ -79,7 +76,7 @@ class BookingToolSuite:
         after: str | None = None,
         horizon_days: int = 60,
     ) -> dict[str, Any]:
-        start = max(self._parse_after(after), self._now() + MINIMUM_BOOKING_NOTICE)
+        start = self._parse_after(after)
         end = start + timedelta(days=max(1, min(horizon_days, 180)))
         slots = self.provider.search_availability(service_id, start, end, 1)
         return {
@@ -132,7 +129,7 @@ class BookingToolSuite:
     ) -> dict[str, Any]:
         day_start = datetime.combine(local_date, time.min, self.timezone)
         day_end = day_start + timedelta(days=1)
-        search_start = max(day_start, self._now() + MINIMUM_BOOKING_NOTICE)
+        search_start = max(day_start, self._now())
         slots = self.provider.search_availability(
             service_id,
             search_start,
@@ -159,14 +156,12 @@ class LegacyCalendarDiscoveryProvider:
         busy_slots_loader: Callable[[datetime, datetime], list[dict[str, datetime]]],
         timezone_name: str,
         slot_interval_minutes: int = 15,
-        booking_buffer_minutes: int = 15,
     ) -> None:
         self.services_loader = services_loader
         self.working_hours_loader = working_hours_loader
         self.busy_slots_loader = busy_slots_loader
         self.timezone = ZoneInfo(timezone_name)
         self.slot_interval_minutes = slot_interval_minutes
-        self.booking_buffer = timedelta(minutes=max(0, booking_buffer_minutes))
 
     def list_services(self) -> list[dict[str, Any]]:
         services = []
@@ -206,9 +201,7 @@ class LegacyCalendarDiscoveryProvider:
             for item in self.working_hours_loader()
             if isinstance(item, dict) and item.get("day")
         }
-        # Include nearby appointments so their required 15-minute buffer is
-        # enforced even when they end shortly before the requested search range.
-        busy = self.busy_slots_loader(start - self.booking_buffer, end + self.booking_buffer)
+        busy = self.busy_slots_loader(start, end)
         cursor = self._round_up(start)
         slots: list[dict[str, Any]] = []
         while cursor < end and len(slots) < limit:
@@ -221,8 +214,7 @@ class LegacyCalendarDiscoveryProvider:
                 candidate_end = candidate + duration
                 if candidate_end <= closing and candidate_end <= end:
                     if not any(
-                        candidate < item["end"] + self.booking_buffer
-                        and candidate_end > item["start"] - self.booking_buffer
+                        candidate < item["end"] and candidate_end > item["start"]
                         for item in busy
                     ):
                         slots.append({
