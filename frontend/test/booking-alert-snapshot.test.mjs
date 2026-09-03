@@ -114,3 +114,12 @@ test('live alert polling excludes history while the bookings page opts into it',
   assert.match(apiSource, /options\.includePast \? '\?includePast=true' : ''/);
   assert.match(bookingsViewSource, /listBookings\(\{ includePast: true \}\)/);
 });
+
+test('booking list shows amounts and totals completed bookings by provider only', () => {
+  assert.match(apiSource, /providerName\?: string \| null/);
+  assert.match(apiSource, /amount\?: number \| null/);
+  assert.match(bookingsViewSource, /booking\.status !== 'completed'/);
+  assert.match(bookingsViewSource, /providerTotals\.set/);
+  assert.match(bookingsViewSource, /Completed bookings only/);
+  assert.match(bookingsViewSource, /Grand total/);
+});

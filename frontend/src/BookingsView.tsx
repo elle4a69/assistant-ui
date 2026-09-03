@@ -47,6 +47,7 @@ const TIMELINE_START_H = 7;
 const TIMELINE_END_H = 21;
 const TOTAL_HOURS = TIMELINE_END_H - TIMELINE_START_H;
 const SNAP_MINUTES = 15;
+const BUSINESS_TIME_ZONE = 'Australia/Hobart';
 
 function canonicalPhone(phone: string) {
   let digits = phone.replace(/\D/g, '');
@@ -83,8 +84,37 @@ function formatLocalDateISO(date: Date): string {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+function getBusinessDateParts(date: Date) {
+  const parts = new Intl.DateTimeFormat('en-AU', {
+    timeZone: BUSINESS_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const value = (type: Intl.DateTimeFormatPartTypes) => (
+    parts.find(part => part.type === type)?.value || ''
+  );
+  return {
+    date: `${value('year')}-${value('month')}-${value('day')}`,
+    hour: Number(value('hour')),
+    minute: Number(value('minute')),
+  };
+}
+
+function businessLocalTimestamp(dateStr: string, totalMinutes: number): string {
+  const hours = String(Math.floor(totalMinutes / 60)).padStart(2, '0');
+  const minutes = String(totalMinutes % 60).padStart(2, '0');
+  // A timezone-naive business timestamp is intentional. The server owns the
+  // Australia/Hobart conversion and adds the correct seasonal UTC offset.
+  return `${dateStr}T${hours}:${minutes}:00`;
+}
+
 function minsFromTimelineStart(date: Date): number {
-  return date.getHours() * 60 + date.getMinutes() - TIMELINE_START_H * 60;
+  const parts = getBusinessDateParts(date);
+  return parts.hour * 60 + parts.minute - TIMELINE_START_H * 60;
 }
 
 function snapToGrid(mins: number): number {
@@ -100,7 +130,12 @@ function pxToMins(px: number): number {
 }
 
 function formatTime(date: Date): string {
-  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
+  return date.toLocaleTimeString('en-AU', {
+    timeZone: BUSINESS_TIME_ZONE,
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
 }
 
 type StatusType = 'scheduled' | 'completed' | 'no_show' | 'cancelled';
@@ -401,12 +436,14 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
   const startEditing = (booking: CalendarBooking) => {
     const sDate = new Date(booking.startTime);
     const eDate = new Date(booking.endTime);
+    const startParts = getBusinessDateParts(sDate);
+    const endParts = getBusinessDateParts(eDate);
     setEditForm({
       summary: booking.summary || '',
       customerPhone: booking.customerPhone || '',
-      dateStr: formatLocalDateISO(sDate),
-      startTimeStr: `${String(sDate.getHours()).padStart(2, '0')}:${String(sDate.getMinutes()).padStart(2, '0')}`,
-      endTimeStr: `${String(eDate.getHours()).padStart(2, '0')}:${String(eDate.getMinutes()).padStart(2, '0')}`,
+      dateStr: startParts.date,
+      startTimeStr: `${String(startParts.hour).padStart(2, '0')}:${String(startParts.minute).padStart(2, '0')}`,
+      endTimeStr: `${String(endParts.hour).padStart(2, '0')}:${String(endParts.minute).padStart(2, '0')}`,
       status: (booking.status as StatusType) || 'scheduled',
       notes: booking.notes || ''
     });
@@ -418,14 +455,11 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
     try {
       const [startH, startM] = editForm.startTimeStr.split(':').map(Number);
       const [endH, endM] = editForm.endTimeStr.split(':').map(Number);
-      const [y, m, d] = editForm.dateStr.split('-').map(Number);
-      const newStart = new Date(y, m - 1, d, startH, startM);
-      const newEnd = new Date(y, m - 1, d, endH, endM);
       const payload = {
         summary: editForm.summary,
         customerPhone: editForm.customerPhone,
-        startTime: newStart.toISOString(),
-        endTime: newEnd.toISOString(),
+        startTime: businessLocalTimestamp(editForm.dateStr, startH * 60 + startM),
+        endTime: businessLocalTimestamp(editForm.dateStr, endH * 60 + endM),
         status: editForm.status,
         notes: editForm.notes
       };
@@ -513,9 +547,23 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
     const selD = selectedDate.getDate();
     return bookings.filter(b => {
       const d = new Date(b.startTime);
-      return d.getFullYear() === selY && d.getMonth() === selM && d.getDate() === selD;
+      return getBusinessDateParts(d).date === `${selY}-${String(selM + 1).padStart(2, '0')}-${String(selD).padStart(2, '0')}`;
     });
   }, [bookings, selectedDate]);
+
+  const completedTotals = useMemo(() => {
+    const providerTotals = new Map<string, number>();
+    dayFilteredBookings.forEach(booking => {
+      if (booking.status !== 'completed' || typeof booking.amount !== 'number') return;
+      const provider = booking.providerName || (booking.smsAccountKey === 'secondary' ? 'Anonymous' : 'Tori');
+      providerTotals.set(provider, (providerTotals.get(provider) || 0) + booking.amount);
+    });
+    const rows = [...providerTotals.entries()].sort(([left], [right]) => left.localeCompare(right));
+    return {
+      rows,
+      grandTotal: rows.reduce((total, [, amount]) => total + amount, 0),
+    };
+  }, [dayFilteredBookings]);
 
   const isSelectedDateToday = useMemo(() =>
     formatLocalDateISO(selectedDate) === formatLocalDateISO(now),
@@ -524,7 +572,8 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
 
   const nowTopPx = useMemo(() => {
     if (!isSelectedDateToday) return null;
-    const totalMins = now.getHours() * 60 + now.getMinutes();
+    const nowParts = getBusinessDateParts(now);
+    const totalMins = nowParts.hour * 60 + nowParts.minute;
     const start = TIMELINE_START_H * 60;
     const end = TIMELINE_END_H * 60;
     if (totalMins < start || totalMins > end) return null;
@@ -542,11 +591,11 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
       type: 'move',
       bookingId,
       startMouseY: e.clientY,
-      origStartMins: s.getHours() * 60 + s.getMinutes(),
-      origEndMins: en.getHours() * 60 + en.getMinutes()
+      origStartMins: getBusinessDateParts(s).hour * 60 + getBusinessDateParts(s).minute,
+      origEndMins: getBusinessDateParts(en).hour * 60 + getBusinessDateParts(en).minute
     };
     setDraggingId(bookingId);
-    setDragPreview({ startMins: s.getHours() * 60 + s.getMinutes(), endMins: en.getHours() * 60 + en.getMinutes() });
+    setDragPreview({ startMins: minsFromTimelineStart(s) + TIMELINE_START_H * 60, endMins: minsFromTimelineStart(en) + TIMELINE_START_H * 60 });
   };
 
   // ── Mouse drag for resize ─────────────────────────────────────────────────
@@ -561,11 +610,11 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
       type: 'resize',
       bookingId,
       startMouseY: e.clientY,
-      origStartMins: s.getHours() * 60 + s.getMinutes(),
-      origEndMins: en.getHours() * 60 + en.getMinutes()
+      origStartMins: getBusinessDateParts(s).hour * 60 + getBusinessDateParts(s).minute,
+      origEndMins: getBusinessDateParts(en).hour * 60 + getBusinessDateParts(en).minute
     };
     setDraggingId(bookingId);
-    setDragPreview({ startMins: s.getHours() * 60 + s.getMinutes(), endMins: en.getHours() * 60 + en.getMinutes() });
+    setDragPreview({ startMins: minsFromTimelineStart(s) + TIMELINE_START_H * 60, endMins: minsFromTimelineStart(en) + TIMELINE_START_H * 60 });
   };
 
   useEffect(() => {
@@ -596,15 +645,15 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
       const { bookingId } = dragRef.current;
       const booking = bookings.find(b => b.id === bookingId);
       if (booking) {
-        const newStart = new Date(selectedDate);
-        newStart.setHours(Math.floor(dragPreview.startMins / 60), dragPreview.startMins % 60, 0, 0);
-        const newEnd = new Date(selectedDate);
-        newEnd.setHours(Math.floor(dragPreview.endMins / 60), dragPreview.endMins % 60, 0, 0);
-        const payload = { startTime: newStart.toISOString(), endTime: newEnd.toISOString() };
+        const selectedDateStr = formatLocalDateISO(selectedDate);
+        const payload = {
+          startTime: businessLocalTimestamp(selectedDateStr, dragPreview.startMins),
+          endTime: businessLocalTimestamp(selectedDateStr, dragPreview.endMins),
+        };
         try {
           const updated = await updateBooking(bookingId, payload);
           setBookings(prev => prev.map(b => b.id === bookingId ? { ...b, ...payload, ...updated } : b));
-          setSuccessMsg(`Updated "${booking.summary}" ${formatTime(newStart)}–${formatTime(newEnd)}`);
+          setSuccessMsg(`Updated "${booking.summary}" ${formatTime(new Date(updated.startTime))}–${formatTime(new Date(updated.endTime))}`);
         } catch {
           setError('Failed to reschedule.');
         }
@@ -872,7 +921,8 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
                 <span>No bookings for {DAY_NAMES[selectedDate.getDay()]}</span>
               </div>
             ) : (
-              dayFilteredBookings.map((booking: CalendarBooking) => {
+              <>
+              {dayFilteredBookings.map((booking: CalendarBooking) => {
                 const dateObj = new Date(booking.startTime);
                 const endObj = new Date(booking.endTime);
                 return (
@@ -899,7 +949,10 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
                         </span>
                         <span className="flex items-center gap-1.5">
                           <Clock className="w-3.5 h-3.5 text-slate-400" />
-                          {dateObj.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' })} · {formatTime(dateObj)}–{formatTime(endObj)}
+                          {dateObj.toLocaleDateString('en-AU', { timeZone: BUSINESS_TIME_ZONE, weekday: 'short', day: 'numeric', month: 'short' })} · {formatTime(dateObj)}–{formatTime(endObj)}
+                        </span>
+                        <span className="rounded-lg border border-emerald-100 bg-emerald-50 px-2 py-1 font-black text-emerald-700">
+                          {typeof booking.amount === 'number' ? `$${booking.amount.toLocaleString('en-AU')}` : 'Amount unavailable'}
                         </span>
                         {booking.notes && (
                           <span className="flex items-center gap-1 text-slate-400">
@@ -937,7 +990,23 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
                     </div>
                   </div>
                 );
-              })
+              })}
+              <div className="mt-2 w-full max-w-sm self-end rounded-2xl border border-slate-200 bg-slate-50 p-4 shadow-2xs">
+                <p className="mb-3 text-[10px] font-black uppercase tracking-wider text-slate-400">Completed bookings only</p>
+                {completedTotals.rows.length > 0 ? completedTotals.rows.map(([provider, amount]) => (
+                  <div key={provider} className="flex items-center justify-between py-1.5 text-sm font-bold text-slate-600">
+                    <span>{provider} total</span>
+                    <span>${amount.toLocaleString('en-AU')}</span>
+                  </div>
+                )) : (
+                  <p className="py-1 text-xs font-semibold text-slate-400">No completed bookings for this day.</p>
+                )}
+                <div className="mt-2 flex items-center justify-between border-t border-slate-200 pt-3 text-base font-black text-slate-900">
+                  <span>Grand total</span>
+                  <span>${completedTotals.grandTotal.toLocaleString('en-AU')}</span>
+                </div>
+              </div>
+              </>
             )}
           </div>
         )}

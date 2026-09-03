@@ -1155,6 +1155,7 @@ class CalendarEvent(Base):
     end_time = Column(DateTime, nullable=False)
     status = Column(String, default="scheduled", nullable=False)
     notes = Column(Text, nullable=True)
+    amount = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -1295,6 +1296,8 @@ def init_db():
                 conn.exec_driver_sql("ALTER TABLE calendar_events ADD COLUMN sms_account_key VARCHAR")
             if "thread_id" not in col_names:
                 conn.exec_driver_sql("ALTER TABLE calendar_events ADD COLUMN thread_id VARCHAR")
+            if "amount" not in col_names:
+                conn.exec_driver_sql("ALTER TABLE calendar_events ADD COLUMN amount INTEGER")
             conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS ix_calendar_events_sms_account_key "
                 "ON calendar_events (sms_account_key)"
@@ -3839,6 +3842,7 @@ def propose_conversational_booking(
         "service_id": service["id"],
         "service_name": str(service.get("name") or "Appointment"),
         "duration": duration,
+        "price": int(service.get("price", 0) or 0),
         "show_duration": service.get("showDuration", True) is not False,
         "start_time": start.isoformat(),
         "customer_name": clean_name,
@@ -3936,6 +3940,9 @@ def confirm_conversational_booking(
         start_time=start,
         end_time=end,
     )
+    local_booking = _arrival_booking(db, str(booking_id))
+    if local_booking:
+        local_booking.amount = int(proposal.get("price", 0) or 0)
     proposal["arrival_link"] = _arrival_public_link(arrival_token)
     proposal["arrival_session_id"] = arrival_session.id
 
@@ -4418,6 +4425,26 @@ def get_bookings(
             dt = dt.replace(tzinfo=tz_hobart)
         return dt.astimezone(tz_hobart).isoformat()
 
+    def financial_details(
+        summary: str,
+        sms_account_key: Optional[str],
+        saved_amount: Optional[int] = None,
+    ) -> tuple[str, Optional[int]]:
+        _, service_name, provider_name, account_key = _booking_reminder_parts(
+            summary,
+            sms_account_key,
+        )
+        if saved_amount is not None:
+            return provider_name, saved_amount
+        # Compatibility for bookings created before price snapshots existed.
+        for service in load_line_services(account_key):
+            if str(service.get("name") or "").strip().casefold() == service_name.casefold():
+                try:
+                    return provider_name, int(service.get("price"))
+                except (TypeError, ValueError):
+                    break
+        return provider_name, None
+
     results = []
     
     if calendar_service.service:
@@ -4453,6 +4480,7 @@ def get_bookings(
                 
                 desc = e.get("description", "")
                 customer_phone = desc.replace("Customer phone: ", "") if "Customer phone: " in desc else None
+                provider_name, amount = financial_details(e.get("summary") or "", None)
                 results.append({
                     "id": e.get("id"),
                     "customerPhone": customer_phone,
@@ -4462,7 +4490,9 @@ def get_bookings(
                     "startTime": format_booking_dt(b_start_local),
                     "endTime": format_booking_dt(b_end_local),
                     "status": "scheduled",
-                    "notes": desc
+                    "notes": desc,
+                    "providerName": provider_name,
+                    "amount": amount,
                 })
         except Exception as ex:
             print(f"Error listing Google Calendar events: {ex}")
@@ -4483,7 +4513,13 @@ def get_bookings(
         if existing_result:
             existing_result["smsAccountKey"] = de.sms_account_key
             existing_result["threadId"] = de.thread_id
+            existing_result["status"] = getattr(de, "status", "scheduled") or "scheduled"
+            existing_result["notes"] = getattr(de, "notes", "") or existing_result.get("notes", "")
+            provider_name, amount = financial_details(de.summary, de.sms_account_key, de.amount)
+            existing_result["providerName"] = provider_name
+            existing_result["amount"] = amount
         else:
+            provider_name, amount = financial_details(de.summary, de.sms_account_key, de.amount)
             results.append({
                 "id": de.id,
                 "customerPhone": de.customer_phone,
@@ -4493,7 +4529,9 @@ def get_bookings(
                 "startTime": de_start_str,
                 "endTime": format_booking_dt(de.end_time),
                 "status": getattr(de, "status", "scheduled") or "scheduled",
-                "notes": getattr(de, "notes", "") or ""
+                "notes": getattr(de, "notes", "") or "",
+                "providerName": provider_name,
+                "amount": amount,
             })
             
     return results
@@ -4544,15 +4582,15 @@ def update_booking_endpoint(booking_id: str, payload: UpdateBookingInput, db: Se
         
     if payload.startTime is not None:
         try:
-            dt_start = datetime.fromisoformat(payload.startTime.replace("Z", "+00:00"))
-            booking.start_time = dt_start.astimezone(tz_hobart).replace(tzinfo=None)
+            dt_start = parse_business_datetime(payload.startTime)
+            booking.start_time = dt_start.replace(tzinfo=None)
         except Exception:
             pass
             
     if payload.endTime is not None:
         try:
-            dt_end = datetime.fromisoformat(payload.endTime.replace("Z", "+00:00"))
-            booking.end_time = dt_end.astimezone(tz_hobart).replace(tzinfo=None)
+            dt_end = parse_business_datetime(payload.endTime)
+            booking.end_time = dt_end.replace(tzinfo=None)
         except Exception:
             pass
 
@@ -4568,9 +4606,9 @@ def update_booking_endpoint(booking_id: str, payload: UpdateBookingInput, db: Se
             if payload.customerPhone is not None:
                 body["description"] = f"Customer phone: {payload.customerPhone}"
             if payload.startTime is not None:
-                body["start"] = {"dateTime": payload.startTime}
+                body["start"] = {"dateTime": format_booking_dt(booking.start_time)}
             if payload.endTime is not None:
-                body["end"] = {"dateTime": payload.endTime}
+                body["end"] = {"dateTime": format_booking_dt(booking.end_time)}
             if body:
                 calendar_service.service.events().patch(
                     calendarId=calendar_id, eventId=booking_id, body=body
@@ -4587,7 +4625,9 @@ def update_booking_endpoint(booking_id: str, payload: UpdateBookingInput, db: Se
         "startTime": format_booking_dt(booking.start_time),
         "endTime": format_booking_dt(booking.end_time),
         "status": getattr(booking, "status", "scheduled") or "scheduled",
-        "notes": getattr(booking, "notes", "") or ""
+        "notes": getattr(booking, "notes", "") or "",
+        "providerName": _booking_reminder_parts(booking.summary, booking.sms_account_key)[2],
+        "amount": booking.amount,
     }
 
 
@@ -12924,6 +12964,9 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
             start_time=start_dt,
             end_time=end_dt,
         )
+        local_booking = _arrival_booking(db, str(booking_id))
+        if local_booking:
+            local_booking.amount = int(service.get("price", 0) or 0)
         arrival_link = _arrival_public_link(arrival_token)
             
         template_path = os.path.join(PROMPTS_DIR, "sms_confirmation_template.txt")

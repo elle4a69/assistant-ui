@@ -146,6 +146,8 @@ export interface CalendarBooking {
   endTime: string;
   status?: 'scheduled' | 'completed' | 'no_show' | 'cancelled';
   notes?: string;
+  providerName?: string | null;
+  amount?: number | null;
 }
 
 export interface FreeBusySlot {
