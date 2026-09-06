@@ -3572,21 +3572,6 @@ AUTH_USERNAME = os.getenv("APP_USERNAME", "admin")
 AUTH_PASSWORD = os.getenv("APP_PASSWORD", "")
 AUTH_COOKIE_NAME = "assistant_ui_admin_session"
 AUTH_SESSION_MAX_AGE = 60 * 60 * 24 * 365
-UI_MAINTENANCE_MODE = True
-UI_MAINTENANCE_HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Temporarily offline</title>
-  <style>
-    html,body{height:100%;margin:0;background:#0f172a;color:#f8fafc;font-family:system-ui,-apple-system,sans-serif}
-    body{display:grid;place-items:center;text-align:center}
-    main{padding:2rem}h1{font-size:1.5rem;margin:0 0 .5rem}p{margin:0;color:#94a3b8}
-  </style>
-</head>
-<body><main><h1>Temporarily offline</h1><p>The user interface is unavailable.</p></main></body>
-</html>"""
 PUBLIC_EXACT_PATHS = {
     "/",
     "/docs",
@@ -3698,29 +3683,6 @@ def is_public_request(request: Request) -> bool:
 
 @app.middleware("http")
 async def require_basic_auth(request: Request, call_next):
-    path = request.url.path
-    is_backend_path = (
-        path.startswith("/api/")
-        or path == "/openapi.json"
-        or path.startswith("/webhooks/")
-    )
-    is_document_request = (
-        request.headers.get("sec-fetch-dest", "").lower() == "document"
-        or "text/html" in request.headers.get("accept", "").lower()
-    )
-    if (
-        UI_MAINTENANCE_MODE
-        and request.method.upper() in {"GET", "HEAD"}
-        and not is_backend_path
-        and is_document_request
-    ):
-        return Response(
-            content=UI_MAINTENANCE_HTML if request.method.upper() == "GET" else "",
-            status_code=503,
-            media_type="text/html",
-            headers={"Cache-Control": "no-store", "Retry-After": "3600"},
-        )
-
     if is_public_request(request):
         return await call_next(request)
 
