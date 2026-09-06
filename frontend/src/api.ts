@@ -148,6 +148,13 @@ export interface CalendarBooking {
   notes?: string;
   providerName?: string | null;
   amount?: number | null;
+  extras?: BookingExtra[];
+}
+
+export interface BookingExtra {
+  id: 'natural';
+  name: string;
+  price: number;
 }
 
 export interface FreeBusySlot {
@@ -507,7 +514,11 @@ export async function listBookings(options: { includePast?: boolean } = {}): Pro
 
 
 
-export async function updateBooking(id: string, payload: Partial<CalendarBooking>): Promise<CalendarBooking> {
+export type UpdateBookingPayload = Partial<Omit<CalendarBooking, 'extras'>> & {
+  extras?: BookingExtra['id'][];
+};
+
+export async function updateBooking(id: string, payload: UpdateBookingPayload): Promise<CalendarBooking> {
   const response = await apiFetch(`${API_BASE}/api/calendar/bookings/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -1144,6 +1155,7 @@ export interface BookingPayload {
   startTime: string;
   notes?: string;
   providerKey?: 'tori' | 'anonymous';
+  extras?: BookingExtra['id'][];
 }
 
 export async function getServices(): Promise<Service[]> {
@@ -1208,7 +1220,7 @@ export async function saveBookingReminderConfig(config: BookingReminderConfig): 
   return response.json();
 }
 
-export async function createBooking(booking: BookingPayload): Promise<{ status: string; smsSent: string; smsError?: string | null }> {
+export async function createBooking(booking: BookingPayload): Promise<{ status: string; smsSent: string; smsError?: string | null; extras: BookingExtra[]; amount: number }> {
   const response = await apiFetch(`${API_BASE}/api/calendar/bookings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

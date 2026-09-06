@@ -36,8 +36,12 @@ def test_services_and_manual_bookings(monkeypatch, tmp_path):
         monkeypatch.setattr(main, "PROMPTS_DIR", str(tmp_path / "prompts"))
         monkeypatch.setattr(main, "booking_availability_error", lambda *_args: None)
         sent_messages = []
-        booking_ids = iter(("test-booking-id-primary", "test-booking-id-secondary"))
-        monkeypatch.setattr(main.calendar_service, "create_booking", lambda **kwargs: next(booking_ids))
+        booking_ids = iter(("test-booking-id-primary", "test-booking-id-natural", "test-booking-id-secondary"))
+        created_bookings = []
+        def create_booking(**kwargs):
+            created_bookings.append(kwargs)
+            return next(booking_ids)
+        monkeypatch.setattr(main.calendar_service, "create_booking", create_booking)
         monkeypatch.setattr(
             main.mobilemessage_service,
             "send_sms",
@@ -108,6 +112,30 @@ def test_services_and_manual_bookings(monkeypatch, tmp_path):
         assert res_data["arrivalLink"] in sent_messages[0][1]
         assert "When you arrive, tap:" in sent_messages[0][1]
         assert sent_messages[0][2] == "primary"
+        assert res_data["extras"] == []
+        assert res_data["amount"] == 180
+        assert "extras" not in created_bookings[0]
+
+        natural_payload = {
+            **booking_payload,
+            "startTime": "2026-08-09T05:30:00Z",
+            "extras": ["natural"],
+        }
+        response = client.post("/api/calendar/bookings", json=natural_payload)
+        assert response.status_code == 200
+        assert response.json()["extras"] == [{"id": "natural", "name": "Natural", "price": 100}]
+        assert response.json()["amount"] == 280
+        assert created_bookings[1]["extras"] == [{"id": "natural", "name": "Natural", "price": 100}]
+
+        natural_db = main.SessionLocal()
+        try:
+            natural_booking = natural_db.query(main.CalendarEvent).filter_by(
+                id="test-booking-id-natural"
+            ).one()
+            assert json.loads(natural_booking.extras) == [{"id": "natural", "name": "Natural", "price": 100}]
+            assert natural_booking.amount == 280
+        finally:
+            natural_db.close()
 
         # The selected sender must own both the SMS dispatch and conversation.
         secondary_payload = {
@@ -117,7 +145,7 @@ def test_services_and_manual_bookings(monkeypatch, tmp_path):
         }
         response = client.post("/api/calendar/bookings", json=secondary_payload)
         assert response.status_code == 200
-        assert sent_messages[1][2] == "secondary"
+        assert sent_messages[2][2] == "secondary"
 
         test_db = main.SessionLocal()
         try:

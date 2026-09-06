@@ -58,7 +58,20 @@ class BookingToolSuite:
 
     def services(self) -> dict[str, Any]:
         services = self.provider.list_services()
-        return {"status": "ok", "services": services, "count": len(services)}
+        return {
+            "status": "ok",
+            "services": services,
+            "count": len(services),
+            "available_extras": [
+                {
+                    "id": "natural",
+                    "name": "Natural",
+                    "price": 100,
+                    "request_only": True,
+                    "available_for_all_services": True,
+                }
+            ],
+        }
 
     def times_today(self, service_id: str, limit: int = 8) -> dict[str, Any]:
         return self._times_for_date(service_id, self._now().date(), limit)

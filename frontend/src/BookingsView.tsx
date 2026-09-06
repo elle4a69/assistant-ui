@@ -257,6 +257,11 @@ function BookingCard({
             {booking.notes && (
               <p className="text-[9px] text-slate-400 italic leading-tight line-clamp-2">{booking.notes}</p>
             )}
+            {booking.extras?.map(extra => (
+              <span key={extra.id} className="w-fit rounded bg-rose-50 px-1.5 py-0.5 text-[8px] font-bold text-rose-700">
+                {extra.name} +${extra.price}
+              </span>
+            ))}
             <div className="flex items-center gap-1 mt-0.5 flex-wrap">
               <button
                 onMouseDown={e => e.stopPropagation()}
@@ -331,7 +336,8 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
     startTimeStr: '09:00',
     endTimeStr: '09:30',
     status: 'scheduled' as StatusType,
-    notes: ''
+    notes: '',
+    naturalSelected: false,
   });
 
   const dragRef = useRef<{
@@ -445,7 +451,8 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
       startTimeStr: `${String(startParts.hour).padStart(2, '0')}:${String(startParts.minute).padStart(2, '0')}`,
       endTimeStr: `${String(endParts.hour).padStart(2, '0')}:${String(endParts.minute).padStart(2, '0')}`,
       status: (booking.status as StatusType) || 'scheduled',
-      notes: booking.notes || ''
+      notes: booking.notes || '',
+      naturalSelected: booking.extras?.some(extra => extra.id === 'natural') ?? false,
     });
     setEditingBooking(booking);
   };
@@ -461,10 +468,11 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
         startTime: businessLocalTimestamp(editForm.dateStr, startH * 60 + startM),
         endTime: businessLocalTimestamp(editForm.dateStr, endH * 60 + endM),
         status: editForm.status,
-        notes: editForm.notes
+        notes: editForm.notes,
+        extras: editForm.naturalSelected ? ['natural' as const] : [],
       };
       const updated = await updateBooking(editingBooking.id, payload);
-      setBookings(prev => prev.map(b => b.id === editingBooking.id ? { ...b, ...payload, ...updated } : b));
+      setBookings(prev => prev.map(b => b.id === editingBooking.id ? { ...b, ...updated } : b));
       setEditingBooking(null);
       setSuccessMsg('Appointment updated.');
     } catch {
@@ -954,6 +962,11 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
                         <span className="rounded-lg border border-emerald-100 bg-emerald-50 px-2 py-1 font-black text-emerald-700">
                           {typeof booking.amount === 'number' ? `$${booking.amount.toLocaleString('en-AU')}` : 'Amount unavailable'}
                         </span>
+                        {booking.extras?.map(extra => (
+                          <span key={extra.id} className="rounded-lg border border-rose-100 bg-rose-50 px-2 py-1 font-black text-rose-700">
+                            {extra.name} +${extra.price}
+                          </span>
+                        ))}
                         {booking.notes && (
                           <span className="flex items-center gap-1 text-slate-400">
                             <FileText className="w-3.5 h-3.5" />{booking.notes}
@@ -1077,6 +1090,13 @@ export default function BookingsView({ onOpenThread }: BookingsViewProps) {
                 <label className="block mb-1 text-slate-500 font-bold">Notes</label>
                 <textarea rows={3} value={editForm.notes} onChange={e => setEditForm(p => ({ ...p, notes: e.target.value }))} placeholder="Internal notes..." className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-rose-500 text-slate-800 font-medium" />
               </div>
+              <label className="flex cursor-pointer items-center justify-between rounded-xl border border-rose-100 bg-rose-50 px-3 py-2">
+                <span><span className="block font-bold text-slate-800">Natural</span><span className="text-[10px] text-slate-500">Optional booking extra</span></span>
+                <span className="flex items-center gap-2 font-black text-rose-700">
+                  +$100
+                  <input type="checkbox" checked={editForm.naturalSelected} onChange={e => setEditForm(p => ({ ...p, naturalSelected: e.target.checked }))} className="size-4 accent-rose-600" />
+                </span>
+              </label>
             </div>
             <div className="flex justify-end gap-2.5 mt-2 border-t border-slate-100 pt-3">
               <button type="button" onClick={() => setEditingBooking(null)} className="px-4 py-2 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 cursor-pointer">Cancel</button>

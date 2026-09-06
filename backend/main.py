@@ -1209,6 +1209,41 @@ def is_contact_blocked(db: Session, sms_account_key: str, customer_phone: str) -
         BlockedContact.customer_phone == canonical_phone,
     ).first() is not None
 
+BOOKING_EXTRAS: Dict[str, Dict[str, Any]] = {
+    "natural": {"id": "natural", "name": "Natural", "price": 100},
+}
+
+
+def normalize_booking_extras(value: Any) -> List[Dict[str, Any]]:
+    """Return explicitly selected, supported booking extras in stable order."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            value = [part.strip() for part in value.split(",")]
+    if not isinstance(value, list):
+        return []
+
+    requested_ids = set()
+    for item in value:
+        extra_id = item.get("id") if isinstance(item, dict) else item
+        normalized_id = str(extra_id or "").strip().casefold()
+        if normalized_id in BOOKING_EXTRAS:
+            requested_ids.add(normalized_id)
+    return [dict(extra) for key, extra in BOOKING_EXTRAS.items() if key in requested_ids]
+
+
+def booking_extras_total(extras: Any) -> int:
+    return sum(int(extra["price"]) for extra in normalize_booking_extras(extras))
+
+
+def booking_extras_json(extras: Any) -> Optional[str]:
+    normalized = normalize_booking_extras(extras)
+    return json.dumps(normalized, separators=(",", ":")) if normalized else None
+
+
 class CalendarEvent(Base):
     __tablename__ = "calendar_events"
     
@@ -1222,6 +1257,7 @@ class CalendarEvent(Base):
     status = Column(String, default="scheduled", nullable=False)
     notes = Column(Text, nullable=True)
     amount = Column(Integer, nullable=True)
+    extras = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -1364,6 +1400,8 @@ def init_db():
                 conn.exec_driver_sql("ALTER TABLE calendar_events ADD COLUMN thread_id VARCHAR")
             if "amount" not in col_names:
                 conn.exec_driver_sql("ALTER TABLE calendar_events ADD COLUMN amount INTEGER")
+            if "extras" not in col_names:
+                conn.exec_driver_sql("ALTER TABLE calendar_events ADD COLUMN extras TEXT")
             # Persist verified prices for legacy service labels that predate the
             # booking amount snapshot. Deliberately exclude custom/test labels.
             legacy_booking_prices = (
@@ -3027,6 +3065,7 @@ class GoogleCalendarService:
                         "summary": event_item.get("summary", "Appointment"),
                         "start": event_start,
                         "end": event_end,
+                        "extras": normalize_booking_extras(private.get("booking_extras")),
                     })
             except Exception as exc:
                 print(f"Error listing customer Google Calendar bookings: {exc}")
@@ -3051,13 +3090,21 @@ class GoogleCalendarService:
                     "summary": event_item.summary,
                     "start": event_start,
                     "end": event_end,
+                    "extras": normalize_booking_extras(event_item.extras),
                 })
         finally:
             if owns_session:
                 local_db.close()
         return sorted(results, key=lambda item: item["start"])
             
-    def create_booking(self, summary: str, start: datetime, end: datetime, customer_phone: str) -> Optional[str]:
+    def create_booking(
+        self,
+        summary: str,
+        start: datetime,
+        end: datetime,
+        customer_phone: str,
+        extras: Any = None,
+    ) -> Optional[str]:
         # Clear cache on modification
         if hasattr(self, "_cache"):
             self._cache.clear()
@@ -3072,12 +3119,14 @@ class GoogleCalendarService:
         if self.service:
             try:
                 calendar_id = os.getenv("CALENDAR_ID", "primary")
+                private_properties = {"customer_phone": canonical_phone_number(customer_phone)}
+                serialized_extras = booking_extras_json(extras)
+                if serialized_extras:
+                    private_properties["booking_extras"] = serialized_extras
                 event_body = {
                     "summary": summary,
                     "description": f"Customer phone: {customer_phone}",
-                    "extendedProperties": {
-                        "private": {"customer_phone": canonical_phone_number(customer_phone)}
-                    },
+                    "extendedProperties": {"private": private_properties},
                     "start": {
                         "dateTime": start_aware.isoformat(),
                     },
@@ -3097,6 +3146,7 @@ class GoogleCalendarService:
                         summary=summary,
                         start_time=start_aware.replace(tzinfo=None),
                         end_time=end_aware.replace(tzinfo=None),
+                        extras=serialized_extras,
                     )
                     db.merge(booking)
                     db.commit()
@@ -3117,7 +3167,8 @@ class GoogleCalendarService:
                 customer_phone=customer_phone,
                 summary=summary,
                 start_time=start_aware.replace(tzinfo=None),
-                end_time=end_aware.replace(tzinfo=None)
+                end_time=end_aware.replace(tzinfo=None),
+                extras=booking_extras_json(extras),
             )
             db.add(booking)
             db.commit()
@@ -3903,6 +3954,7 @@ def propose_conversational_booking(
     start_time: str,
     customer_name: str,
     notes: Optional[str],
+    extras: Any = None,
 ) -> Dict[str, Any]:
     """Validate and save a proposal; this function never creates a booking."""
     service = get_service_for_booking((service_id or "").strip())
@@ -3921,11 +3973,15 @@ def propose_conversational_booking(
     if availability_error:
         return {"status": "rejected", "reason": availability_error}
 
+    selected_extras = normalize_booking_extras(extras)
+    base_price = int(service.get("price", 0) or 0)
     proposal = {
         "service_id": service["id"],
         "service_name": str(service.get("name") or "Appointment"),
         "duration": duration,
-        "price": int(service.get("price", 0) or 0),
+        "base_price": base_price,
+        "price": base_price + booking_extras_total(selected_extras),
+        "extras": selected_extras,
         "show_duration": service.get("showDuration", True) is not False,
         "start_time": start.isoformat(),
         "customer_name": clean_name,
@@ -4004,12 +4060,16 @@ def confirm_conversational_booking(
         f"{proposal['customer_name']} - {proposal['service_name']} "
         f"({booking_provider_name})"
     )
-    booking_id = calendar_service.create_booking(
-        summary=booking_summary,
-        start=start,
-        end=end,
-        customer_phone=thread.customer_phone,
-    )
+    create_arguments = {
+        "summary": booking_summary,
+        "start": start,
+        "end": end,
+        "customer_phone": thread.customer_phone,
+    }
+    selected_extras = normalize_booking_extras(proposal.get("extras"))
+    if selected_extras:
+        create_arguments["extras"] = selected_extras
+    booking_id = calendar_service.create_booking(**create_arguments)
     if not booking_id:
         return {"status": "failed", "reason": "The calendar did not accept the booking."}, False
 
@@ -4026,6 +4086,7 @@ def confirm_conversational_booking(
     local_booking = _arrival_booking(db, str(booking_id))
     if local_booking:
         local_booking.amount = int(proposal.get("price", 0) or 0)
+        local_booking.extras = booking_extras_json(selected_extras)
     proposal["arrival_link"] = _arrival_public_link(arrival_token)
     proposal["arrival_session_id"] = arrival_session.id
 
@@ -4042,10 +4103,11 @@ def confirm_conversational_booking(
             except OSError:
                 pass
         provider_name = "Anonymous" if thread.sms_account_key == "secondary" else "Tori"
+        confirmation_service = proposal["service_name"] + (" + Natural" if selected_extras else "")
         confirmation_text = render_template_variables(template, {
             **get_business_variable_values(),
             "name": proposal["customer_name"],
-            "service": proposal["service_name"],
+            "service": confirmation_service,
             "provider": provider_name,
             "time": start.strftime("%A, %b %d at %I:%M %p"),
             "arrival_link": proposal["arrival_link"],
@@ -4629,8 +4691,14 @@ def get_bookings(
                 b_end_local = b_end.astimezone(tz_hobart).replace(tzinfo=None)
                 
                 desc = e.get("description", "")
+                private = e.get("extendedProperties", {}).get("private", {})
+                selected_extras = normalize_booking_extras(
+                    private.get("booking_extras", private.get("extras"))
+                )
                 customer_phone = desc.replace("Customer phone: ", "") if "Customer phone: " in desc else None
                 provider_name, amount = financial_details(e.get("summary") or "", None)
+                if amount is not None:
+                    amount += booking_extras_total(selected_extras)
                 results.append({
                     "id": e.get("id"),
                     "customerPhone": customer_phone,
@@ -4643,6 +4711,7 @@ def get_bookings(
                     "notes": desc,
                     "providerName": provider_name,
                     "amount": amount,
+                    "extras": selected_extras,
                 })
         except Exception as ex:
             print(f"Error listing Google Calendar events: {ex}")
@@ -4668,6 +4737,7 @@ def get_bookings(
             provider_name, amount = financial_details(de.summary, de.sms_account_key, de.amount)
             existing_result["providerName"] = provider_name
             existing_result["amount"] = amount
+            existing_result["extras"] = normalize_booking_extras(de.extras)
         else:
             provider_name, amount = financial_details(de.summary, de.sms_account_key, de.amount)
             results.append({
@@ -4682,6 +4752,7 @@ def get_bookings(
                 "notes": getattr(de, "notes", "") or "",
                 "providerName": provider_name,
                 "amount": amount,
+                "extras": normalize_booking_extras(de.extras),
             })
             
     return results
@@ -4695,6 +4766,7 @@ class UpdateBookingInput(BaseModel):
     status: Optional[str] = None
     notes: Optional[str] = None
     amount: Optional[int] = None
+    extras: Optional[List[str]] = None
 
 
 @app.put("/api/calendar/bookings/{booking_id}")
@@ -4734,6 +4806,12 @@ def update_booking_endpoint(booking_id: str, payload: UpdateBookingInput, db: Se
         if payload.amount < 0:
             raise HTTPException(status_code=422, detail="Booking amount must be zero or greater")
         booking.amount = payload.amount
+    if payload.extras is not None:
+        previous_extra_total = booking_extras_total(booking.extras)
+        selected_extras = normalize_booking_extras(payload.extras)
+        booking.extras = booking_extras_json(selected_extras)
+        if payload.amount is None and booking.amount is not None:
+            booking.amount = max(0, booking.amount - previous_extra_total) + booking_extras_total(selected_extras)
         
     if payload.startTime is not None:
         try:
@@ -4760,6 +4838,13 @@ def update_booking_endpoint(booking_id: str, payload: UpdateBookingInput, db: Se
                 body["summary"] = payload.summary
             if payload.customerPhone is not None:
                 body["description"] = f"Customer phone: {payload.customerPhone}"
+            if payload.extras is not None:
+                body["extendedProperties"] = {
+                    "private": {
+                        "customer_phone": canonical_phone_number(booking.customer_phone or ""),
+                        "booking_extras": booking_extras_json(payload.extras) or "[]",
+                    }
+                }
             if payload.startTime is not None:
                 body["start"] = {"dateTime": format_booking_dt(booking.start_time)}
             if payload.endTime is not None:
@@ -4783,6 +4868,7 @@ def update_booking_endpoint(booking_id: str, payload: UpdateBookingInput, db: Se
         "notes": getattr(booking, "notes", "") or "",
         "providerName": _booking_reminder_parts(booking.summary, booking.sms_account_key)[2],
         "amount": booking.amount,
+        "extras": normalize_booking_extras(booking.extras),
     }
 
 
@@ -5288,8 +5374,16 @@ def run_sms_reply_logic(
                             },
                             "customer_name": {"type": "string"},
                             "notes": {"type": ["string", "null"]},
+                            "extras": {
+                                "type": "array",
+                                "items": {"type": "string", "enum": ["natural"]},
+                                "description": (
+                                    "Selected extra IDs. Use ['natural'] only when the customer explicitly "
+                                    "requests Natural; otherwise use an empty array. Natural costs $100."
+                                ),
+                            },
                         },
-                        "required": ["service_id", "start_time", "customer_name", "notes"],
+                        "required": ["service_id", "start_time", "customer_name", "notes", "extras"],
                         "additionalProperties": False,
                     },
                     "strict": True,
@@ -5352,6 +5446,8 @@ def run_sms_reply_logic(
                 "the booking: do not recap the service or ask a second confirmation question. Reply only with a short, informal confirmation such "
                 "as 'All good, see you tomorrow.' Never ask the customer to visit a form or webpage. "
                 "Never claim a booking is confirmed unless propose_booking reports confirmed or already_confirmed."
+                " Natural is an optional $100 extra available with every service. Include the natural extra only "
+                "when the customer explicitly requests it; choosing a service never implies Natural."
             )
             if draft_only:
                 instructions += (
@@ -5541,6 +5637,7 @@ def run_sms_reply_logic(
                                 start_time=args.get("start_time", ""),
                                 customer_name=args.get("customer_name", ""),
                                 notes=args.get("notes"),
+                                extras=args.get("extras", []),
                             )
                             if tool_result.get("status") == "awaiting_confirmation":
                                 if TRAINING_MODE_ENABLED or draft_only:
@@ -13034,6 +13131,7 @@ class ManualBookingInput(BaseModel):
     startTime: str
     notes: Optional[str] = None
     providerKey: Literal["tori", "anonymous"] = "tori"
+    extras: List[str] = Field(default_factory=list)
 
 
 @app.get("/api/services")
@@ -13178,7 +13276,9 @@ def process_due_booking_reminders() -> None:
                 variables = {
                     **get_business_variable_values(),
                     "name": name,
-                    "service": service,
+                    "service": service + (
+                        " + Natural" if normalize_booking_extras(booking.extras) else ""
+                    ),
                     "provider": provider_name,
                     "provider_name": provider_name,
                     "time": formatted_time,
@@ -13265,13 +13365,17 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
         if availability_error:
             raise HTTPException(status_code=409, detail=availability_error)
 
+        selected_extras = normalize_booking_extras(payload.extras)
         summary = f"{payload.name} - {service['name']} ({provider['name']})"
-        booking_id = calendar_service.create_booking(
+        create_arguments = dict(
             summary=summary,
             start=start_dt,
             end=end_dt,
-            customer_phone=customer_phone
+            customer_phone=customer_phone,
         )
+        if selected_extras:
+            create_arguments["extras"] = selected_extras
+        booking_id = calendar_service.create_booking(**create_arguments)
         if not booking_id:
             raise HTTPException(status_code=500, detail="Failed to create booking in calendar service.")
 
@@ -13286,7 +13390,10 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
         )
         local_booking = _arrival_booking(db, str(booking_id))
         if local_booking:
-            local_booking.amount = int(service.get("price", 0) or 0)
+            local_booking.amount = (
+                int(service.get("price", 0) or 0) + booking_extras_total(selected_extras)
+            )
+            local_booking.extras = booking_extras_json(selected_extras)
         arrival_link = _arrival_public_link(arrival_token)
             
         template_path = os.path.join(PROMPTS_DIR, "sms_confirmation_template.txt")
@@ -13302,7 +13409,7 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
         confirmation_variables = {
             **get_business_variable_values(),
             "name": payload.name,
-            "service": service["name"],
+            "service": service["name"] + (" + Natural" if selected_extras else ""),
             "provider": provider["name"],
             "time": formatted_time,
             "arrival_link": arrival_link,
@@ -13385,6 +13492,8 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
             "smsError": "Booking saved, but the confirmation SMS was not sent." if delivery_failure else None,
             "arrivalLink": arrival_link,
             "arrivalSessionId": arrival_session.id,
+            "extras": selected_extras,
+            "amount": int(service.get("price", 0) or 0) + booking_extras_total(selected_extras),
         }
     except HTTPException:
         db.rollback()

@@ -36,13 +36,16 @@ class FakeCalendar:
     def get_customer_bookings(self, phone, start, end, db=None):
         return self.existing
 
-    def create_booking(self, summary, start, end, customer_phone):
-        self.created.append({
+    def create_booking(self, summary, start, end, customer_phone, extras=None):
+        created = {
             "summary": summary,
             "start": start,
             "end": end,
             "customer_phone": customer_phone,
-        })
+        }
+        if extras is not None:
+            created["extras"] = extras
+        self.created.append(created)
         return True
 
 
@@ -848,6 +851,46 @@ def test_secondary_confirmation_is_retried_as_a_required_booking_tool_call(tmp_p
         not asks_for_secondary_booking_confirmation(message.text)
         for message in db.query(Message).filter(Message.role.in_(["agent", "draft"])).all()
     )
+    db.close()
+
+
+def test_natural_extra_requires_explicit_agent_selection(tmp_path, monkeypatch):
+    service = {"id": "any-service", "name": "Any service", "duration": 30, "price": 175}
+    (tmp_path / "services.json").write_text(json.dumps([service]), encoding="utf-8")
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "load_working_hours", lambda: [
+        {"day": day, "enabled": True, "open": "00:00", "close": "23:59"}
+        for day in main.DAY_NAMES
+    ])
+    calendar = FakeCalendar()
+    monkeypatch.setattr(main, "calendar_service", calendar)
+    db = make_db()
+    thread = add_thread(db)
+    start = (current_business_time() + timedelta(days=2)).replace(
+        hour=14, minute=0, second=0, microsecond=0,
+    )
+
+    ordinary = propose_conversational_booking(
+        thread, service_id="any-service", start_time=start.isoformat(),
+        customer_name="Example Customer", notes=None,
+    )["proposal"]
+    assert ordinary["extras"] == []
+    assert ordinary["price"] == 175
+
+    natural = propose_conversational_booking(
+        thread, service_id="any-service", start_time=start.isoformat(),
+        customer_name="Example Customer", notes=None, extras=["natural"],
+    )["proposal"]
+    assert natural["extras"] == [{"id": "natural", "name": "Natural", "price": 100}]
+    assert natural["price"] == 275
+
+    result, confirmed = confirm_conversational_booking(
+        db, thread, "", proposal_override=natural,
+        require_customer_confirmation=False, send_confirmation=False,
+    )
+    assert confirmed is True
+    assert result["status"] == "confirmed"
+    assert calendar.created[0]["extras"] == natural["extras"]
     db.close()
 
 

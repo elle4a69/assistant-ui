@@ -854,6 +854,11 @@ export default function SmsTriageDashboard() {
                           <Clock className="w-3.5 h-3.5 text-slate-400" />
                           {new Date(booking.startTime).toLocaleString('en-AU', { timeZone: 'Australia/Hobart', dateStyle: 'short', timeStyle: 'short' })} - {new Date(booking.endTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: 'Australia/Hobart' })}
                         </span>
+                        {booking.extras?.map(extra => (
+                          <span key={extra.id} className="w-fit rounded-md bg-rose-50 px-2 py-1 font-bold text-rose-700">
+                            {extra.name} +${extra.price}
+                          </span>
+                        ))}
                       </div>
                       <div className="flex justify-between items-center mt-2 pt-2 border-t border-slate-100 shrink-0">
                         <span className="text-[10px] text-slate-400">ID: {booking.id.slice(0, 8)}</span>

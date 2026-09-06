@@ -7,6 +7,7 @@ import {
   FreeBusySlot
 } from './api';
 import { Sparkles, ChevronLeft, ChevronRight, Info, X } from 'lucide-react';
+import { bookingTotal, NATURAL_EXTRA } from './bookingExtras';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -192,6 +193,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
   // Selections
   const [selectedService, setSelectedService] = useState<Service | null>(null);
   const [selectedSlot, setSelectedSlot] = useState<FreeBusySlot | null>(null);
+  const [naturalSelected, setNaturalSelected] = useState(false);
   const [expandedServiceId, setExpandedServiceId] = useState<Service['id'] | null>(null);
 
   // Client form
@@ -365,7 +367,8 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
     return ps ? ps.slot : null;
   }, [preparsedSlots]);
 
-  const totalAmount = selectedService?.price ?? 0;
+  const selectedExtraIds = naturalSelected ? [NATURAL_EXTRA.id] : [];
+  const totalAmount = bookingTotal(selectedService?.price ?? 0, selectedExtraIds);
 
   /** Which "visible" tab step is active: 1=Service, 2=Time, 3=Client */
   const navActive = step <= 3 ? step : 3;
@@ -376,6 +379,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
     setStep(1);
     setSelectedService(null);
     setSelectedSlot(null);
+    setNaturalSelected(false);
     setName('');
     setPhone(prefilledPhone);
     setNotes('');
@@ -420,6 +424,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
         startTime: selectedSlot.startTime,
         notes: notes || undefined,
         providerKey: embedded ? 'tori' : providerKey,
+        extras: selectedExtraIds,
       });
       setConfirmationSms(res.smsSent);
       setConfirmationWarning(res.smsError || '');
@@ -892,6 +897,29 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
                       <span className="font-semibold text-slate-200">{selectedService.name}</span>
                       <span className="tabular-nums text-white">AU${selectedService.price}.00</span>
                     </div>
+
+                    <label className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/5 p-3">
+                      <span className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={naturalSelected}
+                          onChange={event => setNaturalSelected(event.target.checked)}
+                          className="size-4 accent-[#d2143a]"
+                        />
+                        <span>
+                          <span className="block font-bold text-white">Natural</span>
+                          <span className="block text-[10px] font-medium text-slate-400">Optional — select only if requested</span>
+                        </span>
+                      </span>
+                      <span className="tabular-nums font-bold text-white">+AU${NATURAL_EXTRA.price}.00</span>
+                    </label>
+
+                    {naturalSelected && (
+                      <div className="flex justify-between">
+                        <span className="font-semibold text-slate-200">Natural</span>
+                        <span className="tabular-nums text-white">AU${NATURAL_EXTRA.price}.00</span>
+                      </div>
+                    )}
 
                     <div className="mt-1 flex items-center justify-between border-t border-white/10 pt-2 text-base font-extrabold text-[#d2143a]">
                       <span>Total for booking:</span>
