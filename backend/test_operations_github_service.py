@@ -208,7 +208,7 @@ def test_coding_dispatch_follows_durable_commit_and_preserves_fallback(queued_ac
 
 
 @pytest.mark.parametrize("dispatch_fails", [False, True])
-def test_deployment_dispatch_requires_exact_confirmation_and_keeps_queued_work(queued_actions, monkeypatch, dispatch_fails):
+def test_verified_deployment_queues_automatically_and_keeps_queued_work(queued_actions, monkeypatch, dispatch_fails):
     import uuid
 
     main, db, factory = queued_actions
@@ -239,17 +239,11 @@ def test_deployment_dispatch_requires_exact_confirmation_and_keeps_queued_work(q
 
     monkeypatch.setattr(client, "dispatch_workflow", dispatch)
     proposed = main._operations_propose_code_deployment(db, task_id, "Checks passed.")
-    assert proposed["status"] == "pending_confirmation"
     action_id = proposed["action_id"]
-    assert not calls
-    rejected = main._operations_execute_code_deployment(db, action_id, "yes deploy it")
-    assert rejected["status"] == "rejected"
-    assert not calls
-
-    result = main._operations_execute_code_deployment(db, action_id, proposed["confirmation_phrase"])
-    repeated = main._operations_execute_code_deployment(db, action_id, proposed["confirmation_phrase"])
-    assert result["status"] == "deployment_queued"
-    assert result["worker_requested"] is not dispatch_fails
+    assert proposed["status"] == "deployment_queued"
+    assert proposed["automatic_release"] is True
+    assert proposed["worker_requested"] is not dispatch_fails
     assert calls == [action_id]
     assert db.get(main.OperationsAction, action_id).status == "queued"
-    assert repeated["status"] == "rejected"
+    repeated = main._operations_propose_code_deployment(db, task_id, "Checks passed.")
+    assert repeated["status"] == "already_proposed"

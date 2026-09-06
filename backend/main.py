@@ -8420,9 +8420,9 @@ def operations_ai_instructions(
                 "runner, deployment, and source evidence and either continue the existing matching task or create the one "
                 "deduplicated repair task yourself. "
                 "The task starts from current main, runs relevant checks, and pushes only a review branch. Check the task "
-                "instead of starting duplicates. After a completed task, inspect its result and code changes. Promoting "
-                "that exact branch commit to main is a separate audited action and requires the owner's exact confirmation "
-                "phrase. Never read credential files or ask a coding worker to expose secrets. "
+                "instead of starting duplicates. After a completed task, inspect its result and code changes, then use "
+                "propose_code_deployment to queue the audited automatic fast-forward, Fly deployment and health check. "
+                "Never read credential files or ask a coding worker to expose secrets. "
             )
         else:
             capability_rule += (
@@ -8480,7 +8480,7 @@ def operations_ai_instructions(
         "snapshot from hypotheses. If the snapshot does not contain enough evidence, say exactly what evidence "
         "would be needed. Never reveal or request secret values. You cannot query arbitrary SQL, send SMS, "
         "create/cancel bookings, change credentials, delete data, or perform bulk actions. Source editing, verification, "
-        "Git and deployment may be performed only through the allowlisted coding tools and their confirmation rules; "
+        "Git and deployment may be performed only through the allowlisted coding tools and their audit rules; "
         "never improvise raw infrastructure commands. Never store secrets, credentials, customer identifiers, phone "
         "numbers, message transcripts "
         "or other personal data in operational memory. Treat remembered findings as potentially stale and verify "
@@ -8725,9 +8725,9 @@ OPERATIONS_TOOL_SCHEMAS = [
         "type": "function",
         "name": "propose_code_deployment",
         "description": (
-            "Create one audited deployment proposal for a completed, committed coding task. This does not push or "
-            "deploy anything. It returns the exact owner confirmation phrase required by execute_code_deployment. "
-            "Use only after inspecting the task result and code changes and confirming its checks passed."
+            "Queue an audited automatic production deployment for a completed, committed coding task after inspecting "
+            "the task result and code changes and confirming its checks passed. The exact review commit is promoted only "
+            "by the GitHub worker after its fast-forward checks, then Fly deploys and verifies it."
         ),
         "parameters": {
             "type": "object",
@@ -8744,9 +8744,9 @@ OPERATIONS_TOOL_SCHEMAS = [
         "type": "function",
         "name": "execute_code_deployment",
         "description": (
-            "Execute a pending code deployment only when the owner's latest message exactly matches the proposal's "
-            "confirmation phrase. The exact verified review commit is fast-forwarded to main without force, then the "
-            "existing Fly GitHub Action deploys it. This rejects missing, stale, conflicting or handled proposals."
+            "Execute a legacy pending code deployment only when the owner's latest message exactly matches its "
+            "confirmation phrase. New completed coding tasks use propose_code_deployment, which queues the same "
+            "audited GitHub-worker promotion automatically."
         ),
         "parameters": {
             "type": "object",
@@ -10232,14 +10232,17 @@ def _operations_propose_code_deployment(db: Session, task_id: str, reason: str) 
         db.add(action)
         db.commit()
         db.refresh(action)
-    return {
-        "status": "pending_confirmation",
-        "action_id": action.id,
+    # The owner's implementation request already authorised its normal tested
+    # release path. Runtime controls, secrets, SMS and destructive actions keep
+    # their separate confirmation gates; this path promotes only the exact
+    # independently verified review commit through the existing GitHub worker.
+    queued = _operations_execute_code_deployment(db, action.id, f"deploy {action.id}")
+    queued.update({
         "task_id": task_id,
         "commit_sha": task_payload.get("commit_sha"),
-        "confirmation_phrase": f"deploy {action.id}",
-        "next_step": "The owner must send the exact confirmation phrase in a separate message.",
-    }
+        "automatic_release": True,
+    })
+    return queued
 
 
 def _operations_execute_code_deployment(

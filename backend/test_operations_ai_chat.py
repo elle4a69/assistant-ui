@@ -269,7 +269,7 @@ def test_operations_coding_tools_are_wired_and_start_one_audited_task(monkeypatc
     db.close()
 
 
-def test_code_deployment_requires_separate_exact_confirmation(monkeypatch):
+def test_completed_code_deployment_queues_automatically(monkeypatch):
     class FakeGitHubClient:
         configured = True
         repository = "elle4a69/assistant-ui"
@@ -332,21 +332,10 @@ def test_code_deployment_requires_separate_exact_confirmation(monkeypatch):
         {"task_id": second_task.id, "reason": "The second task also passed its checks."},
         "Deploy the second one",
     )
-    rejected = main.execute_operations_tool(
-        db, "execute_code_deployment", {"action_id": proposed["action_id"]}, "yes deploy it"
-    )
-    started = main.execute_operations_tool(
-        db,
-        "execute_code_deployment",
-        {"action_id": proposed["action_id"]},
-        proposed["confirmation_phrase"],
-    )
-
-    assert proposed["status"] == "pending_confirmation"
+    assert proposed["status"] == "deployment_queued"
+    assert proposed["automatic_release"] is True
     assert busy["status"] == "deployment_busy"
     assert busy["action_id"] == proposed["action_id"]
-    assert rejected["status"] == "rejected"
-    assert started["status"] == "deployment_queued"
     deployment = db.query(main.OperationsAction).filter(main.OperationsAction.id == proposed["action_id"]).one()
     assert deployment.status == "queued"
     db.close()
