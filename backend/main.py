@@ -797,6 +797,7 @@ def build_model_input(
     current_history_text: str,
     enriched_current_prompt: str,
     history_limit: int = 100,
+    include_timestamps: bool = False,
 ) -> list[dict[str, str]]:
     """Map deep chronological history and consolidate the active customer burst."""
     selected = list(history_messages[-history_limit:])
@@ -832,6 +833,8 @@ def build_model_input(
             if index == current_index
             else str(getattr(message, "text", ""))
         )
+        if include_timestamps and index != current_index:
+            content = timestamped_model_message(message, content)
         if role == "draft":
             content = (
                 "[UNAPPROVED DRAFT, NOT AUTHORITATIVE. Recheck all facts and availability.]\n"
@@ -848,6 +851,54 @@ def build_model_input(
     return model_input
 
 
+def business_time_from_utc(value: datetime) -> datetime:
+    """Interpret stored naive message times as UTC and show them in business time."""
+    from zoneinfo import ZoneInfo
+
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(ZoneInfo("Australia/Hobart"))
+
+
+def format_model_timestamp(value: datetime) -> str:
+    return business_time_from_utc(value).strftime("%A %d %B %Y, %I:%M %p %Z")
+
+
+def timestamped_model_message(message: Any, text: str) -> str:
+    """Attach chronological timing without changing the customer or assistant role."""
+    at = getattr(message, "at", None)
+    if not isinstance(at, datetime):
+        return text
+    label = "Received" if getattr(message, "role", None) == "customer" else "Sent"
+    return f"[{label}: {format_model_timestamp(at)}]\n{text}"
+
+
+def timestamped_customer_burst(
+    history_messages: List[Any],
+    fallback: str,
+    fallback_received_at: datetime,
+    processing_time: datetime,
+) -> str:
+    """Render the active inbound burst with each fragment's actual received time."""
+    fragments: List[str] = []
+    for message in reversed(history_messages):
+        if getattr(message, "role", None) != "customer":
+            break
+        text = str(getattr(message, "text", "")).strip()
+        if text:
+            fragments.append(timestamped_model_message(message, text))
+    fragments.reverse()
+    if not fragments:
+        fragments.append(
+            f"[Received: {format_model_timestamp(fallback_received_at)}]\n{fallback}"
+        )
+    return (
+        "Newest inbound turn, in chronological order:\n"
+        + "\n".join(fragments)
+        + f"\n[Processing now: {processing_time.strftime('%A %d %B %Y, %I:%M %p %Z')}]"
+    )
+
+
 def current_customer_burst(history_messages: List[Any], fallback: str) -> str:
     """Combine consecutive customer fragments since the most recent reply."""
     fragments: List[str] = []
@@ -859,6 +910,21 @@ def current_customer_burst(history_messages: List[Any], fallback: str) -> str:
             fragments.append(text)
     fragments.reverse()
     return "\n".join(fragments) or fallback
+
+
+def customer_burst_received_at(
+    history_messages: List[Any],
+    fallback_received_at: datetime,
+) -> datetime:
+    """Return the first received time represented by the active combined turn."""
+    received_at = fallback_received_at
+    for message in reversed(history_messages):
+        if getattr(message, "role", None) != "customer":
+            break
+        message_at = getattr(message, "at", None)
+        if isinstance(message_at, datetime):
+            received_at = message_at
+    return received_at
 
 
 def assemble_safe_prompt(
@@ -4104,14 +4170,14 @@ def unsafe_ai_reply_reason(
 def extract_requested_business_time(message: str, now_local: datetime) -> Optional[datetime]:
     """Extract an explicit customer time such as 3:35 or 4pm in local business time."""
     match = re.search(
-        r"(?<!\d)(1[0-2]|0?[1-9])(?:(?::|\.)([0-5]\d))\s*(am|pm)?\b",
+        r"(?<!\d)(1[0-2]|0?[1-9])(?:(?::|\.)([0-5]\d)\s*(am|pm)?|\s*(am|pm))\b",
         (message or "").casefold(),
     )
     if not match:
         return None
     hour = int(match.group(1))
     minute = int(match.group(2) or 0)
-    meridiem = match.group(3)
+    meridiem = match.group(3) or match.group(4)
     if meridiem:
         hour = (hour % 12) + (12 if meridiem == "pm" else 0)
         return now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
@@ -4122,6 +4188,60 @@ def extract_requested_business_time(message: str, now_local: datetime) -> Option
         candidates.append(candidate)
     plausible = [candidate for candidate in candidates if candidate >= now_local - timedelta(minutes=30)]
     return min(plausible or candidates, key=lambda candidate: abs((candidate - now_local).total_seconds()))
+
+
+def requested_time_at_receipt(message: str, received_local: datetime) -> Optional[datetime]:
+    """Resolve a customer's explicit time against when their message was received."""
+    requested = extract_requested_business_time(message, received_local)
+    if not requested:
+        return None
+    normalized = (message or "").casefold()
+    if re.search(r"\btomorrow\b", normalized):
+        requested += timedelta(days=1)
+    elif not re.search(r"\btoday\b", normalized):
+        weekday_names = [day.casefold() for day in DAY_NAMES]
+        weekday_match = next(
+            (index for index, name in enumerate(weekday_names) if re.search(rf"\b{name}\b", normalized)),
+            None,
+        )
+        if weekday_match is not None:
+            requested += timedelta(days=(weekday_match - received_local.weekday()) % 7)
+    return requested
+
+
+def delayed_requested_time(
+    message: str,
+    received_at_naive: datetime,
+    processing_time: datetime,
+) -> Optional[datetime]:
+    """Return a once-upcoming requested time that elapsed while the reply was delayed."""
+    received_local = business_time_from_utc(received_at_naive)
+    requested = requested_time_at_receipt(message, received_local)
+    if requested and received_local <= requested < processing_time:
+        return requested
+    return None
+
+
+def delayed_reply_error(reply: str, delayed_time: Optional[datetime]) -> Optional[str]:
+    """Require a stale-time reply to acknowledge the miss and move the conversation forward."""
+    if not delayed_time:
+        return None
+    normalized = " ".join((reply or "").casefold().replace("’", "'").split())
+    acknowledges_delay = bool(re.search(
+        r"\b(?:missed|(?:only )?just (?:saw|seen|seeing|got|read|noticed)|"
+        r"didn't (?:see|catch|get)|already passed|has passed|had passed|already gone|too late)\b",
+        normalized,
+    ))
+    offers_current_path = bool(re.search(
+        r"\b(?:later|another|instead|still (?:looking|after|want|need)|today|tomorrow|"
+        r"other (?:day|time)|what time|when (?:would|did))\b",
+        normalized,
+    ))
+    if not acknowledges_delay:
+        return "AI did not acknowledge that the requested time elapsed before processing"
+    if not offers_current_path:
+        return "AI did not offer a current alternative after the missed requested time"
+    return None
 
 
 def human_replied_after(db: Session, thread_id: str, received_at: datetime) -> bool:
@@ -5033,6 +5153,12 @@ def run_sms_reply_logic(
     
     now_local = current_business_time()
     reply_at_naive = datetime.utcnow()
+    burst_received_at = customer_burst_received_at(history_msgs, received_at_naive)
+    delayed_request_time = delayed_requested_time(
+        effective_body,
+        burst_received_at,
+        now_local,
+    )
     requested_duration = requested_duration_minutes(history_msgs, effective_body)
     
     # Step 2: Supply customer-owned booking context, but never inject generic
@@ -5096,9 +5222,15 @@ def run_sms_reply_logic(
         "current_time": now_local.strftime("%A %d %B %Y, %I:%M %p %Z"),
     })
     outbound_instruction_reference = system_prompt_rendered
+    timestamped_current_turn = timestamped_customer_burst(
+        history_msgs,
+        effective_body,
+        burst_received_at,
+        now_local,
+    )
     user_prompt_rendered = render_template_variables(user_prompt_tmpl, {
         **business_variables,
-        "message": effective_body,
+        "message": timestamped_current_turn,
         "knowledge": retrieved_context,
         "slots": slots_str,
     })
@@ -5172,6 +5304,12 @@ def run_sms_reply_logic(
                 examples,
                 None if booking_or_availability_turn else STYLE_PROFILE_STORE.get_applied(),
             )
+            line_information_url = business_variables.get("line_information_url", "").strip()
+            if line_information_url:
+                instructions += (
+                    "\n\nCurrent SMS line information link: "
+                    f"{line_information_url}. Use only this line's link when the customer asks for it."
+                )
             if booking_or_availability_turn:
                 instructions += (
                     "\n\nHard calendar authority: for this turn, no stored knowledge, conversation "
@@ -5189,9 +5327,21 @@ def run_sms_reply_logic(
             )
             instructions += (
                 "\n\nConversation context rule: read the supplied conversation in chronological order before "
-                "replying. Consecutive customer messages form one combined turn. Address all relevant details in "
-                "that combined turn and do not answer one fragment in isolation."
+                "replying. Each Received or Sent timestamp is authoritative and is in the business timezone. "
+                "The newest inbound turn also states the current processing time. Consecutive customer messages "
+                "form one combined turn. Address all relevant details in that combined turn and do not answer one "
+                "fragment in isolation. If a requested time was upcoming when received but passed before processing, "
+                "do not accept or discuss it as still upcoming. Briefly acknowledge that the message was missed and "
+                "offer a useful current alternative, such as checking a later time today or another day. Any exact "
+                "alternative still requires fresh live calendar evidence."
             )
+            if delayed_request_time:
+                instructions += (
+                    "\n\nDelayed-message correction: the customer's requested time of "
+                    f"{delayed_request_time.strftime('%A %d %B %Y at %I:%M %p %Z')} has elapsed since "
+                    "their message arrived. Do not book or accept that time. Use concise missed-message "
+                    "language and offer a current alternative."
+                )
             instructions += (
                 "\n\nConversational booking rule: complete the booking entirely in this conversation. "
                 "Use the booking discovery tools for the current time, services, and live availability; "
@@ -5215,6 +5365,7 @@ def run_sms_reply_logic(
                 history_msgs,
                 current_history_text=body,
                 enriched_current_prompt=user_prompt_rendered,
+                include_timestamps=True,
             )
 
             response = openai_client.responses.create(
@@ -5245,6 +5396,7 @@ def run_sms_reply_logic(
             max_tool_rounds = 6
             tool_round = 0
             secondary_confirmation_retries = 0
+            delayed_correction_retries = 0
             while True:
                 tool_calls = [
                     item for item in (response.output or [])
@@ -5253,8 +5405,28 @@ def run_sms_reply_logic(
                 if not tool_calls:
                     candidate_reply = response.output_text
                     if (
+                        delayed_reply_error(candidate_reply, delayed_request_time)
+                        and delayed_correction_retries < 2
+                    ):
+                        delayed_correction_retries += 1
+                        response = openai_client.responses.create(
+                            model="gpt-5.6-terra",
+                            instructions=(
+                                instructions
+                                + "\n\nCorrection: the original requested time has passed. Briefly say you "
+                                "missed the message and ask about a useful current alternative. Do not accept "
+                                "or book the elapsed time."
+                            ),
+                            input=input_history,
+                            tools=flat_tools,
+                            tool_choice="auto",
+                            store=False,
+                        )
+                        continue
+                    if (
                         booking_or_availability_turn
                         and asks_for_secondary_booking_confirmation(candidate_reply)
+                        and not (is_simulation and TRAINING_MODE_ENABLED)
                         and secondary_confirmation_retries < 2
                     ):
                         secondary_confirmation_retries += 1
@@ -5340,7 +5512,12 @@ def run_sms_reply_logic(
                             args = json.loads(tool_call.arguments or "{}")
                         except (TypeError, json.JSONDecodeError):
                             args = {}
-                        if not booking_proposal_has_live_evidence(
+                        if delayed_request_time:
+                            tool_result = {
+                                "status": "rejected",
+                                "reason": "The requested time passed before this message was processed. Offer a current alternative.",
+                            }
+                        elif not booking_proposal_has_live_evidence(
                             args.get("service_id", ""),
                             args.get("start_time", ""),
                             availability_tool_slots,
@@ -5455,9 +5632,13 @@ def run_sms_reply_logic(
             assistant_reply = None
 
     if assistant_reply:
-        availability_error = (
+        availability_error = delayed_reply_error(
+            assistant_reply,
+            delayed_request_time,
+        ) or (
             "AI requested a prohibited secondary booking confirmation"
             if booking_or_availability_turn
+            and not (is_simulation and TRAINING_MODE_ENABLED)
             and asks_for_secondary_booking_confirmation(assistant_reply)
             else None
         ) or unsafe_ai_reply_reason(

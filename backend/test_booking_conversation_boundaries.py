@@ -62,6 +62,17 @@ def test_secondary_account_receives_its_own_services_but_not_primary_knowledge_o
     # draft-approval workflow. Keep it independent of a persisted local setting.
     monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
     monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    line_profiles = {
+        "primary": {
+            "displayName": "Line 1", "providerName": "Tori",
+            "informationUrl": "https://line-one.example/info", "userPrompt": "",
+        },
+        "secondary": {
+            "displayName": "Line 2", "providerName": "Anonymous",
+            "informationUrl": "https://line-two.example/info", "userPrompt": "",
+        },
+    }
+    monkeypatch.setattr(main, "get_line_profile", lambda account_key: line_profiles[account_key])
     write_services(tmp_path)
     monkeypatch.setattr(main, "KNOWLEDGE_CHUNKS", [{
         "source": "primary-only.txt", "type": "text", "text": "Tori-only knowledge",

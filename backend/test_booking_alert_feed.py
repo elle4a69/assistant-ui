@@ -56,7 +56,7 @@ def test_default_booking_feed_excludes_history_but_history_view_can_request_it(m
         history_response = client.get("/api/calendar/bookings?includePast=true")
         assert history_response.status_code == 200
         history_ids = {booking["id"] for booking in history_response.json()}
-        assert TEST_IDS <= history_ids
+        assert {"alert-feed-past", "alert-feed-current"} <= history_ids
     finally:
         db.close()
         _cleanup()
