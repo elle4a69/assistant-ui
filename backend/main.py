@@ -9592,11 +9592,11 @@ def _operations_request_immediate_worker() -> Dict[str, Any]:
                 str(exc) if isinstance(exc, OperationsGitHubError)
                 else "The immediate GitHub worker request could not be completed."
             ),
-            "worker_request_message": "The immediate worker request failed; the five-minute scheduled queue remains active as recovery.",
+            "worker_request_message": "The immediate worker request failed; the scheduled queue remains active as recovery and the task retains the configuration error for automatic follow-up.",
         }
     return {
         "worker_requested": True,
-        "worker_request_message": "An immediate GitHub worker was requested; the five-minute scheduled queue remains active as recovery.",
+        "worker_request_message": "An immediate GitHub worker was requested; the scheduled queue remains active as recovery.",
     }
 
 
@@ -9670,6 +9670,16 @@ def _operations_start_coding_task(
         db.add(action)
         db.commit()
     worker_request = _operations_request_immediate_worker()
+    if not worker_request["worker_requested"]:
+        action = db.get(OperationsAction, action_id)
+        if action:
+            payload = _operations_action_payload(action)
+            payload.update({
+                "immediate_worker_requested_at": datetime.utcnow().isoformat() + "Z",
+                "immediate_worker_error": worker_request.get("worker_request_error"),
+            })
+            action.payload = json.dumps(payload, ensure_ascii=False)
+            db.commit()
     return {
         "status": "started",
         **worker_request,
@@ -9679,7 +9689,7 @@ def _operations_start_coding_task(
         "title": title,
         "isolation": "GitHub-hosted runner with a dedicated review branch",
         "deployment": "not authorised; this task cannot change main or deploy",
-        "next_step": worker_request["worker_request_message"] + " Use inspect_coding_task to check progress.",
+        "next_step": worker_request["worker_request_message"] + " The Operations agent will continue the task through its normal checks and recovery pass.",
     }
 
 

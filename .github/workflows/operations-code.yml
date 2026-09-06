@@ -141,6 +141,37 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
+      - name: Create isolated review branch
+        if: env.WORK_KIND == 'coding'
+        shell: bash
+        run: |
+          git switch --create "$TASK_BRANCH"
+          echo "OPERATIONS_REVIEW_BASE=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Install worker and project dependencies
+        if: env.WORK_KIND == 'coding'
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check -r backend/requirements.txt pytest
+          npm ci --prefix frontend
+          npm install --global @openai/codex@0.144.4
+
+      - name: Capture baseline application checks
+        if: env.WORK_KIND == 'coding'
+        shell: bash
+        run: |
+          set +e
+          baseline_log="$RUNNER_TEMP/operations-baseline-checks.log"
+          : > "$baseline_log"
+          failed=0
+          python -m pytest backend -q >> "$baseline_log" 2>&1 || failed=1
+          npm run build --prefix frontend >> "$baseline_log" 2>&1 || failed=1
+          if [ "$failed" -eq 0 ]; then
+            rm -f "$baseline_log"
+          else
+            echo "::warning::Baseline checks failed. The implementation worker will receive the bounded failure report and must repair it with the requested task."
+          fi
+
       - name: Build private coding prompt
         if: env.WORK_KIND == 'coding'
         shell: bash
@@ -150,6 +181,7 @@ jobs:
           import base64
           import json
           import os
+          import re
           from pathlib import Path
 
           runner_temp = Path(os.environ["RUNNER_TEMP"])
@@ -167,22 +199,33 @@ jobs:
                   raise SystemExit(f"Invalid {name} length")
               return value
 
+          def bounded_report(filename: str, label: str) -> str:
+              path = runner_temp / filename
+              if not path.exists():
+                  return ""
+              report = path.read_text(encoding="utf-8", errors="replace")[-12_000:]
+              report = re.sub(r"(?i)(authorization\\s*:\\s*bearer)\\s+\\S+", r"\\1 [REDACTED]", report)
+              return f"\\n{label}:\\n{report}\\n"
+
           instructions = decode("instructions_b64", 20, 6_000)
           acceptance_test = decode("acceptance_test_b64", 5, 1_000)
+          baseline = bounded_report("operations-baseline-checks.log", "Baseline check failures detected before this task")
           prompt = f"""You are the implementation worker for the owner's production assistant-ui application.
 
           Task: {title}
           {instructions}
 
           Acceptance test: {acceptance_test}
-
+          {baseline}
           Work only in the current GitHub-hosted checkout. Inspect the relevant implementation and tests first. Implement
           the requested outcome end to end, preserve unrelated behaviour, add or update focused tests, and run useful
-          checks while working. Fix failures you introduce. Do not read, reveal, search for or copy secrets, credentials,
-          GitHub Actions secrets, environment values, editor settings, customer data or production data. Do not modify
-          .github/workflows/operations-code.yml. Do not commit, push, deploy, send messages, change production settings or
-          access external systems. The workflow independently validates and tests your changes, then pushes only an
-          isolated review branch. Report the outcome and verification briefly when finished.
+          checks while working. If a bounded baseline failure is included above, diagnose it and repair it when it is
+          relevant or safely repairable; do not merely report it back to the owner. Fix failures you introduce. Do not
+          read, reveal, search for or copy secrets, credentials, GitHub Actions secrets, environment values, editor
+          settings, customer data or production data. Do not modify .github/workflows/operations-code.yml. Do not commit,
+          push, deploy, send messages, change production settings or access external systems. The workflow independently
+          validates and tests your changes, then pushes only an isolated review branch. Report the outcome and verification
+          briefly when finished.
           """
           (runner_temp / "operations-prompt.txt").write_text(prompt, encoding="utf-8")
           (runner_temp / "operations-commit-message.txt").write_text(
@@ -190,23 +233,10 @@ jobs:
           )
           PY
 
-      - name: Create isolated review branch
-        if: env.WORK_KIND == 'coding'
-        shell: bash
-        run: |
-          git switch --create "$TASK_BRANCH"
-          echo "OPERATIONS_REVIEW_BASE=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-
-      - name: Install worker and project dependencies
-        if: env.WORK_KIND == 'coding'
-        shell: bash
-        run: |
-          python -m pip install --disable-pip-version-check -r backend/requirements.txt pytest
-          npm ci --prefix frontend
-          npm install --global @openai/codex@0.144.4
-
       - name: Run Codex implementation worker
         if: env.WORK_KIND == 'coding'
+        id: implementation
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -224,6 +254,8 @@ jobs:
           PY
           )
           echo "::add-mask::$worker_credential"
+          printf '%s' "$worker_credential" > "$RUNNER_TEMP/operations-worker-credential"
+          chmod 600 "$RUNNER_TEMP/operations-worker-credential"
           export CODEX_API_KEY="$worker_credential"
           rm -f "$RUNNER_TEMP/operations-claim.json"
           unset worker_credential
@@ -236,6 +268,72 @@ jobs:
             --ephemeral \
             --color never \
             - < "$RUNNER_TEMP/operations-prompt.txt"
+          unset CODEX_API_KEY
+
+      - name: Run independent application checks
+        if: env.WORK_KIND == 'coding'
+        id: independent_checks
+        shell: bash
+        run: |
+          set +e
+          validation_log="$RUNNER_TEMP/operations-validation-checks.log"
+          : > "$validation_log"
+          failed=0
+          python -m pytest backend -q >> "$validation_log" 2>&1 || failed=1
+          npm run build --prefix frontend >> "$validation_log" 2>&1 || failed=1
+          git diff --check "$OPERATIONS_REVIEW_BASE" >> "$validation_log" 2>&1 || failed=1
+          if [ "$failed" -eq 0 ]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            rm -f "$validation_log"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Independent checks failed. Running one bounded repair pass before failing this task."
+          fi
+
+      - name: Build verification repair prompt
+        if: env.WORK_KIND == 'coding' && (steps.implementation.outcome == 'failure' || steps.independent_checks.outputs.passed != 'true')
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          runner_temp = Path(os.environ["RUNNER_TEMP"])
+          report_path = runner_temp / "operations-validation-checks.log"
+          report = report_path.read_text(encoding="utf-8", errors="replace")[-12_000:] if report_path.exists() else "The initial worker exited unsuccessfully before validation."
+          report = re.sub(r"(?i)(authorization\\s*:\\s*bearer)\\s+\\S+", r"\\1 [REDACTED]", report)
+          prompt = f"""Continue the current authorised coding task in this checkout. The first implementation pass did not
+          reach a verified result. Diagnose and fix the actual failure below, preserving the requested outcome and all
+          unrelated behaviour. This is the one automatic recovery pass: make the code and tests pass rather than merely
+          reporting the failure. Do not modify workflow files, commit, push, deploy, access external systems, read secrets
+          or customer data.
+
+          Verification report:
+          {report}
+          """
+          (runner_temp / "operations-repair-prompt.txt").write_text(prompt, encoding="utf-8")
+          PY
+
+      - name: Run Codex verification repair
+        if: env.WORK_KIND == 'coding' && (steps.implementation.outcome == 'failure' || steps.independent_checks.outputs.passed != 'true')
+        shell: bash
+        run: |
+          set -euo pipefail
+          worker_credential=$(< "$RUNNER_TEMP/operations-worker-credential")
+          echo "::add-mask::$worker_credential"
+          export CODEX_API_KEY="$worker_credential"
+          unset worker_credential
+          codex exec \
+            --ignore-user-config \
+            --model gpt-5.6-sol \
+            -c 'model_reasoning_effort="medium"' \
+            -c 'shell_environment_policy.exclude=["CODEX_API_KEY"]' \
+            --sandbox danger-full-access \
+            --ephemeral \
+            --color never \
+            - < "$RUNNER_TEMP/operations-repair-prompt.txt"
           unset CODEX_API_KEY
 
       - name: Rebase worker changes onto current main
@@ -263,7 +361,7 @@ jobs:
           echo "OPERATIONS_REVIEW_BASE=$latest_main" >> "$GITHUB_ENV"
           echo "OPERATIONS_TEMP_COMMIT=$temporary_commit" >> "$GITHUB_ENV"
 
-      - name: Run independent application checks
+      - name: Require verified application checks
         if: env.WORK_KIND == 'coding'
         shell: bash
         run: |
@@ -271,6 +369,7 @@ jobs:
           python -m pytest backend -q
           npm run build --prefix frontend
           git diff --check "$OPERATIONS_REVIEW_BASE"
+          rm -f "$RUNNER_TEMP/operations-worker-credential"
 
       - name: Validate and commit bounded changes
         if: env.WORK_KIND == 'coding'

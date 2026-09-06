@@ -197,10 +197,14 @@ def test_coding_dispatch_follows_durable_commit_and_preserves_fallback(queued_ac
     assert result["status"] == "started"
     assert calls == [result["task_id"]]
     assert result["worker_requested"] is (dispatch_error is None)
-    assert "five-minute scheduled queue" in result["next_step"]
+    assert "Operations agent will continue" in result["next_step"]
     assert "private-token" not in json.dumps(result)
     assert duplicate["status"] == "already_running"
     assert db.query(main.OperationsAction).one().status == "queued"
+    payload = json.loads(db.query(main.OperationsAction).one().payload)
+    if dispatch_error:
+        assert payload["immediate_worker_error"] != "private-token"
+        assert payload["immediate_worker_requested_at"]
 
 
 @pytest.mark.parametrize("dispatch_fails", [False, True])
