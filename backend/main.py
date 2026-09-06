@@ -8422,6 +8422,8 @@ def operations_ai_instructions(
                 "The task starts from current main, runs relevant checks, and pushes only a review branch. Check the task "
                 "instead of starting duplicates. After a completed task, inspect its result and code changes, then use "
                 "propose_code_deployment to queue the audited automatic fast-forward, Fly deployment and health check. "
+                "When the owner asks to cancel a queued task, use cancel_coding_task immediately after confirming it is "
+                "the matching unclaimed task; never cancel a claimed or running task. "
                 "Never read credential files or ask a coding worker to expose secrets. "
             )
         else:
@@ -8701,6 +8703,25 @@ OPERATIONS_TOOL_SCHEMAS = [
             "type": "object",
             "properties": {"task_id": {"type": "string", "minLength": 8, "maxLength": 100}},
             "required": ["task_id"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "cancel_coding_task",
+        "description": (
+            "Cancel one unclaimed Operations coding task that is still awaiting its runner. This retains the audit "
+            "record and cancellation reason. It rejects running tasks, completed reviews, deployments and any task "
+            "that has already been claimed by a worker."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "minLength": 8, "maxLength": 100},
+                "reason": {"type": "string", "minLength": 3, "maxLength": 1000},
+            },
+            "required": ["task_id", "reason"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -9874,6 +9895,61 @@ def _operations_start_coding_task(
     }
 
 
+def _operations_cancel_coding_task(
+    db: Session,
+    task_id: str,
+    reason: str,
+    *,
+    lock_timeout_seconds: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Cancel only an unclaimed coding task, preserving its complete audit trail."""
+    task_id = str(task_id or "").strip().casefold()
+    reason = str(reason or "").strip()[:1000]
+    if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", task_id):
+        return {"status": "rejected", "reason": "The coding task ID is invalid."}
+    if len(reason) < 3:
+        return {"status": "rejected", "reason": "A brief cancellation reason is required."}
+    if OPERATIONS_CODE_SECRET_RE.search(reason) or OPERATIONS_MEMORY_PRIVATE_RE.search(reason):
+        return {"status": "rejected", "reason": "Remove sensitive information from the cancellation reason."}
+
+    with _operations_code_task_guard(lock_timeout_seconds) as acquired:
+        if not acquired:
+            return {"status": "busy", "reason": "The coding-task queue is busy; retry shortly."}
+        action = db.query(OperationsAction).filter(
+            OperationsAction.id == task_id,
+            OperationsAction.action_type == "coding_task",
+        ).first()
+        if not action:
+            return {"status": "not_found", "task_id": task_id}
+        payload = _operations_action_payload(action)
+        if (
+            action.status != "queued"
+            or payload.get("stage") != "awaiting_runner"
+            or payload.get("worker_run_id")
+        ):
+            return {
+                "status": "rejected",
+                "task_id": task_id,
+                "reason": "Only an unclaimed coding task awaiting its runner can be cancelled.",
+            }
+        now = datetime.utcnow()
+        payload.update({
+            "previous_status": action.status,
+            "cancelled_at": now.isoformat() + "Z",
+            "cancellation_reason": reason,
+            "stage": "cancelled",
+        })
+        action.payload = json.dumps(payload, ensure_ascii=False)
+        action.status = "cancelled"
+        action.executed_at = now
+        db.commit()
+    return {
+        "status": "cancelled",
+        "task_id": task_id,
+        "next_step": "The task will not be claimed or deployed.",
+    }
+
+
 def _operations_matching_task_run(action: OperationsAction) -> Optional[Dict[str, Any]]:
     run_id = _operations_action_payload(action).get("worker_run_id")
     if not run_id:
@@ -10394,6 +10470,12 @@ def execute_operations_tool(
         )
     if tool_name == "inspect_coding_task":
         return _operations_inspect_coding_task(db, str(arguments.get("task_id", "")).strip())
+    if tool_name == "cancel_coding_task":
+        return _operations_cancel_coding_task(
+            db,
+            str(arguments.get("task_id", "")).strip(),
+            str(arguments.get("reason", "")),
+        )
     if tool_name == "inspect_code_changes":
         return _operations_inspect_code_changes(db, str(arguments.get("task_id", "")).strip())
     if tool_name == "inspect_deployments":
@@ -10555,6 +10637,7 @@ AGENT_CONSOLE_TERMINAL_STATUSES = {
 # Mutating tools below retain their existing audited proposal, exact owner
 # confirmation, idempotency and review-branch enforcement.
 AGENT_CONSOLE_ALLOWED_TOOLS = frozenset({
+    "cancel_coding_task",
     "diagnose_message_handling",
     "execute_code_deployment",
     "execute_runtime_change",
@@ -10574,6 +10657,7 @@ AGENT_CONSOLE_ALLOWED_TOOLS = frozenset({
     "start_coding_task",
 })
 AGENT_CONSOLE_CRITICAL_TOOLS = frozenset({
+    "cancel_coding_task",
     "execute_code_deployment",
     "execute_runtime_change",
     "propose_code_deployment",
@@ -11359,11 +11443,11 @@ def _agent_execute_action(
             raise AgentConsoleError("Only an allowlisted virtual operations command may run.")
         isolated_engine = None
         begin_immediate = False
-        if tool_name == "start_coding_task":
-            # A queue submission is the console's sole mutating operation. Use
-            # an unpooled SQLite connection with a bounded lock wait so a
-            # timed-out submission cannot poison or occupy the application's
-            # shared connection pool. BEGIN IMMEDIATE makes that lock wait the
+        if tool_name in {"start_coding_task", "cancel_coding_task"}:
+            # Queue submission and pre-claim cancellation use an unpooled
+            # SQLite connection with a bounded lock wait so a timed-out
+            # operation cannot poison or occupy the application's shared pool.
+            # BEGIN IMMEDIATE makes that lock wait the
             # only potentially blocking database phase.
             probe = SessionLocal()
             try:
@@ -11411,6 +11495,13 @@ def _agent_execute_action(
                     str(tool_arguments.get("acceptance_test", "")),
                     lock_timeout_seconds=1,
                     origin_run_id=run_id,
+                )
+            elif tool_name == "cancel_coding_task":
+                result = _operations_cancel_coding_task(
+                    db,
+                    str(tool_arguments.get("task_id", "")).strip(),
+                    str(tool_arguments.get("reason", "")),
+                    lock_timeout_seconds=1,
                 )
             else:
                 result = execute_operations_tool(db, tool_name, tool_arguments, objective)

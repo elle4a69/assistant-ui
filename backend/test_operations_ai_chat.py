@@ -260,6 +260,7 @@ def test_operations_coding_tools_are_wired_and_start_one_audited_task(monkeypatc
         "inspect_coding_runner",
         "read_code_file",
         "start_coding_task",
+        "cancel_coding_task",
         "inspect_coding_task",
         "inspect_code_changes",
         "inspect_deployments",
@@ -917,6 +918,47 @@ def test_voice_tools_allow_review_branch_coding_but_reject_protected_execution(m
     assert "inspect_deployments" in main.OPERATIONS_VOICE_TOOL_NAMES
     assert "execute_runtime_change" not in main.OPERATIONS_VOICE_TOOL_NAMES
     assert "execute_code_deployment" not in main.OPERATIONS_VOICE_TOOL_NAMES
+    db.close()
+
+
+def test_coding_task_cancellation_only_allows_unclaimed_awaiting_runner_task(monkeypatch):
+    monkeypatch.setattr(main, "operations_code_access_available", lambda: True)
+    db = make_db()
+    queued = main.OperationsAction(
+        action_type="coding_task",
+        payload='{"title":"Queued repair","stage":"awaiting_runner"}',
+        reason="Owner-authorised coding task",
+        status="queued",
+    )
+    claimed = main.OperationsAction(
+        action_type="coding_task",
+        payload='{"title":"Claimed repair","stage":"coding","worker_run_id":"123"}',
+        reason="Owner-authorised coding task",
+        status="running",
+    )
+    db.add_all([queued, claimed])
+    db.commit()
+    db.refresh(queued)
+    db.refresh(claimed)
+
+    cancelled = main.execute_operations_tool(
+        db,
+        "cancel_coding_task",
+        {"task_id": queued.id, "reason": "The owner no longer needs this repair."},
+        "Cancel it",
+    )
+    rejected = main.execute_operations_tool(
+        db,
+        "cancel_coding_task",
+        {"task_id": claimed.id, "reason": "Stop it."},
+        "Cancel it",
+    )
+
+    db.refresh(queued)
+    assert cancelled["status"] == "cancelled"
+    assert queued.status == "cancelled"
+    assert main._operations_action_payload(queued)["stage"] == "cancelled"
+    assert rejected["status"] == "rejected"
     db.close()
 
 
