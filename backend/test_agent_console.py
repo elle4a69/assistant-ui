@@ -224,6 +224,10 @@ def test_autonomous_virtual_tools_are_explicitly_scoped():
     assert "propose_code_deployment" in main.AGENT_CONSOLE_ALLOWED_TOOLS
     assert "execute_code_deployment" in main.AGENT_CONSOLE_ALLOWED_TOOLS
     assert "research_internet" in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "search_message_bodies" in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "inspect_deleted_calendar_events" in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "propose_booking_recovery" in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "execute_booking_recovery" in main.AGENT_CONSOLE_ALLOWED_TOOLS
     assert "inspect_deployments" in main.AGENT_CONSOLE_ALLOWED_TOOLS
     assert "inspect_coding_task" in main.AGENT_CONSOLE_ALLOWED_TOOLS
     assert "inspect_code_changes" in main.AGENT_CONSOLE_ALLOWED_TOOLS
@@ -231,6 +235,8 @@ def test_autonomous_virtual_tools_are_explicitly_scoped():
     assert "start_coding_task" in main.AGENT_CONSOLE_CRITICAL_TOOLS
     assert "execute_code_deployment" in main.AGENT_CONSOLE_CRITICAL_TOOLS
     assert "execute_runtime_change" in main.AGENT_CONSOLE_CRITICAL_TOOLS
+    assert "propose_booking_recovery" in main.AGENT_CONSOLE_CRITICAL_TOOLS
+    assert "execute_booking_recovery" in main.AGENT_CONSOLE_CRITICAL_TOOLS
 
 
 def test_agent_prompt_forbids_customer_evidence_in_coding_task_fields():

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import base64
+import binascii
 import hmac
 import threading
 import asyncio
@@ -8563,6 +8564,85 @@ OPERATIONS_TOOL_SCHEMAS = [
     },
     {
         "type": "function",
+        "name": "search_message_bodies",
+        "description": (
+            "Search message bodies for one exact text fragment or URL inside a bounded UTC date range. Returns only "
+            "the SMS account, thread and phone, timestamp, direction and a short matched excerpt. Results are "
+            "deduplicated, paginated and audited; this is not a bulk SMS export."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "exact_text": {"type": "string", "minLength": 3, "maxLength": 500},
+                "start_at": {"type": "string", "minLength": 10, "maxLength": 40},
+                "end_at": {"type": "string", "minLength": 10, "maxLength": 40},
+                "direction": {"type": "string", "enum": ["inbound", "outbound", "any"]},
+                "account_key": {"type": ["string", "null"], "enum": ["primary", "secondary", None]},
+                "cursor": {"type": ["string", "null"], "maxLength": 1000},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            },
+            "required": ["exact_text", "start_at", "end_at", "direction", "account_key", "cursor", "limit"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "inspect_deleted_calendar_events",
+        "description": (
+            "Read a bounded page of recoverable deleted Google Calendar events updated inside a UTC date range. "
+            "This never restores, edits or creates an event and never exposes calendar credentials."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "start_at": {"type": "string", "minLength": 10, "maxLength": 40},
+                "end_at": {"type": "string", "minLength": 10, "maxLength": 40},
+                "page_token": {"type": ["string", "null"], "maxLength": 2000},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            },
+            "required": ["start_at", "end_at", "page_token", "limit"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "propose_booking_recovery",
+        "description": (
+            "Inspect one Google Calendar event and prepare an audited recovery. A deleted timed event will be "
+            "recreated and mirrored locally; an active event missing locally will be re-synced. This proposal does "
+            "not change the calendar or booking database and returns an exact owner confirmation phrase."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "calendar_event_id": {"type": "string", "minLength": 5, "maxLength": 1024},
+                "reason": {"type": "string", "minLength": 5, "maxLength": 1000},
+            },
+            "required": ["calendar_event_id", "reason"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "execute_booking_recovery",
+        "description": (
+            "Execute one pending booking recovery only when the owner's latest typed message exactly matches the "
+            "proposal's confirmation phrase. The operation is idempotent and audits the recovered calendar and "
+            "local booking identifiers."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"action_id": {"type": "string", "minLength": 8, "maxLength": 100}},
+            "required": ["action_id"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
         "name": "diagnose_message_handling",
         "description": "Self-diagnose recent message sequencing, reply latency, failures, queue pressure, and SMS-account separation without changing data.",
         "parameters": {
@@ -9051,6 +9131,418 @@ def _operations_conversation(db: Session, phone: str, account_key: str) -> Dict[
             {"role": item.role, "text": item.text[:2000], "at": item.at.isoformat() + "Z"}
             for item in messages
         ],
+    }
+
+
+def _operations_timestamp(value: str, field_name: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be an ISO-8601 timestamp.") from exc
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _operations_bounded_range(start_at: str, end_at: str, *, days: int = 31) -> tuple[datetime, datetime]:
+    start = _operations_timestamp(start_at, "start_at")
+    end = _operations_timestamp(end_at, "end_at")
+    if end <= start:
+        raise ValueError("end_at must be later than start_at.")
+    if end - start > timedelta(days=days):
+        raise ValueError(f"The requested date range cannot exceed {days} days.")
+    return start, end
+
+
+def _operations_message_cursor(at: datetime, message_id: str) -> str:
+    raw = json.dumps({"at": at.isoformat(), "id": message_id}, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _operations_decode_message_cursor(cursor: Optional[str]) -> Optional[tuple[datetime, str]]:
+    if not cursor:
+        return None
+    try:
+        padded = str(cursor) + "=" * (-len(str(cursor)) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        cursor_at = _operations_timestamp(decoded["at"], "cursor.at")
+        cursor_id = str(decoded["id"])
+    except (KeyError, TypeError, ValueError, UnicodeError, binascii.Error, json.JSONDecodeError) as exc:
+        raise ValueError("The message-search cursor is invalid.") from exc
+    if not cursor_id or len(cursor_id) > 200:
+        raise ValueError("The message-search cursor is invalid.")
+    return cursor_at, cursor_id
+
+
+def _operations_match_excerpt(text: str, exact_text: str, limit: int = 320) -> str:
+    match_at = text.find(exact_text)
+    if match_at < 0:
+        return ""
+    available = max(0, limit - len(exact_text))
+    before = min(match_at, available // 2)
+    start = match_at - before
+    end = min(len(text), start + limit)
+    start = max(0, end - limit)
+    excerpt = text[start:end].replace("\r", " ").replace("\n", " ")
+    if start:
+        excerpt = "…" + excerpt
+    if end < len(text):
+        excerpt += "…"
+    return excerpt
+
+
+def _operations_search_message_bodies(
+    db: Session,
+    exact_text: str,
+    start_at: str,
+    end_at: str,
+    direction: str,
+    account_key: Optional[str],
+    cursor: Optional[str],
+    limit: int,
+) -> Dict[str, Any]:
+    needle = str(exact_text or "")
+    if len(needle) < 3 or len(needle) > 500:
+        raise ValueError("exact_text must contain between 3 and 500 characters.")
+    start, end = _operations_bounded_range(start_at, end_at)
+    if direction not in {"inbound", "outbound", "any"}:
+        raise ValueError("direction must be inbound, outbound or any.")
+    if account_key not in {None, "primary", "secondary"}:
+        raise ValueError("account_key must be primary, secondary or null.")
+    bounded_limit = max(1, min(50, int(limit)))
+    decoded_cursor = _operations_decode_message_cursor(cursor)
+
+    query = (
+        db.query(Message, Thread)
+        .join(Thread, Message.thread_id == Thread.id)
+        .filter(
+            Message.at >= start,
+            Message.at < end,
+            func.instr(Message.text, needle) > 0,
+        )
+    )
+    if direction == "inbound":
+        query = query.filter(Message.role == "customer")
+    elif direction == "outbound":
+        query = query.filter(Message.role.in_(["agent", "system"]))
+    if account_key:
+        query = query.filter(Thread.sms_account_key == account_key)
+    if decoded_cursor:
+        cursor_at, cursor_id = decoded_cursor
+        query = query.filter(or_(Message.at < cursor_at, and_(Message.at == cursor_at, Message.id < cursor_id)))
+
+    rows = query.order_by(Message.at.desc(), Message.id.desc()).limit(bounded_limit + 1).all()
+    page_rows = rows[:bounded_limit]
+    matches = []
+    seen_message_ids: set[str] = set()
+    for message, thread in page_rows:
+        if message.id in seen_message_ids:
+            continue
+        seen_message_ids.add(message.id)
+        matches.append({
+            "sms_account": thread.sms_account_key,
+            "thread_id": thread.id,
+            "phone": thread.customer_phone,
+            "timestamp": message.at.isoformat() + "Z",
+            "direction": "inbound" if message.role == "customer" else "outbound",
+            "matched_excerpt": _operations_match_excerpt(message.text, needle),
+        })
+    next_cursor = None
+    if len(rows) > bounded_limit and page_rows:
+        next_cursor = _operations_message_cursor(page_rows[-1][0].at, page_rows[-1][0].id)
+
+    audit = OperationsAction(
+        action_type="conversation_search",
+        payload=json.dumps({
+            "query_sha256": hashlib.sha256(needle.encode("utf-8")).hexdigest(),
+            "start_at": start.isoformat() + "Z",
+            "end_at": end.isoformat() + "Z",
+            "direction": direction,
+            "account_key": account_key,
+            "limit": bounded_limit,
+            "cursor_supplied": bool(cursor),
+            "match_count": len(matches),
+            "has_more": bool(next_cursor),
+        }, ensure_ascii=False),
+        reason="Audited read-only exact message-body search",
+        status="executed",
+        executed_at=datetime.utcnow(),
+    )
+    db.add(audit)
+    db.commit()
+    return {
+        "status": "ok",
+        "matches": matches,
+        "next_cursor": next_cursor,
+        "audit_id": audit.id,
+        "scope_note": "Exact body match only; results are date-bounded, deduplicated and minimally disclosed.",
+    }
+
+
+def _operations_calendar_event_snapshot(event_item: Dict[str, Any]) -> Dict[str, Any]:
+    private = event_item.get("extendedProperties", {}).get("private", {}) or {}
+    description = str(event_item.get("description") or "")
+    customer_phone = str(private.get("customer_phone") or "")
+    if not customer_phone and "Customer phone:" in description:
+        customer_phone = description.split("Customer phone:", 1)[1].splitlines()[0].strip()
+    start_value = event_item.get("start", {}).get("dateTime")
+    end_value = event_item.get("end", {}).get("dateTime")
+    return {
+        "calendar_event_id": event_item.get("id"),
+        "status": event_item.get("status"),
+        "summary": str(event_item.get("summary") or "")[:300],
+        "start_at": start_value,
+        "end_at": end_value,
+        "updated_at": event_item.get("updated"),
+        "sms_account": private.get("sms_account_key"),
+        "thread_id": private.get("thread_id"),
+        "phone": canonical_phone_number(customer_phone),
+        "recoverable": bool(event_item.get("id") and start_value and end_value),
+    }
+
+
+def _operations_google_calendar_service() -> tuple[Any, str]:
+    service = getattr(calendar_service, "service", None)
+    if service is None:
+        raise RuntimeError("Google Calendar recovery is unavailable because the live calendar is not configured.")
+    return service, os.getenv("CALENDAR_ID", "primary")
+
+
+def _operations_inspect_deleted_calendar_events(
+    db: Session,
+    start_at: str,
+    end_at: str,
+    page_token: Optional[str],
+    limit: int,
+) -> Dict[str, Any]:
+    start, end = _operations_bounded_range(start_at, end_at)
+    bounded_limit = max(1, min(50, int(limit)))
+    service, calendar_id = _operations_google_calendar_service()
+    arguments: Dict[str, Any] = {
+        "calendarId": calendar_id,
+        "showDeleted": True,
+        "singleEvents": True,
+        "updatedMin": start.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z"),
+        "maxResults": min(250, bounded_limit * 5),
+    }
+    if page_token:
+        arguments["pageToken"] = str(page_token)
+    response = service.events().list(**arguments).execute() or {}
+    deleted = []
+    for event_item in response.get("items", []):
+        if event_item.get("status") != "cancelled":
+            continue
+        updated_raw = event_item.get("updated")
+        if updated_raw:
+            try:
+                updated_at = _operations_timestamp(updated_raw, "event.updated")
+            except ValueError:
+                continue
+            if updated_at >= end:
+                continue
+        deleted.append(_operations_calendar_event_snapshot(event_item))
+        if len(deleted) >= bounded_limit:
+            break
+    audit = OperationsAction(
+        action_type="calendar_trash_search",
+        payload=json.dumps({
+            "start_at": start.isoformat() + "Z",
+            "end_at": end.isoformat() + "Z",
+            "limit": bounded_limit,
+            "page_token_supplied": bool(page_token),
+            "match_count": len(deleted),
+            "has_more": bool(response.get("nextPageToken")),
+        }, ensure_ascii=False),
+        reason="Audited read-only Google Calendar Trash inspection",
+        status="executed",
+        executed_at=datetime.utcnow(),
+    )
+    db.add(audit)
+    db.commit()
+    return {
+        "status": "ok",
+        "events": deleted,
+        "next_page_token": response.get("nextPageToken"),
+        "audit_id": audit.id,
+    }
+
+
+def _operations_get_google_event(calendar_event_id: str) -> Dict[str, Any]:
+    event_id = str(calendar_event_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{5,1024}", event_id):
+        raise ValueError("The Google Calendar event ID is invalid.")
+    service, calendar_id = _operations_google_calendar_service()
+    return service.events().get(calendarId=calendar_id, eventId=event_id).execute() or {}
+
+
+def _operations_propose_booking_recovery(
+    db: Session,
+    calendar_event_id: str,
+    reason: str,
+) -> Dict[str, Any]:
+    clean_reason = str(reason or "").strip()[:1000]
+    if len(clean_reason) < 5:
+        raise ValueError("A specific recovery reason is required.")
+    event_item = _operations_get_google_event(calendar_event_id)
+    snapshot = _operations_calendar_event_snapshot(event_item)
+    if not snapshot["recoverable"]:
+        return {
+            "status": "unavailable",
+            "reason": "The calendar event no longer contains the timed fields required for controlled recovery.",
+            "event": snapshot,
+        }
+    mode = "restore_and_resync" if snapshot["status"] == "cancelled" else "resync_local_mirror"
+    existing = db.query(OperationsAction).filter(
+        OperationsAction.action_type == "booking_recovery",
+        OperationsAction.status == "pending",
+    ).all()
+    for action in existing:
+        if _operations_action_payload(action).get("calendar_event_id") == snapshot["calendar_event_id"]:
+            return {
+                "status": "already_pending",
+                "action_id": action.id,
+                "mode": _operations_action_payload(action).get("mode"),
+                "event": snapshot,
+                "confirmation_phrase": f"restore booking {action.id}",
+            }
+    action = OperationsAction(
+        action_type="booking_recovery",
+        payload=json.dumps({
+            "calendar_event_id": snapshot["calendar_event_id"],
+            "source_status": snapshot["status"],
+            "mode": mode,
+            "event_summary": snapshot["summary"],
+            "start_at": snapshot["start_at"],
+            "end_at": snapshot["end_at"],
+        }, ensure_ascii=False),
+        reason=clean_reason,
+        status="pending",
+    )
+    db.add(action)
+    db.commit()
+    db.refresh(action)
+    return {
+        "status": "pending_confirmation",
+        "action_id": action.id,
+        "mode": mode,
+        "event": snapshot,
+        "confirmation_phrase": f"restore booking {action.id}",
+    }
+
+
+def _operations_recovery_event_body(event_item: Dict[str, Any], source_event_id: str) -> Dict[str, Any]:
+    allowed = {
+        "summary", "description", "location", "start", "end", "recurrence", "reminders",
+        "extendedProperties", "transparency", "visibility", "colorId",
+    }
+    body = {key: value for key, value in event_item.items() if key in allowed and value is not None}
+    private = dict(body.get("extendedProperties", {}).get("private", {}) or {})
+    private["recovered_from_event_id"] = source_event_id
+    body["extendedProperties"] = dict(body.get("extendedProperties") or {})
+    body["extendedProperties"]["private"] = private
+    return body
+
+
+def _operations_mirror_google_booking(db: Session, event_item: Dict[str, Any]) -> CalendarEvent:
+    from zoneinfo import ZoneInfo
+
+    snapshot = _operations_calendar_event_snapshot(event_item)
+    if not snapshot["recoverable"]:
+        raise ValueError("The calendar event does not contain a recoverable timed booking.")
+    local_tz = ZoneInfo("Australia/Hobart")
+    start = datetime.fromisoformat(str(snapshot["start_at"]).replace("Z", "+00:00"))
+    end = datetime.fromisoformat(str(snapshot["end_at"]).replace("Z", "+00:00"))
+    if start.tzinfo is not None:
+        start = start.astimezone(local_tz).replace(tzinfo=None)
+    if end.tzinfo is not None:
+        end = end.astimezone(local_tz).replace(tzinfo=None)
+    private = event_item.get("extendedProperties", {}).get("private", {}) or {}
+    account_key = private.get("sms_account_key")
+    thread_id = private.get("thread_id")
+    phone = snapshot["phone"] or None
+    if not thread_id and phone and account_key in {"primary", "secondary"}:
+        thread = find_thread_by_phone(db, phone, account_key)
+        thread_id = thread.id if thread else None
+    amount = private.get("booking_amount") or private.get("amount")
+    try:
+        amount = int(amount) if amount is not None else None
+    except (TypeError, ValueError):
+        amount = None
+    booking = CalendarEvent(
+        id=str(snapshot["calendar_event_id"]),
+        summary=snapshot["summary"] or "Recovered appointment",
+        customer_phone=phone,
+        sms_account_key=account_key if account_key in {"primary", "secondary"} else None,
+        thread_id=thread_id,
+        start_time=start,
+        end_time=end,
+        status="scheduled",
+        notes=str(event_item.get("description") or "")[:4000],
+        amount=amount,
+    )
+    return db.merge(booking)
+
+
+def _operations_execute_booking_recovery(
+    db: Session,
+    action_id: str,
+    current_user_message: str,
+) -> Dict[str, Any]:
+    required_phrase = f"restore booking {action_id}"
+    if current_user_message.strip().casefold() != required_phrase.casefold():
+        return {
+            "status": "rejected",
+            "reason": "The owner's latest typed message did not exactly match the recovery confirmation phrase.",
+            "required_confirmation_phrase": required_phrase,
+        }
+    action = db.query(OperationsAction).filter(
+        OperationsAction.id == action_id,
+        OperationsAction.action_type == "booking_recovery",
+        OperationsAction.status == "pending",
+    ).first()
+    if not action:
+        return {"status": "rejected", "reason": "That pending booking recovery is unavailable or already handled."}
+    payload = _operations_action_payload(action)
+    source_event_id = str(payload.get("calendar_event_id") or "")
+    source_event = _operations_get_google_event(source_event_id)
+    service, calendar_id = _operations_google_calendar_service()
+    recovered_event = source_event
+    mode = str(payload.get("mode") or "")
+    if mode == "restore_and_resync":
+        existing = service.events().list(
+            calendarId=calendar_id,
+            privateExtendedProperty=f"recovered_from_event_id={source_event_id}",
+            showDeleted=False,
+            maxResults=1,
+        ).execute() or {}
+        existing_items = existing.get("items", [])
+        if existing_items:
+            recovered_event = existing_items[0]
+        else:
+            body = _operations_recovery_event_body(source_event, source_event_id)
+            recovered_event = service.events().insert(
+                calendarId=calendar_id,
+                body=body,
+                sendUpdates="none",
+            ).execute() or {}
+    booking = _operations_mirror_google_booking(db, recovered_event)
+    if hasattr(calendar_service, "_cache"):
+        calendar_service._cache.clear()
+    payload.update({
+        "recovered_calendar_event_id": recovered_event.get("id"),
+        "local_booking_id": booking.id,
+        "completed_at": datetime.utcnow().isoformat() + "Z",
+    })
+    action.payload = json.dumps(payload, ensure_ascii=False)
+    action.status = "executed"
+    action.executed_at = datetime.utcnow()
+    db.commit()
+    return {
+        "status": "executed",
+        "action_id": action.id,
+        "mode": mode,
+        "calendar_event_id": recovered_event.get("id"),
+        "local_booking_id": booking.id,
     }
 
 
@@ -10428,6 +10920,53 @@ def execute_operations_tool(
             str(arguments.get("phone", "")),
             str(arguments.get("account_key", "primary")),
         )
+    if tool_name == "search_message_bodies":
+        try:
+            return _operations_search_message_bodies(
+                db,
+                str(arguments.get("exact_text", "")),
+                str(arguments.get("start_at", "")),
+                str(arguments.get("end_at", "")),
+                str(arguments.get("direction", "any")),
+                arguments.get("account_key"),
+                arguments.get("cursor"),
+                int(arguments.get("limit", 20)),
+            )
+        except (TypeError, ValueError) as exc:
+            db.rollback()
+            return {"status": "rejected", "reason": str(exc)}
+    if tool_name == "inspect_deleted_calendar_events":
+        try:
+            return _operations_inspect_deleted_calendar_events(
+                db,
+                str(arguments.get("start_at", "")),
+                str(arguments.get("end_at", "")),
+                arguments.get("page_token"),
+                int(arguments.get("limit", 20)),
+            )
+        except Exception as exc:
+            db.rollback()
+            return {"status": "unavailable", "reason": redact_sensitive_text(str(exc), limit=1000)}
+    if tool_name == "propose_booking_recovery":
+        try:
+            return _operations_propose_booking_recovery(
+                db,
+                str(arguments.get("calendar_event_id", "")),
+                str(arguments.get("reason", "")),
+            )
+        except Exception as exc:
+            db.rollback()
+            return {"status": "unavailable", "reason": redact_sensitive_text(str(exc), limit=1000)}
+    if tool_name == "execute_booking_recovery":
+        try:
+            return _operations_execute_booking_recovery(
+                db,
+                str(arguments.get("action_id", "")),
+                current_user_message,
+            )
+        except Exception as exc:
+            db.rollback()
+            return {"status": "failed", "reason": redact_sensitive_text(str(exc), limit=1000)}
     if tool_name == "diagnose_message_handling":
         return _operations_message_handling_diagnostics(
             db,
@@ -10639,8 +11178,10 @@ AGENT_CONSOLE_TERMINAL_STATUSES = {
 AGENT_CONSOLE_ALLOWED_TOOLS = frozenset({
     "cancel_coding_task",
     "diagnose_message_handling",
+    "execute_booking_recovery",
     "execute_code_deployment",
     "execute_runtime_change",
+    "inspect_deleted_calendar_events",
     "inspect_conversation",
     "inspect_code_changes",
     "inspect_coding_runner",
@@ -10649,17 +11190,21 @@ AGENT_CONSOLE_ALLOWED_TOOLS = frozenset({
     "inspect_recent_failures",
     "inspect_sms_accounts",
     "inspect_system_status",
+    "propose_booking_recovery",
     "propose_code_deployment",
     "propose_runtime_change",
     "recall_operational_memory",
     "remember_operational_learning",
     "research_internet",
+    "search_message_bodies",
     "start_coding_task",
 })
 AGENT_CONSOLE_CRITICAL_TOOLS = frozenset({
     "cancel_coding_task",
+    "execute_booking_recovery",
     "execute_code_deployment",
     "execute_runtime_change",
+    "propose_booking_recovery",
     "propose_code_deployment",
     "propose_runtime_change",
     "remember_operational_learning",
