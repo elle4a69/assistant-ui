@@ -55,6 +55,13 @@ class FakeOpenAIClient:
         return self
 
 
+class StructuredProviderError(Exception):
+    def __init__(self, code):
+        super().__init__("redacted provider failure")
+        self.code = code
+        self.body = {"error": {"code": code}}
+
+
 @pytest.fixture
 def isolated_agent_database(tmp_path, monkeypatch):
     engine = create_engine(
@@ -79,6 +86,64 @@ def authenticated_client() -> TestClient:
     expires_at = int(datetime.now(timezone.utc).timestamp()) + 300
     client.cookies.set(main.AUTH_COOKIE_NAME, main._admin_session_token(expires_at))
     return client
+
+
+def create_agent_run(factory, objective="Test provider failure"):
+    db = factory()
+    try:
+        run = main.OperationsAgentRun(
+            id=str(uuid.uuid4()),
+            request_id=str(uuid.uuid4()),
+            actor="admin",
+            objective=objective,
+            status="starting",
+            max_steps=50,
+        )
+        db.add(run)
+        db.commit()
+        return run.id
+    finally:
+        db.close()
+
+
+def test_step_zero_insufficient_quota_has_clear_safe_diagnosis(isolated_agent_database, monkeypatch):
+    run_id = create_agent_run(isolated_agent_database)
+
+    def fail_first_model_call(*_args, **_kwargs):
+        raise StructuredProviderError("insufficient_quota")
+
+    monkeypatch.setattr(main, "_agent_model_step", fail_first_model_call)
+    asyncio.run(main._run_agent_console(run_id, "Run a safe check", 50))
+    db = isolated_agent_database()
+    try:
+        run = db.query(main.OperationsAgentRun).filter_by(id=run_id).one()
+        assert run.status == "failed"
+        assert run.step_count == 0
+        assert run.error == "openai_quota_exhausted"
+        assert "credits or billing must be restored" in run.final_summary
+        assert "redacted provider failure" not in run.final_summary
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("code", ["rate_limit_exceeded", "invalid_api_key", "timeout", "server_error"])
+def test_other_first_call_failures_do_not_claim_credits_are_exhausted(isolated_agent_database, monkeypatch, code):
+    run_id = create_agent_run(isolated_agent_database, objective=f"Test {code}")
+
+    def fail_first_model_call(*_args, **_kwargs):
+        raise StructuredProviderError(code)
+
+    monkeypatch.setattr(main, "_agent_model_step", fail_first_model_call)
+    asyncio.run(main._run_agent_console(run_id, "Run a safe check", 50))
+    db = isolated_agent_database()
+    try:
+        run = db.query(main.OperationsAgentRun).filter_by(id=run_id).one()
+        assert run.status == "failed"
+        assert run.step_count == 0
+        assert run.error == "StructuredProviderError"
+        assert "credits" not in (run.final_summary or "").casefold()
+    finally:
+        db.close()
 
 
 def receive_until(socket, terminal_type: str):

@@ -804,6 +804,46 @@ export interface LearnedInformationEntry extends Omit<ManualLearningEntry, 'scop
   review_source?: 'ai-drafted' | 'ai-redrafted' | 'staff-edited-reply' | 'sms-pair-template';
 }
 
+export interface KnowledgeCuratorRecordRef {
+  id: string;
+  revision: number;
+}
+
+export interface KnowledgeCuratorProposal {
+  id: string;
+  fingerprint: string;
+  canonical_key: string;
+  scope: 'shared' | 'primary' | 'secondary' | 'internal';
+  finding_type: string;
+  records: KnowledgeCuratorRecordRef[];
+  reason_codes: string[];
+  evidence: { reason_codes: string[]; record_count: number };
+  proposed_action: 'no_action' | 'ask_owner' | 'draft_replacement' | 'draft_supersession' | 'quarantine_for_review' | 'merge_duplicate';
+  confidence: string;
+  owner_questions: string[];
+  status: 'proposed' | 'accepted' | 'rejected' | 'dismissed' | 'applied';
+  created_at: string;
+  updated_at: string;
+  draft_entry_id?: string | null;
+}
+
+export interface KnowledgeCuratorRun {
+  id: string;
+  status: 'completed' | 'completed_with_warning';
+  error_code?: string | null;
+  message: string;
+  started_at: string;
+  completed_at: string;
+  finding_counts: Record<string, number>;
+  finding_count: number;
+  created_proposals: number;
+}
+
+export interface KnowledgeCuratorState {
+  runs: KnowledgeCuratorRun[];
+  proposals: KnowledgeCuratorProposal[];
+}
+
 export interface SmsLearningPreviewItem {
   id: string;
   account_key: 'primary' | 'secondary';
@@ -943,6 +983,30 @@ export async function listLearnedInformation(): Promise<LearnedInformationEntry[
   const response = await apiFetch(`${API_BASE}/api/settings/learnings`);
   if (!response.ok) throw new Error('Failed to load learned rules.');
   return (await response.json()).entries;
+}
+
+export async function getKnowledgeCuratorState(): Promise<KnowledgeCuratorState> {
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator`, { cache: 'no-store' });
+  if (!response.ok) throw new Error('Failed to load the knowledge curator.');
+  return response.json();
+}
+
+export async function runKnowledgeCurator(): Promise<{ run: KnowledgeCuratorRun; proposals: KnowledgeCuratorProposal[] }> {
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator/run`, { method: 'POST' });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Knowledge audit could not run.');
+  return response.json();
+}
+
+export async function acceptKnowledgeCuratorProposal(id: string): Promise<KnowledgeCuratorProposal> {
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator/proposals/${encodeURIComponent(id)}/accept`, { method: 'POST' });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Proposal could not be added to review.');
+  return (await response.json()).proposal;
+}
+
+export async function transitionKnowledgeCuratorProposal(id: string, transition: 'reject' | 'dismiss'): Promise<KnowledgeCuratorProposal> {
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator/proposals/${encodeURIComponent(id)}/${transition}`, { method: 'POST' });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Proposal state could not be changed.');
+  return (await response.json()).proposal;
 }
 
 export async function updateLearnedInformation(entry: LearnedInformationEntry): Promise<LearnedInformationEntry> {
