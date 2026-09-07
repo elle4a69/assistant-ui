@@ -135,6 +135,14 @@ def test_operations_chat_instructions_start_a_task_from_an_owner_described_fault
     assert "Treat an owner-described fault, failed deployment, regression, or requested change as the task" in instructions
     assert "do not require the owner to supply a task ID, pull request, commit, branch, or implementation plan" in instructions
     assert "create the one deduplicated repair task yourself" in instructions
+    assert "It never releases automatically" in instructions
+    deployment_tools = {
+        item["name"]: item["description"]
+        for item in main.OPERATIONS_AI_TOOLS
+        if item.get("name") in {"propose_code_deployment", "execute_code_deployment"}
+    }
+    assert "never queues a worker, changes main or deploys" in deployment_tools["propose_code_deployment"]
+    assert "latest separately typed message" in deployment_tools["execute_code_deployment"]
 
 
 def test_operations_runtime_change_requires_exact_separate_confirmation(tmp_path, monkeypatch):
@@ -270,7 +278,7 @@ def test_operations_coding_tools_are_wired_and_start_one_audited_task(monkeypatc
     db.close()
 
 
-def test_completed_code_deployment_queues_automatically(monkeypatch):
+def test_completed_code_deployment_requires_later_owner_confirmation(monkeypatch):
     class FakeGitHubClient:
         configured = True
         repository = "elle4a69/assistant-ui"
@@ -333,12 +341,14 @@ def test_completed_code_deployment_queues_automatically(monkeypatch):
         {"task_id": second_task.id, "reason": "The second task also passed its checks."},
         "Deploy the second one",
     )
-    assert proposed["status"] == "deployment_queued"
-    assert proposed["automatic_release"] is True
+    assert proposed["status"] == "pending_confirmation"
+    assert proposed["confirmation_phrase"] == f'deploy {proposed["action_id"]}'
+    assert proposed["reviewed_commit"] == "b" * 40
+    assert "later message" in proposed["next_step"]
     assert busy["status"] == "deployment_busy"
     assert busy["action_id"] == proposed["action_id"]
     deployment = db.query(main.OperationsAction).filter(main.OperationsAction.id == proposed["action_id"]).one()
-    assert deployment.status == "queued"
+    assert deployment.status == "pending"
     db.close()
 
 

@@ -615,7 +615,7 @@ export default function AgentConsole() {
           <div ref={terminalHostRef} className="h-[300px] min-h-[240px] w-full bg-slate-950 p-2" aria-label="Live coding agent work log" />
           <div className="flex items-start gap-2 border-t border-slate-800 bg-slate-900 px-4 py-3 text-[10px] leading-relaxed text-slate-400">
             <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
-            <p>The work log is monitor-only. Code is changed only on an isolated review branch; protected settings and production deployment still require the exact confirmation returned by the audited workflow.</p>
+            <p>The work log is monitor-only. Code stays on an isolated review branch, and a deployment proposal remains pending until you type its exact confirmation phrase in a later message; release is never automatic.</p>
           </div>
         </section>
 

@@ -8807,7 +8807,9 @@ def operations_ai_instructions(
                 "deduplicated repair task yourself. "
                 "The task starts from current main, runs relevant checks, and pushes only a review branch. Check the task "
                 "instead of starting duplicates. After a completed task, inspect its result and code changes, then use "
-                "propose_code_deployment to queue the audited automatic fast-forward, Fly deployment and health check. "
+                "propose_code_deployment to create one pending deployment proposal. It never releases automatically: "
+                "tell the owner to send the returned exact phrase in a later typed message before the audited GitHub "
+                "fast-forward, Fly deployment and health check can be queued. "
                 "When the owner asks to cancel a queued task, use cancel_coding_task immediately after confirming it is "
                 "the matching unclaimed task; never cancel a claimed or running task. "
                 "Never read credential files or ask a coding worker to expose secrets. "
@@ -9211,9 +9213,9 @@ OPERATIONS_TOOL_SCHEMAS = [
         "type": "function",
         "name": "propose_code_deployment",
         "description": (
-            "Queue an audited automatic production deployment for a completed, committed coding task after inspecting "
-            "the task result and code changes and confirming its checks passed. The exact review commit is promoted only "
-            "by the GitHub worker after its fast-forward checks, then Fly deploys and verifies it."
+            "Review a completed, committed coding task and create one audited pending production deployment proposal. "
+            "This never queues a worker, changes main or deploys. Return the exact phrase the owner must type in a later "
+            "message to authorize the GitHub-worker fast-forward, Fly deployment and health check."
         ),
         "parameters": {
             "type": "object",
@@ -9230,9 +9232,9 @@ OPERATIONS_TOOL_SCHEMAS = [
         "type": "function",
         "name": "execute_code_deployment",
         "description": (
-            "Execute a legacy pending code deployment only when the owner's latest message exactly matches its "
-            "confirmation phrase. New completed coding tasks use propose_code_deployment, which queues the same "
-            "audited GitHub-worker promotion automatically."
+            "Queue one pending code deployment only when the owner's latest separately typed message exactly matches "
+            "the confirmation phrase returned by its earlier proposal. This is the sole pending-to-queued transition; "
+            "repeat execution is idempotent and never dispatches a second worker."
         ),
         "parameters": {
             "type": "object",
@@ -11147,6 +11149,8 @@ def _operations_propose_code_deployment(db: Session, task_id: str, reason: str) 
     task_payload = _operations_action_payload(task)
     if not re.fullmatch(r"[0-9a-f]{40}", str(task_payload.get("commit_sha") or "")):
         return {"status": "rejected", "reason": "That coding task has no valid reviewable commit."}
+    if not str(task_payload.get("branch") or "").strip():
+        return {"status": "rejected", "reason": "That coding task has no valid review branch."}
     with _operations_code_deployment_lock:
         existing = db.query(OperationsAction).filter(
             OperationsAction.action_type == "code_deployment",
@@ -11154,10 +11158,23 @@ def _operations_propose_code_deployment(db: Session, task_id: str, reason: str) 
         ).all()
         for candidate in existing:
             if _operations_action_payload(candidate).get("task_id") == task_id:
+                candidate_payload = _operations_action_payload(candidate)
+                if candidate.status == "pending":
+                    return {
+                        "status": "pending_confirmation",
+                        "action_id": candidate.id,
+                        "confirmation_phrase": f"deploy {candidate.id}",
+                        "reviewed_commit": candidate_payload.get("commit_sha"),
+                        "deployment_state": candidate.status,
+                        "next_step": (
+                            "The owner must type the exact confirmation phrase in a later message to queue this "
+                            "deployment; no release has been started."
+                        ),
+                    }
                 return {
                     "status": "already_proposed",
                     "action_id": candidate.id,
-                    "confirmation_phrase": f"deploy {candidate.id}" if candidate.status == "pending" else None,
+                    "reviewed_commit": candidate_payload.get("commit_sha"),
                     "deployment_state": candidate.status,
                 }
         active_deployment = next((candidate for candidate in existing if candidate.status in {"pending", "queued", "running"}), None)
@@ -11178,6 +11195,9 @@ def _operations_propose_code_deployment(db: Session, task_id: str, reason: str) 
                 "branch": task_payload.get("branch"),
                 "commit_sha": task_payload.get("commit_sha"),
                 "base_sha": task_payload.get("base_sha"),
+                "verification": task_payload.get("verification"),
+                "change_summary": task_payload.get("change_summary"),
+                "reviewed_at": datetime.utcnow().isoformat() + "Z",
             }),
             reason=reason,
             status="pending",
@@ -11185,17 +11205,18 @@ def _operations_propose_code_deployment(db: Session, task_id: str, reason: str) 
         db.add(action)
         db.commit()
         db.refresh(action)
-    # The owner's implementation request already authorised its normal tested
-    # release path. Runtime controls, secrets, SMS and destructive actions keep
-    # their separate confirmation gates; this path promotes only the exact
-    # independently verified review commit through the existing GitHub worker.
-    queued = _operations_execute_code_deployment(db, action.id, f"deploy {action.id}")
-    queued.update({
+    return {
+        "status": "pending_confirmation",
+        "action_id": action.id,
         "task_id": task_id,
-        "commit_sha": task_payload.get("commit_sha"),
-        "automatic_release": True,
-    })
-    return queued
+        "confirmation_phrase": f"deploy {action.id}",
+        "reviewed_commit": task_payload.get("commit_sha"),
+        "deployment_state": "pending",
+        "next_step": (
+            "The owner must type the exact confirmation phrase in a later message to queue this deployment; "
+            "no worker, main change or production release has been started."
+        ),
+    }
 
 
 def _operations_execute_code_deployment(
@@ -11206,7 +11227,7 @@ def _operations_execute_code_deployment(
     if not operations_code_access_available():
         return {"status": "rejected", "reason": "The GitHub-hosted coding runner is not available."}
     required_phrase = f"deploy {action_id}"
-    if current_user_message.strip().casefold() != required_phrase.casefold():
+    if current_user_message.strip() != required_phrase:
         return {
             "status": "rejected",
             "reason": "The owner's latest message did not exactly match the deployment confirmation phrase.",
@@ -11217,6 +11238,14 @@ def _operations_execute_code_deployment(
             OperationsAction.id == action_id,
             OperationsAction.action_type == "code_deployment",
         ).first()
+        if action and action.status in {"queued", "running", "pushed"}:
+            return {
+                "status": "already_queued",
+                "action_id": action.id,
+                "commit": _operations_action_payload(action).get("commit_sha"),
+                "deployment_state": action.status,
+                "next_step": "Use inspect_deployments to follow the existing deployment; no second worker was requested.",
+            }
         if not action or action.status != "pending":
             return {"status": "rejected", "reason": "That deployment proposal is unavailable or already handled."}
         other_running = db.query(OperationsAction).filter(

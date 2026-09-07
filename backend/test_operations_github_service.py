@@ -207,8 +207,7 @@ def test_coding_dispatch_follows_durable_commit_and_preserves_fallback(queued_ac
         assert payload["immediate_worker_requested_at"]
 
 
-@pytest.mark.parametrize("dispatch_fails", [False, True])
-def test_verified_deployment_queues_automatically_and_keeps_queued_work(queued_actions, monkeypatch, dispatch_fails):
+def test_deployment_proposal_stays_pending_until_later_exact_confirmation(queued_actions, monkeypatch):
     import uuid
 
     main, db, factory = queued_actions
@@ -234,16 +233,114 @@ def test_verified_deployment_queues_automatically_and_keeps_queued_work(queued_a
             action = observer.query(main.OperationsAction).filter_by(action_type="code_deployment").one()
             assert action.status == "queued"
             calls.append(action.id)
-        if dispatch_fails:
-            raise OperationsGitHubError("GitHub could not be reached (TimeoutError).")
 
     monkeypatch.setattr(client, "dispatch_workflow", dispatch)
     proposed = main._operations_propose_code_deployment(db, task_id, "Checks passed.")
     action_id = proposed["action_id"]
-    assert proposed["status"] == "deployment_queued"
-    assert proposed["automatic_release"] is True
-    assert proposed["worker_requested"] is not dispatch_fails
+    phrase = f"deploy {action_id}"
+    assert proposed == {
+        "status": "pending_confirmation",
+        "action_id": action_id,
+        "task_id": task_id,
+        "confirmation_phrase": phrase,
+        "reviewed_commit": "b" * 40,
+        "deployment_state": "pending",
+        "next_step": (
+            "The owner must type the exact confirmation phrase in a later message to queue this deployment; "
+            "no worker, main change or production release has been started."
+        ),
+    }
+    assert calls == []
+    assert db.get(main.OperationsAction, action_id).status == "pending"
+
+    wrong = main._operations_execute_code_deployment(db, action_id, "Deploy it")
+    wrong_case = main._operations_execute_code_deployment(db, action_id, phrase.upper())
+    same_turn = main.execute_operations_tool(
+        db, "execute_code_deployment", {"action_id": action_id}, "Checks passed."
+    )
+    assert wrong["status"] == "rejected"
+    assert wrong_case["status"] == "rejected"
+    assert same_turn["status"] == "rejected"
+    assert calls == []
+    assert db.get(main.OperationsAction, action_id).status == "pending"
+
+    queued = main._operations_execute_code_deployment(db, action_id, phrase)
+    assert queued["status"] == "deployment_queued"
     assert calls == [action_id]
     assert db.get(main.OperationsAction, action_id).status == "queued"
+
+    repeated_execution = main._operations_execute_code_deployment(db, action_id, phrase)
+    assert repeated_execution["status"] == "already_queued"
+    assert repeated_execution["deployment_state"] == "queued"
+    assert calls == [action_id]
     repeated = main._operations_propose_code_deployment(db, task_id, "Checks passed.")
     assert repeated["status"] == "already_proposed"
+    assert repeated["action_id"] == action_id
+    assert db.query(main.OperationsAction).filter_by(action_type="code_deployment").count() == 1
+
+
+def test_repeat_pending_proposal_and_active_deployment_protection(queued_actions):
+    import uuid
+
+    main, db, _factory = queued_actions
+    first_task_id = str(uuid.uuid4())
+    second_task_id = str(uuid.uuid4())
+    db.add_all([
+        main.OperationsAction(
+            id=first_task_id, action_type="coding_task", status="completed", reason="First reviewed task",
+            payload=json.dumps({"branch": f"ops/task-{first_task_id}", "commit_sha": "b" * 40}),
+        ),
+        main.OperationsAction(
+            id=second_task_id, action_type="coding_task", status="completed", reason="Second reviewed task",
+            payload=json.dumps({"branch": f"ops/task-{second_task_id}", "commit_sha": "c" * 40}),
+        ),
+    ])
+    db.commit()
+
+    first = main._operations_propose_code_deployment(db, first_task_id, "First checks passed.")
+    repeated = main._operations_propose_code_deployment(db, first_task_id, "First checks passed.")
+    blocked = main._operations_propose_code_deployment(db, second_task_id, "Second checks passed.")
+
+    assert first["status"] == repeated["status"] == "pending_confirmation"
+    assert first["action_id"] == repeated["action_id"]
+    assert first["confirmation_phrase"] == repeated["confirmation_phrase"]
+    assert blocked == {
+        "status": "deployment_busy",
+        "action_id": first["action_id"],
+        "deployment_state": "pending",
+        "next_step": "Finish or inspect the existing deployment before proposing another.",
+    }
+    assert db.query(main.OperationsAction).filter_by(action_type="code_deployment").count() == 1
+
+
+def test_concurrent_proposals_create_only_one_active_deployment(queued_actions):
+    from concurrent.futures import ThreadPoolExecutor
+    import uuid
+
+    main, db, factory = queued_actions
+    task_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+    for index, task_id in enumerate(task_ids):
+        db.add(main.OperationsAction(
+            id=task_id,
+            action_type="coding_task",
+            status="completed",
+            reason="Reviewed concurrent task",
+            payload=json.dumps({
+                "branch": f"ops/task-{task_id}",
+                "commit_sha": ("d" if index == 0 else "e") * 40,
+            }),
+        ))
+    db.commit()
+
+    def propose(task_id):
+        with factory() as worker_db:
+            return main._operations_propose_code_deployment(worker_db, task_id, "Concurrent checks passed.")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(propose, task_ids))
+
+    assert sorted(result["status"] for result in results) == ["deployment_busy", "pending_confirmation"]
+    pending = next(result for result in results if result["status"] == "pending_confirmation")
+    busy = next(result for result in results if result["status"] == "deployment_busy")
+    assert busy["action_id"] == pending["action_id"]
+    assert db.query(main.OperationsAction).filter_by(action_type="code_deployment").count() == 1
