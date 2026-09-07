@@ -1715,6 +1715,308 @@ init_db()
 # during module startup, before the learning helpers are defined below.
 LEARNED_INFORMATION_FILENAME = "learned_information.jsonl"
 LEARNING_REVIEW_STATUSES = {"pending", "approved"}
+KNOWLEDGE_RECORD_STATUSES = {"active", "superseded", "expired", "quarantined"}
+KNOWLEDGE_REASON_CODES = {
+    "knowledge_excluded_unapproved",
+    "knowledge_excluded_status",
+    "knowledge_excluded_effective_range",
+    "knowledge_excluded_retrieval_disabled",
+    "knowledge_excluded_account",
+    "knowledge_excluded_invalid",
+    "knowledge_excluded_superseded",
+    "knowledge_excluded_conflict",
+    "knowledge_authority_overridden",
+}
+# This deliberately retains metadata only. It is operational evidence, not a
+# transcript, prompt cache, or a place for customer information.
+KNOWLEDGE_AUTHORITY_EVENTS: List[Dict[str, str]] = []
+
+
+def _knowledge_reason(code: str, record_id: str = "") -> None:
+    """Record a bounded, non-sensitive reason for an authority decision."""
+    if code not in KNOWLEDGE_REASON_CODES:
+        return
+    KNOWLEDGE_AUTHORITY_EVENTS.append({"code": code, "record_id": record_id[:160]})
+    del KNOWLEDGE_AUTHORITY_EVENTS[:-500]
+
+
+def knowledge_authority_reason_codes() -> List[Dict[str, str]]:
+    """Return a copy of the bounded structured audit trail for diagnostics."""
+    return [dict(item) for item in KNOWLEDGE_AUTHORITY_EVENTS]
+
+
+def _knowledge_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        if value.strip().casefold() in {"true", "1", "yes", "on"}:
+            return True
+        if value.strip().casefold() in {"false", "0", "no", "off", ""}:
+            return False
+    return default if value is None else bool(value)
+
+
+def _knowledge_timestamp(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        # Effective dates are an instant, not wall-clock text. Normalise offset
+        # timestamps to naive UTC because the rest of this persistence layer
+        # deliberately stores UTC-naive datetimes.
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None) if parsed.tzinfo else parsed
+    except (TypeError, ValueError):
+        return None
+
+
+def _knowledge_timestamp_text(value: Any, fallback: str = "1970-01-01T00:00:00Z") -> str:
+    parsed = _knowledge_timestamp(value)
+    return (parsed.isoformat() + "Z") if parsed else fallback
+
+
+def _canonical_knowledge_key(value: Any) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(value or "").casefold()).strip("-")
+    return normalized[:160]
+
+
+def normalize_knowledge_record(
+    record: Dict[str, Any],
+    *,
+    source: str,
+    source_index: int = 0,
+    learned: bool = False,
+) -> Dict[str, Any]:
+    """Add versioned knowledge metadata in memory without rewriting source files.
+
+    Old JSONL and uploaded text have no schema contract. Their defaults retain
+    historic readability, while learned material remains fail-closed as before.
+    """
+    raw = dict(record) if isinstance(record, dict) else {"text": str(record or "")}
+    text = str(raw.get("text") or raw.get("content") or raw.get("body") or raw.get("answer") or raw.get("question") or "").strip()
+    stable_material = json.dumps(raw, ensure_ascii=False, sort_keys=True, default=str)
+    record_id = str(raw.get("id") or raw.get("record_id") or "").strip()
+    if not record_id:
+        record_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"assistant-ui:knowledge:{source}:{source_index}:{stable_material}"))
+    source_type = str(raw.get("source_type") or raw.get("type") or "uploaded_knowledge").strip() or "uploaded_knowledge"
+    legacy_upload = (
+        not learned
+        and source != "memory"
+        and source_type in {"uploaded_text", "uploaded_knowledge"}
+        and not raw.get("review_status")
+    )
+    scope = str(raw.get("sms_account_key") or raw.get("source_account_key") or raw.get("scope") or (
+        "internal" if legacy_upload else "shared"
+    )).strip().casefold()
+    if scope not in {"primary", "secondary", "shared"}:
+        scope = "internal"
+    status = str(raw.get("status") or ("quarantined" if legacy_upload else "active")).strip().casefold()
+    if status not in KNOWLEDGE_RECORD_STATUSES:
+        status = "quarantined"
+    review_status = str(raw.get("review_status") or (
+        "pending" if legacy_upload else "approved" if learned and _knowledge_bool(raw.get("retrieval_enabled")) else "pending" if learned else "approved"
+    )).strip().casefold()
+    retrieval_default = False if legacy_upload or learned else True
+    retrieval_enabled = _knowledge_bool(raw.get("retrieval_enabled"), retrieval_default)
+    canonical_key = _canonical_knowledge_key(
+        raw.get("canonical_key") or raw.get("key") or raw.get("topic") or text
+    )
+    try:
+        revision = max(1, int(raw.get("revision") or raw.get("version") or 1))
+    except (TypeError, ValueError):
+        revision = 1
+    normalized = {
+        **raw,
+        "id": record_id,
+        "record_id": record_id,
+        "canonical_key": canonical_key,
+        "sms_account_key": scope,
+        "scope": scope,
+        "source_type": source_type,
+        "source": source,
+        "text": text,
+        "created_at": _knowledge_timestamp_text(raw.get("created_at")),
+        "updated_at": _knowledge_timestamp_text(raw.get("updated_at") or raw.get("created_at")),
+        "effective_from": raw.get("effective_from") or raw.get("effectiveFrom"),
+        "effective_until": raw.get("effective_until") or raw.get("effectiveUntil"),
+        "status": status,
+        "supersedes_id": str(raw.get("supersedes_id") or raw.get("supersedesId") or "").strip() or None,
+        "revision": revision,
+        "version": revision,
+        "review_status": review_status,
+        "retrieval_enabled": retrieval_enabled,
+    }
+    return normalized
+
+
+# American spelling is kept as the public helper used by existing integrations.
+normalise_knowledge_record = normalize_knowledge_record
+
+
+def _knowledge_base_reason(record: Dict[str, Any], account_key: str, now: datetime) -> Optional[str]:
+    if not record.get("id") or not record.get("canonical_key") or not record.get("text"):
+        return "knowledge_excluded_invalid"
+    if record.get("review_status") != "approved":
+        return "knowledge_excluded_unapproved"
+    if record.get("status") != "active":
+        return "knowledge_excluded_status"
+    if not _knowledge_bool(record.get("retrieval_enabled")):
+        return "knowledge_excluded_retrieval_disabled"
+    if record.get("sms_account_key") not in {account_key, "shared"}:
+        return "knowledge_excluded_account"
+    effective_from = _knowledge_timestamp(record.get("effective_from"))
+    effective_until = _knowledge_timestamp(record.get("effective_until"))
+    if (record.get("effective_from") and not effective_from) or (record.get("effective_until") and not effective_until):
+        return "knowledge_excluded_invalid"
+    if effective_from and now < effective_from or effective_until and now > effective_until:
+        return "knowledge_excluded_effective_range"
+    return None
+
+
+def resolve_knowledge_authority(
+    records: List[Dict[str, Any]],
+    account_key: str = "primary",
+    now: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Return only one deterministic, current authority per topic/account.
+
+    A successor is a revocation boundary: if it is expired or malformed, its
+    predecessor cannot reappear. This deliberately fails closed for dangling,
+    cyclic and cross-account chains.
+    """
+    current = _knowledge_timestamp(now or datetime.utcnow()) or datetime.utcnow()
+    normalized = [
+        normalize_knowledge_record(item, source=str(item.get("source") or "memory"), source_index=index,
+                                   learned=str(item.get("source") or "") == LEARNED_INFORMATION_FILENAME)
+        for index, item in enumerate(records) if isinstance(item, dict)
+    ]
+    by_id: Dict[str, Dict[str, Any]] = {}
+    duplicate_ids = set()
+    for item in normalized:
+        if item["id"] in by_id:
+            duplicate_ids.add(item["id"])
+        by_id[item["id"]] = item
+    children: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for item in normalized:
+        if item.get("supersedes_id"):
+            children[item["supersedes_id"]].append(item)
+
+    base_reasons: Dict[str, str] = {}
+    for item in normalized:
+        reason = _knowledge_base_reason(item, account_key, current)
+        if item["id"] in duplicate_ids:
+            reason = "knowledge_excluded_invalid"
+        if reason:
+            base_reasons[item["id"]] = reason
+
+    # Supersession is meaningful only within one canonical fact. Evaluate an
+    # entire connected component, rather than only an offending edge: otherwise
+    # a descendant can escape a bad cross-topic edge or a branched revision.
+    neighbours: Dict[str, set[str]] = defaultdict(set)
+    for predecessor_id, successors in children.items():
+        if predecessor_id not in by_id:
+            continue
+        for child in successors:
+            neighbours[predecessor_id].add(child["id"])
+            neighbours[child["id"]].add(predecessor_id)
+    visited_components = set()
+    for record_id in by_id:
+        if record_id in visited_components:
+            continue
+        component, stack = set(), [record_id]
+        while stack:
+            node_id = stack.pop()
+            if node_id in component:
+                continue
+            component.add(node_id)
+            stack.extend(neighbours.get(node_id, set()) - component)
+        visited_components.update(component)
+        component_invalid = False
+        component_conflict = False
+        for node_id in component:
+            successors = children.get(node_id, [])
+            if len(successors) > 1:
+                component_conflict = True
+            for child in successors:
+                if child.get("canonical_key") != by_id[node_id].get("canonical_key"):
+                    component_invalid = True
+                if child.get("sms_account_key") != by_id[node_id].get("sms_account_key"):
+                    component_invalid = True
+        if component_invalid or component_conflict:
+            reason = "knowledge_excluded_invalid" if component_invalid else "knowledge_excluded_conflict"
+            for node_id in component:
+                base_reasons[node_id] = reason
+
+    selected: List[Dict[str, Any]] = []
+    processed = set()
+    for item in normalized:
+        item_id = item["id"]
+        if item_id in processed:
+            continue
+        # Follow all descendants. A malformed edge invalidates every record
+        # whose authority would otherwise rely on that chain.
+        descendants: List[Dict[str, Any]] = []
+        stack = [item]
+        path = set()
+        chain_invalid = False
+        while stack:
+            node = stack.pop()
+            node_id = node["id"]
+            if node_id in path:
+                chain_invalid = True
+                continue
+            path.add(node_id)
+            descendants.append(node)
+            for child in children.get(node_id, []):
+                if child.get("sms_account_key") != node.get("sms_account_key"):
+                    chain_invalid = True
+                stack.append(child)
+        processed.update(path)
+        if chain_invalid:
+            for node in descendants:
+                base_reasons[node["id"]] = "knowledge_excluded_invalid"
+            continue
+        # A missing predecessor is not a revision chain we can safely trust.
+        for node in descendants:
+            predecessor = node.get("supersedes_id")
+            if predecessor and predecessor not in by_id:
+                base_reasons[node["id"]] = "knowledge_excluded_invalid"
+        leaves = [node for node in descendants if not children.get(node["id"])]
+        # Any successor suppresses the predecessor, even an expired successor.
+        for node in descendants:
+            if children.get(node["id"]):
+                base_reasons[node["id"]] = "knowledge_excluded_superseded"
+        valid_leaves = [node for node in leaves if node["id"] not in base_reasons]
+        if valid_leaves:
+            newest = max(valid_leaves, key=lambda node: (
+                node.get("revision", 1), _knowledge_timestamp(node.get("updated_at")) or datetime.min, node["id"]
+            ))
+            selected.append(newest)
+
+    # Independent active records for one fact are a business conflict. Never
+    # ask the model to pick a price, duration, policy, or wording from them.
+    by_key: Dict[tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for item in selected:
+        by_key[(str(item.get("sms_account_key")), str(item.get("canonical_key")))].append(item)
+    allowed_ids = set()
+    for group in by_key.values():
+        fingerprints = {str(item.get("text") or "") for item in group}
+        if len(group) > 1 and len(fingerprints) > 1:
+            for item in group:
+                base_reasons[item["id"]] = "knowledge_excluded_conflict"
+        else:
+            allowed_ids.update(item["id"] for item in group)
+
+    result = []
+    for item in normalized:
+        reason = base_reasons.get(item["id"])
+        if item["id"] not in allowed_ids and not reason:
+            reason = "knowledge_excluded_superseded"
+        if reason:
+            _knowledge_reason(reason, item["id"])
+            continue
+        if item["id"] in allowed_ids:
+            result.append(item)
+    return result
 
 def load_knowledge_base():
     global KNOWLEDGE_CHUNKS
@@ -1734,19 +2036,19 @@ def load_knowledge_base():
                 with open(filepath, "r", encoding="utf-8") as f:
                     content = f.read()
                     chunks = [c.strip() for c in content.split("\n\n") if c.strip()]
-                    for chunk in chunks:
-                        KNOWLEDGE_CHUNKS.append({
-                            "source": filename,
-                            "type": "text",
-                            "text": chunk
-                        })
+                    for index, chunk in enumerate(chunks):
+                        KNOWLEDGE_CHUNKS.append(normalize_knowledge_record(
+                            {"text": chunk, "source_type": "uploaded_text"},
+                            source=filename,
+                            source_index=index,
+                        ))
             except Exception as e:
                 print(f"Error reading txt file {filename}: {e}")
                 
         elif filename.endswith(".jsonl"):
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
-                    for line in f:
+                    for line_index, line in enumerate(f):
                         if not line.strip():
                             continue
                         try:
@@ -1773,15 +2075,19 @@ def load_knowledge_base():
                                     # Learned material is fail-closed until a staff member
                                     # has reviewed and approved it for retrieval.
                                     is_learned_entry = filename == LEARNED_INFORMATION_FILENAME
-                                    review_status = str(obj.get("review_status", "pending" if is_learned_entry else "approved"))
-                                    KNOWLEDGE_CHUNKS.append({
-                                        "source": filename,
-                                        "type": "text",
-                                        "text": text_val.strip(),
-                                        "scope": str(obj.get("scope", "internal" if is_learned_entry else "shared")),
-                                        "category": str(obj.get("category", "internal_or_uncertain")),
-                                        "retrieval_enabled": bool(obj.get("retrieval_enabled", False)) and review_status == "approved",
-                                    })
+                                    # Uploaded JSONL is readable for audit, but it cannot
+                                    # become customer-facing knowledge without an explicit
+                                    # review marker, just like legacy uploaded text.
+                                    review_status = str(obj.get("review_status", "pending"))
+                                    normalized = normalize_knowledge_record(
+                                        {**obj, "text": text_val.strip(), "review_status": review_status},
+                                        source=filename,
+                                        source_index=line_index,
+                                        learned=is_learned_entry,
+                                    )
+                                    normalized["type"] = "text"
+                                    normalized["category"] = str(obj.get("category", "internal_or_uncertain"))
+                                    KNOWLEDGE_CHUNKS.append(normalized)
                         except Exception as line_e:
                             print(f"Error parsing jsonl line: {line_e}")
             except Exception as e:
@@ -1799,13 +2105,8 @@ def retrieve_knowledge_chunks(
     if not KNOWLEDGE_CHUNKS:
         return []
 
-    allowed_scopes = {"shared", account_key}
-    eligible_chunks = [
-        chunk for chunk in KNOWLEDGE_CHUNKS
-        if chunk.get("type", "text") == "text"
-        and chunk.get("retrieval_enabled", True)
-        and chunk.get("scope", "internal") in allowed_scopes
-    ]
+    eligible_chunks = resolve_knowledge_authority(KNOWLEDGE_CHUNKS, account_key=account_key)
+    eligible_chunks = [chunk for chunk in eligible_chunks if chunk.get("type", "text") == "text"]
     if not eligible_chunks:
         return []
         
@@ -2173,6 +2474,16 @@ def build_business_context(query: str, limit: int = 3, account_key: str = "prima
     matched_chunks = retrieve_knowledge_chunks(query, limit=limit, account_key=account_key)
     for result in matched_chunks:
         if result.get("type", "text") == "text":
+            # Current prices, durations and availability are never learned
+            # authorities. They must come from Settings or the live calendar.
+            # This also protects legacy uploaded records that predate the
+            # classification field.
+            if re.search(
+                r"(?:\$\s*\d|\b\d+\s*(?:minutes?|mins?|hours?|hrs?)\b|\b(?:available|availability|free|opening|slot|booked\s+out)\b)",
+                str(result.get("text") or ""), re.IGNORECASE,
+            ):
+                _knowledge_reason("knowledge_authority_overridden", str(result.get("id") or ""))
+                continue
             # Learning templates may contain line/profile and semantic service
             # variables. Render them only for the receiving line before they
             # enter the model context; never leave historical template tokens
@@ -2191,6 +2502,33 @@ def build_business_context(query: str, limit: int = 3, account_key: str = "prima
     if services_context:
         output_parts.append(services_context)
     return "\n\n".join(output_parts) or "No relevant business records found."
+
+
+AUTHORITY_MATRIX = {
+    "availability": "live_calendar",
+    "service_name_price_duration": "account_settings_catalogue",
+    "accepted_slot_customer_booking_progress": "chronological_account_conversation",
+    "durable_policy_and_wording": "approved_active_knowledge",
+}
+
+
+def build_authority_context(query: str, account_key: str, *, booking_or_availability: bool) -> str:
+    """Assemble only the source classes permitted to influence a customer reply."""
+    if booking_or_availability:
+        _knowledge_reason("knowledge_authority_overridden")
+        return (
+            "[Authority matrix]\n"
+            "Availability and time slots: current live calendar only.\n"
+            "Service names, prices and durations: current account Settings catalogue only.\n"
+            "Durable knowledge is deliberately omitted for this booking or availability turn.\n\n"
+            + get_live_services_context(account_key)
+        )
+    business_context = (
+        build_business_context(query)
+        if account_key == "primary"
+        else build_business_context(query, account_key=account_key)
+    )
+    return "[Authority matrix]\nDurable policy and wording: approved active knowledge only.\n\n" + business_context
 
 
 LEARNED_INFORMATION_LOCK = threading.Lock()
@@ -2280,10 +2618,17 @@ def save_learned_information(
     entry = {
         "id": request_event_id,
         "type": "information_request_resolution",
+        "source_type": "information_request_resolution",
+        "canonical_key": _canonical_knowledge_key(knowledge_summary),
+        "sms_account_key": account_key,
         "question": customer_question.strip(),
         "owner_information": supplied_information.strip(),
         "text": knowledge_summary.strip(),
+        "created_at": datetime.utcnow().isoformat() + "Z",
         "updated_at": datetime.utcnow().isoformat() + "Z",
+        "status": "quarantined",
+        "supersedes_id": None,
+        "revision": 1,
         "review_status": "pending",
         "retrieval_enabled": False,
     }
@@ -2358,7 +2703,20 @@ def replace_learned_information_entry(entry_id: str, updates: Dict[str, Any]) ->
                 retained.append(json.dumps(item, ensure_ascii=False))
                 continue
             found += 1
+            semantic_edit = any(key in updates for key in {
+                "topic", "text", "scope", "applies_when", "instruction",
+                "example_reply", "owner_topic", "owner_guidance",
+            })
             item.update(updates)
+            if semantic_edit:
+                try:
+                    item["revision"] = max(1, int(item.get("revision") or item.get("version") or 1)) + 1
+                except (TypeError, ValueError):
+                    item["revision"] = 2
+                item["version"] = item["revision"]
+                item["status"] = "quarantined"
+                item["review_status"] = "pending"
+                item["retrieval_enabled"] = False
             item["updated_at"] = datetime.utcnow().isoformat() + "Z"
             updated_entry = item
             retained.append(json.dumps(item, ensure_ascii=False))
@@ -2417,6 +2775,7 @@ def approve_learned_information_entry(entry_id: str) -> Dict[str, Any]:
     )
     updates = {
         "review_status": "approved",
+        "status": "quarantined" if unsafe else "active",
         "category": classification.get("category", "internal_or_uncertain"),
         "classification_version": classification.get("classification_version", KNOWLEDGE_CLASSIFICATION_VERSION),
         "classification_status": classification.get("classification_status", "classified"),
@@ -2701,6 +3060,9 @@ def save_manual_learning(
     entry = {
         "id": f"manual-{uuid.uuid4()}",
         "type": "manual_guidance",
+        "source_type": "manual_guidance",
+        "canonical_key": _canonical_knowledge_key(structured["topic"]),
+        "sms_account_key": scope if scope in {"primary", "secondary"} else "shared",
         "topic": structured["topic"],
         "applies_when": structured["applies_when"],
         "instruction": structured["instruction"],
@@ -2710,6 +3072,9 @@ def save_manual_learning(
         "text": "\n".join(text_parts),
         "created_at": now,
         "updated_at": now,
+        "status": "quarantined",
+        "supersedes_id": None,
+        "revision": 1,
         "review_status": "pending",
         "retrieval_enabled": False,
         "review_source": "ai-drafted",
@@ -2897,6 +3262,9 @@ def save_sms_pair_learning_candidates(candidates: List[Dict[str, str]]) -> Dict[
         _upsert_learned_information_entry({
             "id": f"sms-pair-{uuid.uuid4()}",
             "type": "sms_pair_template",
+            "source_type": "sms_pair_template",
+            "canonical_key": _canonical_knowledge_key(fields["topic"]),
+            "sms_account_key": account_key,
             "topic": fields["topic"],
             "applies_when": fields["applies_when"],
             "instruction": fields["instruction"],
@@ -2907,6 +3275,9 @@ def save_sms_pair_learning_candidates(candidates: List[Dict[str, str]]) -> Dict[
             "scope": account_key,
             "created_at": now,
             "updated_at": now,
+            "status": "quarantined",
+            "supersedes_id": None,
+            "revision": 1,
             "review_status": "pending",
             "retrieval_enabled": False,
             "review_source": "sms-pair-template",
@@ -2934,6 +3305,9 @@ def save_edited_draft_learning(db: Session, thread: Thread, draft: Message) -> O
     entry = {
         "id": f"edited-draft-{draft.id}",
         "type": "staff_edited_draft",
+        "source_type": "staff_edited_draft",
+        "canonical_key": _canonical_knowledge_key("Staff-approved customer response"),
+        "sms_account_key": thread.sms_account_key if thread.sms_account_key in FIRST_CONTACT_ACCOUNT_KEYS else "internal",
         "topic": "Staff-approved customer response",
         "applies_when": customer_message.text.strip()[:1000],
         "instruction": "Use the approved response only when its facts are durable and relevant.",
@@ -2946,6 +3320,9 @@ def save_edited_draft_learning(db: Session, thread: Thread, draft: Message) -> O
         ),
         "created_at": now,
         "updated_at": now,
+        "status": "quarantined",
+        "supersedes_id": None,
+        "revision": 1,
         "review_status": "pending",
         "retrieval_enabled": False,
         "review_source": "staff-edited-reply",
@@ -3963,9 +4340,11 @@ def asks_for_secondary_booking_confirmation(message: str) -> bool:
     ))
 
 
-def get_service_for_booking(service_id: str) -> Optional[Dict[str, Any]]:
+def get_service_for_booking(service_id: str, account_key: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Resolve a service from the current Settings catalogue at decision time."""
+    services = load_line_services(account_key) if account_key in FIRST_CONTACT_ACCOUNT_KEYS else load_all_line_services()
     return next((
-        service for service in load_all_line_services()
+        service for service in services
         if isinstance(service, dict) and service.get("id") == service_id
     ), None)
 
@@ -4027,7 +4406,7 @@ def propose_conversational_booking(
     notes: Optional[str],
 ) -> Dict[str, Any]:
     """Validate and save a proposal; this function never creates a booking."""
-    service = get_service_for_booking((service_id or "").strip())
+    service = get_service_for_booking((service_id or "").strip(), thread.sms_account_key)
     if not service:
         return {"status": "rejected", "reason": "That service is not available."}
     clean_name = (customer_name or "").strip()[:120]
@@ -4087,7 +4466,17 @@ def confirm_conversational_booking(
             "reason": "The customer's latest message was not an explicit confirmation.",
         }, False
     try:
-        proposal = proposal_override or json.loads(thread.pending_booking or "")
+        proposal = dict(proposal_override or json.loads(thread.pending_booking or ""))
+        service = get_service_for_booking(str(proposal.get("service_id") or ""), thread.sms_account_key)
+        if not service:
+            raise ValueError("service no longer exists in this account catalogue")
+        # A stored proposal is chronological booking state, but prices and
+        # durations are not. Re-resolve those live Settings facts immediately
+        # before the calendar decision.
+        proposal["service_name"] = str(service.get("name") or "Appointment")
+        proposal["duration"] = max(1, min(1440, int(service.get("duration", 60))))
+        proposal["price"] = int(service.get("price", 0) or 0)
+        proposal["show_duration"] = service.get("showDuration", True) is not False
         proposed_at = datetime.fromisoformat(proposal["created_at"])
         start = parse_business_datetime(proposal["start_time"])
         duration = int(proposal["duration"])
@@ -5249,6 +5638,85 @@ def requested_duration_minutes(messages: List[Any], current_body: str) -> Option
     return None
 
 
+def chronological_pending_booking_state(messages: List[Any], account_key: str) -> Optional[Dict[str, str]]:
+    """Recover a literal, account-bound offered time while collecting a name.
+
+    This is conversation state, not availability evidence. It tells the reply
+    flow what the customer is referring to; a calendar operation still has to
+    prove that the appointment can be made.
+    """
+    if account_key not in FIRST_CONTACT_ACCOUNT_KEYS:
+        return None
+    meaningful = [
+        (index, message) for index, message in enumerate(messages)
+        if getattr(message, "role", "") in {"agent", "customer"}
+    ]
+    if not meaningful:
+        return None
+    customer_positions = [item for item in meaningful if getattr(item[1], "role", "") == "customer"]
+    # If a customer message exists, it must be the immediate reply to the name
+    # question. An old offer cannot be revived by a later isolated first name.
+    if customer_positions:
+        customer_index, customer_message = customer_positions[-1]
+        preceding = [item for item in meaningful if item[0] < customer_index]
+        if not preceding:
+            return None
+        name_question_index, name_question = preceding[-1]
+        if getattr(name_question, "role", "") != "agent":
+            return None
+        name_question_at = getattr(name_question, "at", None)
+        customer_at = getattr(customer_message, "at", None)
+        if isinstance(name_question_at, datetime) and isinstance(customer_at, datetime):
+            if customer_at - name_question_at > timedelta(hours=2):
+                return None
+    else:
+        name_question_index, name_question = meaningful[-1]
+    text = str(getattr(name_question, "text", ""))
+    if not re.search(r"\b(?:what|which)\s+(?:is\s+)?(?:your\s+)?name\b|\bname\s+(?:should|shall)\s+i\b", text, re.IGNORECASE):
+        return None
+    prior_to_question = [item for item in meaningful if item[0] < name_question_index]
+    if not prior_to_question:
+        return None
+    offer_index, offer_message = prior_to_question[-1]
+    if getattr(offer_message, "role", "") != "agent":
+        return None
+    offer_text = str(getattr(offer_message, "text", ""))
+    match = re.search(r"\b(1[0-2]|0?[1-9])(?::([0-5]\d))\s*(am|pm)?\b", offer_text, re.IGNORECASE)
+    has_date = bool(re.search(
+        r"\b(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b\d{4}-\d{2}-\d{2}\b",
+        offer_text,
+        re.IGNORECASE,
+    ))
+    if match and has_date:
+        offer_at = getattr(offer_message, "at", None)
+        name_question_at = getattr(name_question, "at", None)
+        if isinstance(offer_at, datetime) and isinstance(name_question_at, datetime):
+            if name_question_at - offer_at > timedelta(hours=2):
+                return None
+        clock = match.group(0).strip()
+        return {"accepted_slot": clock, "state": "awaiting_customer_name", "account_key": account_key}
+    return None
+
+
+def name_only_follow_up_preserves_slot(
+    messages: List[Any],
+    account_key: str,
+    customer_message: str,
+    *,
+    fresh_calendar_conflict: bool = False,
+) -> Optional[Dict[str, str]]:
+    """Resolve a name-only reply without silently replacing a prior offered time."""
+    if not re.fullmatch(r"[A-Za-z][A-Za-z '\-]{0,119}", (customer_message or "").strip()):
+        return None
+    state = chronological_pending_booking_state(messages, account_key)
+    if not state:
+        return None
+    return {
+        **state,
+        "resolution": "fresh_calendar_conflict" if fresh_calendar_conflict else "preserve_pending_slot",
+    }
+
+
 def validate_availability_claim(
     reply: str,
     tool_slots: List[Dict[str, Any]],
@@ -5365,6 +5833,9 @@ def run_sms_reply_logic(
     }
     effective_body = current_customer_burst(history_msgs, body)
     clean_body = effective_body.strip().lower()
+    chronological_state = name_only_follow_up_preserves_slot(
+        history_msgs, thread.sms_account_key, effective_body,
+    )
     if thread.pending_booking and is_explicit_booking_rejection(effective_body):
         thread.pending_booking = None
     pending_booking_at_turn_start = bool(thread.pending_booking)
@@ -5380,6 +5851,7 @@ def run_sms_reply_logic(
     booking_or_availability_turn = (
         is_booking_or_availability_turn(effective_body)
         or clean_body in ("1", "2", "3")
+        or bool(chronological_state)
     )
     availability_tool_slots: List[Dict[str, Any]] = []
     live_calendar_lookup_succeeded = False
@@ -5421,18 +5893,14 @@ def run_sms_reply_logic(
         # guards intentionally expire ORM objects.
         db.flush()
 
-    # Step 1: Read only the knowledge and Settings catalogue allowed for this account.
-    if booking_or_availability_turn:
-        retrieved_context = (
-            "No stored knowledge is supplied for booking availability. "
-            "Use the live booking discovery tools for services and times."
-        )
-    else:
-        retrieved_context = (
-            build_business_context(effective_body)
-            if thread.sms_account_key == "primary"
-            else build_business_context(effective_body, account_key=thread.sms_account_key)
-        )
+    # Step 1: enforce source authority before prompt assembly. The model never
+    # receives historical learned availability, price, duration, or booking state
+    # as a competing business fact.
+    retrieved_context = build_authority_context(
+        effective_body,
+        thread.sms_account_key,
+        booking_or_availability=booking_or_availability_turn,
+    )
     
     now_local = current_business_time()
     reply_at_naive = datetime.utcnow()
@@ -5465,6 +5933,13 @@ def run_sms_reply_logic(
         "Do not mention internal calendar increments or call them slots in the customer reply."
     )
     slots_str += f"\n{booking_guidance}"
+    if chronological_state:
+        slots_str += (
+            "\nChronological account-bound booking state: the customer supplied a name after being asked "
+            f"to complete the previously offered {chronological_state['accepted_slot']} appointment. "
+            "Continue referring to that exact pending time. Do not substitute another time unless a fresh "
+            "authoritative calendar lookup establishes a genuine conflict."
+        )
     if thread.pending_booking:
         try:
             pending = json.loads(thread.pending_booking)
