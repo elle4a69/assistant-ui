@@ -46,7 +46,7 @@ writable through the console.
 ## Limits and privacy
 
 - One active run per application process.
-- Maximum 15 model/action steps (configurable downward with
+- Maximum 50 model/action steps (configurable downward with
   `OPS_AGENT_MAX_STEPS`).
 - 30 seconds per allowlisted action and a bounded total run duration. Actions
   use a dedicated single-worker executor, local database waits are capped at

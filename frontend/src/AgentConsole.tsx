@@ -101,7 +101,7 @@ export default function AgentConsole() {
   const [runState, setRunState] = useState<AgentConsoleState>('idle');
   const [runId, setRunId] = useState<string | null>(null);
   const [step, setStep] = useState(0);
-  const [maxSteps, setMaxSteps] = useState(30);
+  const [maxSteps, setMaxSteps] = useState(50);
   const [statusMessage, setStatusMessage] = useState('Ask naturally. The agent remembers this conversation and works through the authorised steps.');
   const [error, setError] = useState<string | null>(null);
   const [recentRuns, setRecentRuns] = useState<AgentConsoleRun[]>([]);
