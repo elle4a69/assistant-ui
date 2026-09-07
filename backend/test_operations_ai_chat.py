@@ -989,3 +989,142 @@ def test_realtime_voice_turn_is_chronological_sanitised_and_idempotent():
     assert "[REDACTED]" in rows[0].content
     assert [item["id"] for item in first["messages"]] == [item["id"] for item in second["messages"]]
     db.close()
+
+
+def test_exact_message_body_search_is_bounded_paginated_minimal_and_audited():
+    db = make_db()
+    now = datetime.utcnow().replace(microsecond=0)
+    thread = Thread(
+        id="message-search-thread",
+        customer_phone="+61412345678",
+        sms_account_key="secondary",
+        state="needs-review",
+        priority="medium",
+        sla_due_at=now + timedelta(hours=1),
+        unread_count=0,
+    )
+    db.add(thread)
+    db.add_all([
+        Message(id="message-2", thread_id=thread.id, role="agent", text="Directions: https://maps.test/place", at=now),
+        Message(id="message-1", thread_id=thread.id, role="agent", text="Again https://maps.test/place safely", at=now - timedelta(minutes=1)),
+        Message(id="message-0", thread_id=thread.id, role="customer", text="I saw https://maps.test/place", at=now - timedelta(minutes=2)),
+    ])
+    db.commit()
+    arguments = {
+        "exact_text": "https://maps.test/place",
+        "start_at": (now - timedelta(days=1)).isoformat() + "Z",
+        "end_at": (now + timedelta(days=1)).isoformat() + "Z",
+        "direction": "outbound",
+        "account_key": "secondary",
+        "cursor": None,
+        "limit": 1,
+    }
+
+    first = main.execute_operations_tool(db, "search_message_bodies", arguments, "Find today's maps link")
+    arguments["cursor"] = first["next_cursor"]
+    second = main.execute_operations_tool(db, "search_message_bodies", arguments, "Continue")
+
+    assert len(first["matches"]) == len(second["matches"]) == 1
+    assert first["matches"][0] != second["matches"][0]
+    assert set(first["matches"][0]) == {
+        "sms_account", "thread_id", "phone", "timestamp", "direction", "matched_excerpt",
+    }
+    assert first["matches"][0]["direction"] == "outbound"
+    assert first["matches"][0]["sms_account"] == "secondary"
+    audits = db.query(main.OperationsAction).filter_by(action_type="conversation_search").all()
+    assert len(audits) == 2
+    assert "https://maps.test/place" not in audits[0].payload
+    assert main.json.loads(audits[0].payload)["query_sha256"]
+    db.close()
+
+
+class FakeCalendarRequest:
+    def __init__(self, value):
+        self.value = value
+
+    def execute(self):
+        return self.value
+
+
+class FakeRecoveryCalendarEvents:
+    def __init__(self, deleted_event):
+        self.deleted_event = deleted_event
+        self.insert_calls = []
+
+    def get(self, **kwargs):
+        assert kwargs["eventId"] == self.deleted_event["id"]
+        return FakeCalendarRequest(self.deleted_event)
+
+    def list(self, **kwargs):
+        if kwargs.get("privateExtendedProperty"):
+            return FakeCalendarRequest({"items": []})
+        return FakeCalendarRequest({"items": [self.deleted_event], "nextPageToken": "next-trash-page"})
+
+    def insert(self, **kwargs):
+        self.insert_calls.append(kwargs)
+        restored = dict(kwargs["body"])
+        restored.update({"id": "restored-event-1", "status": "confirmed"})
+        return FakeCalendarRequest(restored)
+
+
+class FakeRecoveryCalendarService:
+    def __init__(self, deleted_event):
+        self.events_api = FakeRecoveryCalendarEvents(deleted_event)
+
+    def events(self):
+        return self.events_api
+
+
+def test_deleted_calendar_inspection_and_confirmed_recovery_recreate_and_resync(monkeypatch):
+    db = make_db()
+    deleted_event = {
+        "id": "deleted-event-1",
+        "status": "cancelled",
+        "summary": "Recovered Service",
+        "description": "Customer phone: +61412345678",
+        "updated": "2026-09-07T04:00:00Z",
+        "start": {"dateTime": "2026-09-07T21:00:00+10:00"},
+        "end": {"dateTime": "2026-09-07T22:00:00+10:00"},
+        "extendedProperties": {"private": {
+            "customer_phone": "+61412345678",
+            "sms_account_key": "primary",
+            "thread_id": "thread-restore",
+            "booking_amount": "250",
+        }},
+    }
+    fake_service = FakeRecoveryCalendarService(deleted_event)
+    monkeypatch.setattr(main.calendar_service, "service", fake_service)
+
+    inspected = main.execute_operations_tool(db, "inspect_deleted_calendar_events", {
+        "start_at": "2026-09-07T00:00:00Z",
+        "end_at": "2026-09-08T00:00:00Z",
+        "page_token": None,
+        "limit": 10,
+    }, "Inspect today's deleted bookings")
+    assert inspected["events"][0]["calendar_event_id"] == "deleted-event-1"
+    assert inspected["events"][0]["recoverable"] is True
+    assert db.query(main.OperationsAction).filter_by(action_type="calendar_trash_search").count() == 1
+
+    proposed = main.execute_operations_tool(db, "propose_booking_recovery", {
+        "calendar_event_id": "deleted-event-1",
+        "reason": "Recover the booking identified from the matching outbound directions message.",
+    }, "Prepare the recovery")
+    rejected = main.execute_operations_tool(db, "execute_booking_recovery", {
+        "action_id": proposed["action_id"],
+    }, "Yes")
+    executed = main.execute_operations_tool(db, "execute_booking_recovery", {
+        "action_id": proposed["action_id"],
+    }, proposed["confirmation_phrase"])
+
+    assert rejected["status"] == "rejected"
+    assert executed["status"] == "executed"
+    assert executed["calendar_event_id"] == "restored-event-1"
+    assert fake_service.events_api.insert_calls[0]["sendUpdates"] == "none"
+    assert fake_service.events_api.insert_calls[0]["body"]["extendedProperties"]["private"]["recovered_from_event_id"] == "deleted-event-1"
+    booking = db.get(main.CalendarEvent, "restored-event-1")
+    assert booking.customer_phone == "+61412345678"
+    assert booking.sms_account_key == "primary"
+    assert booking.thread_id == "thread-restore"
+    assert booking.amount == 250
+    assert db.get(main.OperationsAction, proposed["action_id"]).status == "executed"
+    db.close()
