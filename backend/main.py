@@ -2768,6 +2768,8 @@ def approve_learned_information_entry(entry_id: str) -> Dict[str, Any]:
     entry = entries.get(entry_id)
     if not entry:
         raise KeyError(entry_id)
+    if entry.get("source_type") == "curator_proposal" and entry.get("proposed_supersedes_id"):
+        return _approve_curator_supersession_entry(entry)
     classification = classify_knowledge_entries([entry]).get(entry_id, _quarantined_knowledge_classification())
     unsafe = (
         classification.get("category") in {"availability_or_booking_state", "customer_specific", "internal_or_uncertain"}
@@ -3133,6 +3135,587 @@ def redraft_all_pending_learned_information() -> Dict[str, int]:
             failed += 1
             print(f"Learning redraft failed for {entry.get('id')}: {type(exc).__name__}")
     return {"processed": processed, "failed": failed}
+
+
+# Knowledge Curator ---------------------------------------------------------
+#
+# The curator is deliberately proposal-only.  Its durable state contains
+# record identifiers, revisions and reason codes, never source record text or
+# model prompts.  Knowledge itself continues to live in the existing reviewed
+# JSONL store and can become retrievable only through the normal approval path.
+KNOWLEDGE_CURATOR_STATE_PATH = os.path.join(DATA_DIR, "knowledge_curator_state.json")
+KNOWLEDGE_CURATOR_LOCK = threading.Lock()
+KNOWLEDGE_CURATOR_MAX_RUNS = 50
+KNOWLEDGE_CURATOR_MAX_PROPOSALS = 500
+KNOWLEDGE_CURATOR_FINDING_TYPES = {
+    "exact_duplicate",
+    "incompatible_active_records",
+    "expired_record",
+    "future_record",
+    "dangling_supersession",
+    "cyclic_supersession",
+    "cross_topic_supersession",
+    "cross_scope_supersession",
+    "branched_supersession",
+    "invalid_metadata",
+    "literal_dynamic_authority",
+    "apparently_superseded",
+    "owner_answer_required",
+}
+KNOWLEDGE_CURATOR_ACTIONS = {
+    "no_action",
+    "ask_owner",
+    "draft_replacement",
+    "draft_supersession",
+    "quarantine_for_review",
+    "merge_duplicate",
+}
+KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES = {"proposed", "accepted"}
+
+
+def _openai_error_code(exc: Exception) -> str:
+    """Return a structured provider error code without inspecting secret text."""
+    candidates: List[Any] = [getattr(exc, "code", None)]
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        candidates.extend((body.get("code"), (body.get("error") or {}).get("code") if isinstance(body.get("error"), dict) else None))
+    error = getattr(exc, "error", None)
+    if isinstance(error, dict):
+        candidates.append(error.get("code"))
+    response = getattr(exc, "response", None)
+    response_data = getattr(response, "data", None)
+    if isinstance(response_data, dict):
+        candidates.extend((response_data.get("code"), (response_data.get("error") or {}).get("code") if isinstance(response_data.get("error"), dict) else None))
+    normalized = [str(value or "").strip().casefold()[:120] for value in candidates if str(value or "").strip()]
+    quota_codes = {"insufficient_quota", "billing_hard_limit_reached", "billing_hard_limit"}
+    return next((code for code in normalized if code in quota_codes), normalized[0] if normalized else "")
+
+
+def is_openai_quota_exhausted(exc: Exception) -> bool:
+    """Classify only genuine structured billing/quota exhaustion responses."""
+    return _openai_error_code(exc) in {
+        "insufficient_quota",
+        "billing_hard_limit_reached",
+        "billing_hard_limit",
+    }
+
+
+def _curator_empty_state() -> Dict[str, Any]:
+    return {"version": 1, "runs": [], "proposals": []}
+
+
+def _bound_curator_proposals(proposals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    unresolved = [item for item in proposals if item.get("status") in KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES]
+    resolved = [item for item in proposals if item.get("status") not in KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES]
+    if len(unresolved) >= KNOWLEDGE_CURATOR_MAX_PROPOSALS:
+        return unresolved[-KNOWLEDGE_CURATOR_MAX_PROPOSALS:]
+    return resolved[-(KNOWLEDGE_CURATOR_MAX_PROPOSALS - len(unresolved)):] + unresolved
+
+
+def _load_curator_state() -> Dict[str, Any]:
+    try:
+        with open(KNOWLEDGE_CURATOR_STATE_PATH, "r", encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return _curator_empty_state()
+    if not isinstance(state, dict):
+        return _curator_empty_state()
+    runs = state.get("runs") if isinstance(state.get("runs"), list) else []
+    proposals = state.get("proposals") if isinstance(state.get("proposals"), list) else []
+    return {"version": 1, "runs": runs[-KNOWLEDGE_CURATOR_MAX_RUNS:], "proposals": _bound_curator_proposals(proposals)}
+
+
+def _save_curator_state(state: Dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(KNOWLEDGE_CURATOR_STATE_PATH), exist_ok=True)
+    bounded = {
+        "version": 1,
+        "runs": list(state.get("runs", []))[-KNOWLEDGE_CURATOR_MAX_RUNS:],
+        "proposals": _bound_curator_proposals(list(state.get("proposals", []))),
+    }
+    temporary = f"{KNOWLEDGE_CURATOR_STATE_PATH}.{uuid.uuid4().hex}.tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(bounded, handle, ensure_ascii=False, sort_keys=True)
+    os.replace(temporary, KNOWLEDGE_CURATOR_STATE_PATH)
+
+
+def _curator_records() -> List[Dict[str, Any]]:
+    """Return one normalized copy of every durable knowledge record."""
+    records: Dict[str, Dict[str, Any]] = {}
+    for index, raw in enumerate(list_learned_information()):
+        normalized = normalize_knowledge_record(raw, source=LEARNED_INFORMATION_FILENAME, source_index=index, learned=True)
+        normalized["_raw"] = raw
+        normalized["_canonical_key_explicit"] = bool(raw.get("canonical_key") or raw.get("key") or raw.get("topic"))
+        records[normalized["id"]] = normalized
+    for index, raw in enumerate(KNOWLEDGE_CHUNKS):
+        normalized = normalize_knowledge_record(raw, source=str(raw.get("source") or "memory"), source_index=index,
+                                                learned=str(raw.get("source") or "") == LEARNED_INFORMATION_FILENAME)
+        normalized["_canonical_key_explicit"] = bool(raw.get("canonical_key") or raw.get("key") or raw.get("topic"))
+        records.setdefault(normalized["id"], normalized)
+    return sorted(records.values(), key=lambda item: item["id"])
+
+
+def _curator_dynamic_claim_kind(text: str) -> str:
+    value = str(text or "")
+    if re.search(r"\$\s*\d|\b(?:price|cost|rate)\b[^\n]{0,30}\d", value, re.IGNORECASE):
+        return "price"
+    if re.search(r"\b\d+\s*(?:minutes?|mins?|hours?|hrs?)\b", value, re.IGNORECASE):
+        return "duration"
+    if re.search(r"\b(?:available|availability|free slot|open slot)\b|\b\d{1,2}(?::\d{2})?\s?(?:am|pm)\b", value, re.IGNORECASE):
+        return "availability"
+    return ""
+
+
+def _curator_valid_revision(value: Any) -> bool:
+    try:
+        return int(value) >= 1
+    except (TypeError, ValueError):
+        return False
+
+
+def _curator_finding(
+    finding_type: str,
+    records: List[Dict[str, Any]],
+    *,
+    reason_code: str,
+    action: str,
+    owner_question: str = "",
+    replacement_draft: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    record_refs = sorted(
+        ({"id": str(item.get("id", ""))[:160], "revision": int(item.get("revision") or 1)} for item in records),
+        key=lambda item: (item["id"], item["revision"]),
+    )
+    scope = str(records[0].get("sms_account_key") or "internal") if records else "internal"
+    canonical_key = (
+        str(records[0].get("canonical_key") or "")[:160]
+        if records and records[0].get("_canonical_key_explicit", True)
+        else "uncategorised"
+    )
+    fingerprint_material = json.dumps({
+        "finding_type": finding_type,
+        "canonical_key": canonical_key,
+        "scope": scope,
+        "records": record_refs,
+        "reason_code": reason_code,
+    }, sort_keys=True)
+    fingerprint = hashlib.sha256(fingerprint_material.encode("utf-8")).hexdigest()
+    return {
+        "fingerprint": fingerprint,
+        "canonical_key": canonical_key,
+        "scope": scope,
+        "finding_type": finding_type,
+        "records": record_refs,
+        "reason_codes": [reason_code],
+        "evidence": {"reason_codes": [reason_code], "record_count": len(record_refs)},
+        "proposed_action": action if action in KNOWLEDGE_CURATOR_ACTIONS else "ask_owner",
+        "replacement_draft": replacement_draft,
+        "confidence": "deterministic",
+        "owner_questions": [owner_question[:500]] if owner_question else [],
+    }
+
+
+def inspect_knowledge_integrity(records: Optional[List[Dict[str, Any]]] = None, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """Run content-minimising, deterministic checks before any model call."""
+    current = _knowledge_timestamp(now or datetime.utcnow()) or datetime.utcnow()
+    if records is None:
+        items = _curator_records()
+    else:
+        items = []
+        for index, raw in enumerate(records):
+            normalized = normalize_knowledge_record(raw, source=str(raw.get("source") or "memory"), source_index=index,
+                                                    learned=str(raw.get("source") or "") == LEARNED_INFORMATION_FILENAME)
+            normalized["_raw"] = raw
+            normalized["_canonical_key_explicit"] = bool(raw.get("canonical_key") or raw.get("key") or raw.get("topic"))
+            items.append(normalized)
+    findings: List[Dict[str, Any]] = []
+    by_id = {str(item.get("id")): item for item in items if str(item.get("id", "")).strip()}
+    children: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for item in items:
+        predecessor = str(item.get("supersedes_id") or "")
+        if predecessor:
+            children[predecessor].append(item)
+
+        raw = item.get("_raw") if isinstance(item.get("_raw"), dict) else item
+        invalid = (
+            not str(item.get("id") or "")
+            or not str(item.get("canonical_key") or "")
+            or not item.get("_canonical_key_explicit", True)
+            or not str(item.get("text") or "")
+            or str(raw.get("scope") or raw.get("sms_account_key") or "") not in {"shared", "primary", "secondary", "internal"}
+            or str(raw.get("status") or "") not in KNOWLEDGE_RECORD_STATUSES
+            or str(raw.get("review_status") or "") not in LEARNING_REVIEW_STATUSES
+            or not _curator_valid_revision(raw.get("revision") or raw.get("version"))
+            or not _knowledge_timestamp(raw.get("created_at"))
+            or not _knowledge_timestamp(raw.get("updated_at") or raw.get("created_at"))
+            or (raw.get("effective_from") and not _knowledge_timestamp(raw.get("effective_from")))
+            or (raw.get("effective_until") and not _knowledge_timestamp(raw.get("effective_until")))
+            or (
+                _knowledge_timestamp(raw.get("effective_from")) is not None
+                and _knowledge_timestamp(raw.get("effective_until")) is not None
+                and _knowledge_timestamp(raw.get("effective_from")) > _knowledge_timestamp(raw.get("effective_until"))
+            )
+        )
+        if invalid:
+            findings.append(_curator_finding("invalid_metadata", [item], reason_code="curator_invalid_metadata", action="quarantine_for_review"))
+
+        effective_from = _knowledge_timestamp(item.get("effective_from"))
+        effective_until = _knowledge_timestamp(item.get("effective_until"))
+        if effective_from and current < effective_from:
+            findings.append(_curator_finding("future_record", [item], reason_code="curator_future_record", action="no_action"))
+        if item.get("status") == "expired" or effective_until and current > effective_until:
+            findings.append(_curator_finding("expired_record", [item], reason_code="curator_expired_record", action="quarantine_for_review"))
+
+        if item.get("review_status") == "approved":
+            dynamic_kind = _curator_dynamic_claim_kind(str(item.get("text") or ""))
+            if dynamic_kind:
+                instruction = {
+                    "price": "Use the current configured service price and duration from Settings.",
+                    "duration": "Use the current configured service price and duration from Settings.",
+                    "availability": "Check the live calendar before discussing available dates or times.",
+                }[dynamic_kind]
+                draft = {"topic": str(item.get("canonical_key") or "Dynamic authority"), "instruction": instruction, "text": instruction}
+                findings.append(_curator_finding("literal_dynamic_authority", [item], reason_code=f"curator_literal_{dynamic_kind}", action="draft_supersession", replacement_draft=draft))
+
+        if item.get("scope") == "internal" or item.get("category") == "internal_or_uncertain":
+            findings.append(_curator_finding(
+                "owner_answer_required", [item], reason_code="curator_owner_answer_required", action="ask_owner",
+                owner_question="Should this record be corrected and assigned to a specific SMS line, or remain internal?",
+            ))
+
+    # Exact duplicates and incompatible independent active authorities.
+    by_exact: Dict[tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    by_key: Dict[tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for item in items:
+        key = (str(item.get("scope")), str(item.get("canonical_key")))
+        by_key[key].append(item)
+        normalized_text = re.sub(r"\s+", " ", str(item.get("text") or "").strip().casefold())
+        by_exact[(key[0], key[1], normalized_text)].append(item)
+    for group in by_exact.values():
+        if len(group) > 1:
+            findings.append(_curator_finding("exact_duplicate", group, reason_code="curator_exact_duplicate", action="merge_duplicate"))
+    for group in by_key.values():
+        active = [item for item in group if item.get("status") == "active" and item.get("review_status") == "approved" and _knowledge_bool(item.get("retrieval_enabled"))]
+        if len(active) > 1 and len({str(item.get("text") or "").strip() for item in active}) > 1:
+            findings.append(_curator_finding(
+                "incompatible_active_records", active, reason_code="curator_incompatible_active", action="ask_owner",
+                owner_question="Which of these record revisions is the current business rule?",
+            ))
+        independent = [item for item in group if not item.get("supersedes_id")]
+        if len(independent) > 1 and len({int(item.get("revision") or 1) for item in independent}) > 1:
+            findings.append(_curator_finding(
+                "apparently_superseded", independent, reason_code="curator_apparent_supersession", action="ask_owner",
+                owner_question="Should the newer revision supersede the older record, or are both still required?",
+            ))
+
+    for predecessor, successors in children.items():
+        if predecessor not in by_id:
+            for child in successors:
+                findings.append(_curator_finding("dangling_supersession", [child], reason_code="curator_dangling_supersession", action="quarantine_for_review"))
+            continue
+        parent = by_id[predecessor]
+        if len(successors) > 1:
+            findings.append(_curator_finding("branched_supersession", [parent, *successors], reason_code="curator_branched_supersession", action="ask_owner", owner_question="Which successor should replace the predecessor?"))
+        for child in successors:
+            if child.get("canonical_key") != parent.get("canonical_key"):
+                findings.append(_curator_finding("cross_topic_supersession", [parent, child], reason_code="curator_cross_topic_supersession", action="quarantine_for_review"))
+            if child.get("scope") != parent.get("scope"):
+                findings.append(_curator_finding("cross_scope_supersession", [parent, child], reason_code="curator_cross_scope_supersession", action="quarantine_for_review"))
+
+    # Cycle detection is path-local and emits one stable finding per cycle.
+    emitted_cycles = set()
+    for start in by_id:
+        path: List[str] = []
+        seen_at: Dict[str, int] = {}
+        cursor = start
+        while cursor in by_id:
+            if cursor in seen_at:
+                cycle_ids = tuple(sorted(path[seen_at[cursor]:]))
+                if cycle_ids and cycle_ids not in emitted_cycles:
+                    emitted_cycles.add(cycle_ids)
+                    findings.append(_curator_finding("cyclic_supersession", [by_id[item_id] for item_id in cycle_ids], reason_code="curator_cyclic_supersession", action="quarantine_for_review"))
+                break
+            seen_at[cursor] = len(path)
+            path.append(cursor)
+            cursor = str(by_id[cursor].get("supersedes_id") or "")
+            if not cursor:
+                break
+
+    # De-duplicate overlapping traversal output by stable fingerprint.
+    return list({item["fingerprint"]: item for item in findings}.values())
+
+
+def _curator_enrich_proposals(findings: List[Dict[str, Any]]) -> tuple[Dict[str, Dict[str, Any]], Optional[str]]:
+    """Allow the model to refine safe proposals, never the underlying facts."""
+    if not findings:
+        return {}, None
+    if not openai_client:
+        return {}, "curator_model_unavailable"
+    safe_findings = [{
+        "fingerprint": item["fingerprint"],
+        "finding_type": item["finding_type"],
+        "scope": item["scope"],
+        "canonical_key": item["canonical_key"],
+        "record_refs": item["records"],
+        "reason_codes": item["reason_codes"],
+        "allowed_default_action": item["proposed_action"],
+    } for item in findings[:100]]
+    instructions = (
+        "You are a proposal-only knowledge curator. Return JSON with a proposals array. For each supplied "
+        "fingerprint, preserve the fingerprint and choose only one of no_action, ask_owner, draft_replacement, "
+        "draft_supersession, quarantine_for_review, merge_duplicate. Never decide which conflicting business "
+        "fact is true. Conflicts must ask_owner. Never include prices, durations, dates, times, availability, "
+        "customer data, URLs, secrets, source content, prompts or chain-of-thought. owner_questions must be a "
+        "short array and confidence one of low, medium, high. Omit replacement text unless it only says to use "
+        "current Settings values or check the live calendar."
+    )
+    try:
+        request_client = (
+            openai_client.with_options(max_retries=0, timeout=30)
+            if callable(getattr(openai_client, "with_options", None))
+            else openai_client
+        )
+        response = request_client.responses.create(
+            model="gpt-5.6-terra",
+            instructions=instructions,
+            input=json.dumps({"findings": safe_findings}, ensure_ascii=False),
+            store=False,
+        )
+        parsed = _parse_json_object(response.output_text or "").get("proposals", [])
+    except Exception as exc:
+        if is_openai_quota_exhausted(exc):
+            return {}, "openai_quota_exhausted"
+        return {}, "curator_model_unavailable"
+    allowed = {item["fingerprint"]: item for item in findings}
+    enriched: Dict[str, Dict[str, Any]] = {}
+    for item in parsed if isinstance(parsed, list) else []:
+        if not isinstance(item, dict) or str(item.get("fingerprint")) not in allowed:
+            continue
+        fingerprint = str(item["fingerprint"])
+        # Deterministic analysis owns the action.  The model can improve only
+        # confidence and safe owner questions; it cannot redirect a finding.
+        action = allowed[fingerprint]["proposed_action"]
+        questions = [
+            str(value)[:500] for value in item.get("owner_questions", [])
+            if isinstance(value, str)
+            and not has_unsafe_literal_learning_detail(value)
+            and not _curator_dynamic_claim_kind(value)
+        ][:3]
+        enriched[fingerprint] = {
+            "proposed_action": action,
+            "owner_questions": questions,
+            "confidence": str(item.get("confidence")) if str(item.get("confidence")) in {"low", "medium", "high"} else "low",
+        }
+    return enriched, None
+
+
+def run_knowledge_curator() -> Dict[str, Any]:
+    """Run one bounded, idempotent, manual audit."""
+    if not KNOWLEDGE_CURATOR_LOCK.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A knowledge audit is already running.")
+    try:
+        started = datetime.utcnow().isoformat() + "Z"
+        findings = inspect_knowledge_integrity()
+        enrichments, error_code = _curator_enrich_proposals(findings)
+        state = _load_curator_state()
+        now_text = datetime.utcnow().isoformat() + "Z"
+        by_fingerprint = {item.get("fingerprint"): item for item in state["proposals"]}
+        created = 0
+        for finding in findings:
+            existing = by_fingerprint.get(finding["fingerprint"])
+            if existing:
+                existing["updated_at"] = now_text
+                existing["last_seen_at"] = now_text
+                continue
+            proposal = {
+                **finding,
+                **enrichments.get(finding["fingerprint"], {}),
+                "id": f"kcp-{finding['fingerprint'][:24]}",
+                "status": "proposed",
+                "created_at": now_text,
+                "updated_at": now_text,
+                "last_seen_at": now_text,
+                "draft_entry_id": None,
+            }
+            state["proposals"].append(proposal)
+            created += 1
+        counts = dict(Counter(item["finding_type"] for item in findings))
+        run = {
+            "id": f"kcr-{uuid.uuid4()}",
+            "status": "completed_with_warning" if error_code else "completed",
+            "error_code": error_code,
+            "message": (
+                "OpenAI API credits or billing must be restored; deterministic findings were retained safely."
+                if error_code == "openai_quota_exhausted" else
+                "Model enrichment was unavailable; deterministic findings were retained safely."
+                if error_code else "Knowledge audit completed."
+            ),
+            "started_at": started,
+            "completed_at": now_text,
+            "finding_counts": counts,
+            "finding_count": len(findings),
+            "created_proposals": created,
+        }
+        state["runs"].append(run)
+        _save_curator_state(state)
+        return {"run": run, "proposals": [item for item in state["proposals"] if item.get("status") in KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES]}
+    finally:
+        KNOWLEDGE_CURATOR_LOCK.release()
+
+
+def get_knowledge_curator_state() -> Dict[str, Any]:
+    with KNOWLEDGE_CURATOR_LOCK:
+        state = _load_curator_state()
+    return {
+        "runs": list(reversed(state["runs"])),
+        "proposals": list(reversed(state["proposals"])),
+    }
+
+
+def _curator_proposal_is_current(proposal: Dict[str, Any]) -> bool:
+    current = {str(item.get("id")): int(item.get("revision") or item.get("version") or 1) for item in _curator_records()}
+    return all(current.get(str(ref.get("id"))) == int(ref.get("revision") or 1) for ref in proposal.get("records", []))
+
+
+def transition_knowledge_curator_proposal(proposal_id: str, status_value: str) -> Dict[str, Any]:
+    if status_value not in {"rejected", "dismissed"}:
+        raise ValueError(status_value)
+    with KNOWLEDGE_CURATOR_LOCK:
+        state = _load_curator_state()
+        proposal = next((item for item in state["proposals"] if item.get("id") == proposal_id), None)
+        if not proposal:
+            raise KeyError(proposal_id)
+        if proposal.get("status") != "proposed":
+            raise ValueError("Only unresolved proposed items can change state.")
+        proposal["status"] = status_value
+        proposal["updated_at"] = datetime.utcnow().isoformat() + "Z"
+        _save_curator_state(state)
+        return dict(proposal)
+
+
+def accept_knowledge_curator_proposal(proposal_id: str) -> Dict[str, Any]:
+    with KNOWLEDGE_CURATOR_LOCK:
+        state = _load_curator_state()
+        proposal = next((item for item in state["proposals"] if item.get("id") == proposal_id), None)
+        if not proposal:
+            raise KeyError(proposal_id)
+        if proposal.get("status") == "accepted" and proposal.get("draft_entry_id"):
+            return dict(proposal)
+        if proposal.get("status") != "proposed":
+            raise ValueError("Only unresolved proposed items can be added to review.")
+        if proposal.get("proposed_action") not in {"draft_replacement", "draft_supersession"}:
+            raise ValueError("This proposal requires an owner answer and cannot create a draft.")
+        if not _curator_proposal_is_current(proposal):
+            raise ValueError("The involved record revisions changed; run a fresh audit.")
+        refs = proposal.get("records", [])
+        predecessor_id = str(refs[0].get("id")) if refs else ""
+        records = {str(item.get("id")): item for item in _curator_records()}
+        predecessor = records.get(predecessor_id)
+        if not predecessor:
+            raise ValueError("The proposed predecessor no longer exists.")
+        draft_data = proposal.get("replacement_draft") if isinstance(proposal.get("replacement_draft"), dict) else {}
+        instruction = str(draft_data.get("instruction") or "Review this knowledge record and confirm the current durable business rule.")[:2000]
+        if _curator_dynamic_claim_kind(instruction):
+            raise ValueError("A curator draft cannot contain a literal dynamic value.")
+        entry_id = f"curator-{proposal_id}"
+        now_text = datetime.utcnow().isoformat() + "Z"
+        entry = {
+            "id": entry_id,
+            "type": "curator_proposal",
+            "source_type": "curator_proposal",
+            "canonical_key": proposal.get("canonical_key"),
+            "sms_account_key": proposal.get("scope"),
+            "scope": proposal.get("scope"),
+            "topic": str(draft_data.get("topic") or proposal.get("canonical_key") or "Knowledge review")[:500],
+            "instruction": instruction,
+            "text": instruction,
+            "created_at": now_text,
+            "updated_at": now_text,
+            "status": "quarantined",
+            # A pending draft must not revoke live knowledge.  The actual
+            # supersedes edge is written only in the final atomic approval.
+            "supersedes_id": None,
+            "proposed_supersedes_id": predecessor_id,
+            "revision": int(predecessor.get("revision") or 1) + 1,
+            "version": int(predecessor.get("revision") or 1) + 1,
+            "review_status": "pending",
+            "retrieval_enabled": False,
+            "review_source": "knowledge-curator",
+            "curator_proposal_id": proposal_id,
+            "curator_fingerprint": proposal.get("fingerprint"),
+        }
+        _upsert_learned_information_entry(entry)
+        proposal["status"] = "accepted"
+        proposal["draft_entry_id"] = entry_id
+        proposal["updated_at"] = datetime.utcnow().isoformat() + "Z"
+        _save_curator_state(state)
+        return dict(proposal)
+
+
+def _approve_curator_supersession_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Atomically activate a current curator draft and retire its predecessor."""
+    proposal_id = str(entry.get("curator_proposal_id") or "")
+    with KNOWLEDGE_CURATOR_LOCK:
+        curator_state = _load_curator_state()
+        proposal = next((item for item in curator_state["proposals"] if item.get("id") == proposal_id), None)
+        proposal_copy = dict(proposal) if proposal else None
+    if not proposal_copy or proposal_copy.get("status") != "accepted" or proposal_copy.get("draft_entry_id") != entry.get("id"):
+        raise ValueError("The curator proposal is not an accepted current draft.")
+    if proposal_copy.get("proposed_action") not in {"draft_replacement", "draft_supersession"} or not _curator_proposal_is_current(proposal_copy):
+        raise ValueError("The curator proposal is stale or is not a supersession.")
+    if entry.get("scope") not in {"shared", "primary", "secondary"} or _curator_dynamic_claim_kind(str(entry.get("text") or "")):
+        raise ValueError("The curator draft is not safe to activate.")
+
+    filepath = os.path.join(KNOWLEDGE_DIR, LEARNED_INFORMATION_FILENAME)
+    predecessor_id = str(entry.get("proposed_supersedes_id") or "")
+    approved_entry: Optional[Dict[str, Any]] = None
+    with LEARNED_INFORMATION_LOCK:
+        raw_lines = open(filepath, "r", encoding="utf-8").read().splitlines()
+        decoded: List[Optional[Dict[str, Any]]] = []
+        for raw_line in raw_lines:
+            try:
+                value = json.loads(raw_line)
+            except json.JSONDecodeError:
+                value = None
+            decoded.append(value if isinstance(value, dict) else None)
+        records = {str(item.get("id")): item for item in decoded if item and item.get("id")}
+        successor = records.get(str(entry.get("id")))
+        predecessor = records.get(predecessor_id)
+        if not successor or not predecessor:
+            raise ValueError("The curator supersession records are no longer present.")
+        if successor.get("canonical_key") != predecessor.get("canonical_key") or successor.get("scope") != predecessor.get("scope"):
+            raise ValueError("Curator supersession key or scope mismatch.")
+        expected_revision = next((int(ref.get("revision") or 1) for ref in proposal_copy.get("records", []) if ref.get("id") == predecessor_id), None)
+        if expected_revision is None or int(predecessor.get("revision") or 1) != expected_revision:
+            raise ValueError("The predecessor revision changed after the audit.")
+        competing = [item for item in records.values() if item.get("supersedes_id") == predecessor_id and item.get("id") != successor.get("id")]
+        if competing or predecessor.get("status") != "active" or predecessor.get("review_status") != "approved":
+            raise ValueError("The predecessor is stale or already has another successor.")
+        now_text = datetime.utcnow().isoformat() + "Z"
+        predecessor.update({"status": "superseded", "retrieval_enabled": False, "updated_at": now_text})
+        successor.update({
+            "status": "active",
+            "review_status": "approved",
+            "retrieval_enabled": True,
+            "supersedes_id": predecessor_id,
+            "updated_at": now_text,
+        })
+        approved_entry = dict(successor)
+        output_lines = []
+        for raw_line, item in zip(raw_lines, decoded):
+            output_lines.append(json.dumps(item, ensure_ascii=False) if item is not None else raw_line)
+        temporary = f"{filepath}.{uuid.uuid4().hex}.tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(output_lines) + "\n")
+        os.replace(temporary, filepath)
+    load_knowledge_base()
+    with KNOWLEDGE_CURATOR_LOCK:
+        current_state = _load_curator_state()
+        current = next((item for item in current_state["proposals"] if item.get("id") == proposal_id), None)
+        if current:
+            current["status"] = "applied"
+            current["updated_at"] = datetime.utcnow().isoformat() + "Z"
+            _save_curator_state(current_state)
+    return approved_entry or entry
 
 
 def preview_sms_pair_learnings(db: Session, limit: int = 50) -> Dict[str, Any]:
@@ -12990,15 +13573,30 @@ async def _run_agent_console(run_id: str, objective: str, max_steps: int) -> Non
             if remaining_seconds <= 0:
                 raise asyncio.TimeoutError
             model_timeout = min(30.0, remaining_seconds)
-            step = await asyncio.wait_for(
-                loop.run_in_executor(
-                    _agent_model_executor,
-                    _agent_model_step,
-                    messages,
-                    model_timeout,
-                ),
-                timeout=model_timeout,
-            )
+            try:
+                step = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        _agent_model_executor,
+                        _agent_model_step,
+                        messages,
+                        model_timeout,
+                    ),
+                    timeout=model_timeout,
+                )
+            except Exception as exc:
+                if step_number == 1 and is_openai_quota_exhausted(exc):
+                    quota_message = "OpenAI API credits or billing must be restored before the Operations Coding Agent can run."
+                    await asyncio.to_thread(
+                        _finish_agent_run,
+                        run_id,
+                        "failed",
+                        quota_message,
+                        event_type="error",
+                        summary=quota_message,
+                        error="openai_quota_exhausted",
+                    )
+                    return
+                raise
             if await _agent_stop_before_next_operation(run_id):
                 return
             visible_summary = sanitize_console_text(step.thought, limit=500)
@@ -14179,6 +14777,8 @@ def approve_learned_information(entry_id: str):
         entry = approve_learned_information_entry(entry_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Learned entry not found.")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"status": "success", "entry": entry}
 
 
@@ -14241,6 +14841,37 @@ def classify_learned_information():
     if not openai_client:
         raise HTTPException(status_code=503, detail="The AI classifier is unavailable.")
     return {"status": "success", **classify_all_learned_information()}
+
+
+@app.get("/api/settings/knowledge-curator")
+def list_knowledge_curator_state():
+    return get_knowledge_curator_state()
+
+
+@app.post("/api/settings/knowledge-curator/run")
+def run_knowledge_curator_endpoint():
+    return run_knowledge_curator()
+
+
+@app.post("/api/settings/knowledge-curator/proposals/{proposal_id}/accept")
+def accept_knowledge_curator_proposal_endpoint(proposal_id: str):
+    try:
+        return {"status": "success", "proposal": accept_knowledge_curator_proposal(proposal_id)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Knowledge curator proposal not found.")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/settings/knowledge-curator/proposals/{proposal_id}/{transition}")
+def transition_knowledge_curator_proposal_endpoint(proposal_id: str, transition: Literal["reject", "dismiss"]):
+    try:
+        proposal = transition_knowledge_curator_proposal(proposal_id, "rejected" if transition == "reject" else "dismissed")
+        return {"status": "success", "proposal": proposal}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Knowledge curator proposal not found.")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/settings/knowledge-files")

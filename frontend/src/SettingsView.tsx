@@ -24,7 +24,13 @@ import {
   KnowledgeFile,
   ManualLearningEntry,
   LearnedInformationEntry,
+  KnowledgeCuratorState,
+  KnowledgeCuratorProposal,
   SmsLearningPreview,
+  getKnowledgeCuratorState,
+  runKnowledgeCurator,
+  acceptKnowledgeCuratorProposal,
+  transitionKnowledgeCuratorProposal,
   getKnowledgeFile,
   saveKnowledgeFile,
   deleteKnowledgeFile,
@@ -180,6 +186,9 @@ export default function SettingsView() {
   const [generatingSmsLearningPreview, setGeneratingSmsLearningPreview] = useState(false);
   const [importingSmsLearningCandidates, setImportingSmsLearningCandidates] = useState(false);
   const [smsLearningPreview, setSmsLearningPreview] = useState<SmsLearningPreview | null>(null);
+  const [knowledgeCurator, setKnowledgeCurator] = useState<KnowledgeCuratorState>({ runs: [], proposals: [] });
+  const [runningKnowledgeAudit, setRunningKnowledgeAudit] = useState(false);
+  const [updatingCuratorProposalId, setUpdatingCuratorProposalId] = useState<string | null>(null);
 
   // Modal states for File Editor & Moderation
   const [activeEditFile, setActiveEditFile] = useState<string | null>(null);
@@ -303,6 +312,7 @@ export default function SettingsView() {
     try { setFirstContactConfig(await retryOnce(getFirstContactAutoresponder)); } catch (e) { console.error('first-contact auto-responder fetch failed:', e); }
     try { setLineProfiles(await retryOnce(getSmsLineProfiles)); } catch (e) { console.error('line profile fetch failed:', e); }
     try { setLearnedEntries(await retryOnce(listLearnedInformation)); } catch (e) { console.error('learned rules fetch failed:', e); }
+    try { setKnowledgeCurator(await retryOnce(getKnowledgeCuratorState)); } catch (e) { console.error('knowledge curator fetch failed:', e); }
     try { setBlockedContacts(await retryOnce(listBlockedContacts)); } catch (e) { console.error('blocked contacts fetch failed:', e); }
   }, []);
 
@@ -752,6 +762,48 @@ export default function SettingsView() {
     } catch (err) {
       console.error(err);
       triggerBanner('error', err instanceof Error ? err.message : 'Failed to move learned rules to review.');
+    }
+  };
+
+  const refreshKnowledgeCurator = async () => {
+    setKnowledgeCurator(await getKnowledgeCuratorState());
+  };
+
+  const handleRunKnowledgeAudit = async () => {
+    if (!window.confirm('Run a manual audit of durable knowledge records? It may use AI credits, creates proposals only, and cannot activate or delete knowledge.')) return;
+    setRunningKnowledgeAudit(true);
+    try {
+      const result = await runKnowledgeCurator();
+      await refreshKnowledgeCurator();
+      triggerBanner(
+        result.run.error_code ? 'error' : 'success',
+        `${result.run.message} ${result.run.finding_count} finding${result.run.finding_count === 1 ? '' : 's'}; ${result.run.created_proposals} new proposal${result.run.created_proposals === 1 ? '' : 's'}.`,
+      );
+    } catch (err) {
+      console.error(err);
+      triggerBanner('error', err instanceof Error ? err.message : 'Knowledge audit could not run.');
+    } finally {
+      setRunningKnowledgeAudit(false);
+    }
+  };
+
+  const handleCuratorProposal = async (proposal: KnowledgeCuratorProposal, action: 'accept' | 'reject' | 'dismiss') => {
+    setUpdatingCuratorProposalId(proposal.id);
+    try {
+      if (action === 'accept') {
+        await acceptKnowledgeCuratorProposal(proposal.id);
+        setLearnedEntries(await listLearnedInformation());
+        triggerBanner('success', 'A quarantined draft was added to the review queue. It is not active knowledge.');
+      } else {
+        await transitionKnowledgeCuratorProposal(proposal.id, action);
+        triggerBanner('success', `Proposal ${action === 'reject' ? 'rejected' : 'dismissed'}. Knowledge was not changed.`);
+      }
+      await refreshKnowledgeCurator();
+    } catch (err) {
+      console.error(err);
+      triggerBanner('error', err instanceof Error ? err.message : 'Proposal could not be updated.');
+    } finally {
+      setUpdatingCuratorProposalId(null);
     }
   };
 
@@ -1882,6 +1934,56 @@ export default function SettingsView() {
                     </div>
                   )}
                 </form>
+
+                <section className="rounded-xl border border-violet-200 bg-violet-50/40 p-4" aria-labelledby="knowledge-curator-heading">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                      <h3 id="knowledge-curator-heading" className="text-xs font-bold text-violet-950">Knowledge curator</h3>
+                      <p className="mt-1 max-w-2xl text-[10px] leading-relaxed text-violet-800">
+                        Audits durable knowledge for conflicts, stale revisions and dynamic facts. Curator output is never active knowledge: accepted items become quarantined drafts and still require staff approval below.
+                      </p>
+                    </div>
+                    <button type="button" onClick={handleRunKnowledgeAudit} disabled={runningKnowledgeAudit} className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-violet-700 px-3 py-2 text-[10px] font-bold text-white hover:bg-violet-800 disabled:opacity-50">
+                      <RefreshCw className={`h-3.5 w-3.5 ${runningKnowledgeAudit ? 'animate-spin' : ''}`} />
+                      {runningKnowledgeAudit ? 'Auditing…' : 'Run knowledge audit'}
+                    </button>
+                  </div>
+
+                  {knowledgeCurator.runs[0] ? <div className="mt-3 rounded-lg border border-violet-100 bg-white p-3 text-[10px] text-slate-650">
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <span className="font-bold text-slate-800">Last run: {knowledgeCurator.runs[0].status === 'completed' ? 'Completed' : 'Completed with warning'}</span>
+                      <span>{new Date(knowledgeCurator.runs[0].completed_at).toLocaleString()}</span>
+                      <span>{knowledgeCurator.runs[0].finding_count} findings</span>
+                    </div>
+                    {knowledgeCurator.runs[0].error_code && <p className="mt-1 font-semibold text-amber-700">{knowledgeCurator.runs[0].message} ({knowledgeCurator.runs[0].error_code})</p>}
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {Object.entries(knowledgeCurator.runs[0].finding_counts).map(([type, count]) => <span key={type} className="rounded bg-violet-100 px-2 py-1 font-semibold text-violet-800">{type.replace(/_/g, ' ')}: {count}</span>)}
+                    </div>
+                  </div> : <p className="mt-3 text-[10px] text-violet-700">No audit has been run yet. Audits run only when you press the button.</p>}
+
+                  <div className="mt-3 space-y-2">
+                    {knowledgeCurator.proposals.filter(item => item.status === 'proposed' || item.status === 'accepted').length === 0 ? <p className="rounded-lg border border-dashed border-violet-200 bg-white/70 p-3 text-[10px] text-slate-500">No unresolved curator proposals.</p> : knowledgeCurator.proposals.filter(item => item.status === 'proposed' || item.status === 'accepted').map(proposal => {
+                      const canAddDraft = proposal.status === 'proposed' && ['draft_replacement', 'draft_supersession'].includes(proposal.proposed_action);
+                      return <article key={proposal.id} className="rounded-lg border border-violet-100 bg-white p-3 text-[10px]">
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                          <div className="min-w-0">
+                            <p className="font-bold text-slate-800">{proposal.finding_type.replace(/_/g, ' ')} · {proposal.canonical_key || 'uncategorised'}</p>
+                            <p className="mt-1 text-slate-600">Scope: {proposal.scope} · Recommended: {proposal.proposed_action.replace(/_/g, ' ')} · Confidence: {proposal.confidence}</p>
+                            <p className="mt-1 break-all text-slate-500">Records: {proposal.records.map(item => `${item.id} (r${item.revision})`).join(', ')}</p>
+                            <p className="mt-1 text-slate-500">Reasons: {proposal.reason_codes.join(', ')}</p>
+                            {proposal.owner_questions.map(question => <p key={question} className="mt-1 font-semibold text-amber-700">Owner question: {question}</p>)}
+                            {proposal.status === 'accepted' && <p className="mt-1 font-bold text-emerald-700">Draft added to review only{proposal.draft_entry_id ? `: ${proposal.draft_entry_id}` : '.'}</p>}
+                          </div>
+                          {proposal.status === 'proposed' && <div className="flex shrink-0 flex-wrap gap-1.5">
+                            {canAddDraft && <button type="button" onClick={() => handleCuratorProposal(proposal, 'accept')} disabled={updatingCuratorProposalId === proposal.id} className="rounded border border-emerald-200 bg-emerald-50 px-2 py-1.5 font-bold text-emerald-800 disabled:opacity-50">Add draft to review</button>}
+                            <button type="button" onClick={() => handleCuratorProposal(proposal, 'reject')} disabled={updatingCuratorProposalId === proposal.id} className="rounded border border-rose-200 px-2 py-1.5 font-bold text-rose-700 disabled:opacity-50">Reject</button>
+                            <button type="button" onClick={() => handleCuratorProposal(proposal, 'dismiss')} disabled={updatingCuratorProposalId === proposal.id} className="rounded border border-slate-200 px-2 py-1.5 font-bold text-slate-600 disabled:opacity-50">Dismiss</button>
+                          </div>}
+                        </div>
+                      </article>;
+                    })}
+                  </div>
+                </section>
 
                 <div className="rounded-xl border border-slate-200 bg-white">
                   <div className="border-b border-slate-200 px-3 py-2.5">
