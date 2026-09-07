@@ -132,7 +132,8 @@ def test_live_reply_calendar_uses_current_clock_not_old_message_timestamp():
     source = inspect.getsource(run_sms_reply_logic)
 
     assert "now_local = current_business_time()" in source
-    assert "get_booking_tool_suite().execute" in source
+    assert "suite = get_booking_tool_suite()" in source
+    assert "suite.execute" in source
     assert "No generic appointment times are supplied here" in source
     assert "dt = now_local + timedelta(hours=1)" not in source
     assert "received_at_aware + timedelta(hours=1)" not in source

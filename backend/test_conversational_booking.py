@@ -998,6 +998,174 @@ def test_explicit_confirmation_of_a_legacy_pending_booking_writes_without_model_
     db.close()
 
 
+def structured_events(db, event_type=None):
+    query = db.query(main.ThreadEvent).order_by(main.ThreadEvent.at, main.ThreadEvent.id)
+    if event_type:
+        query = query.filter(main.ThreadEvent.type == event_type)
+    return [(item.type, json.loads(item.meta)) for item in query.all()]
+
+
+def test_sequential_same_slot_lookups_share_correlation_and_are_redacted(monkeypatch):
+    slot = (current_business_time() + timedelta(days=2)).replace(
+        hour=14, minute=0, second=0, microsecond=0,
+    )
+    secret_marker = "token-secret-customer@example.test-+61400000000"
+
+    class SameSlotSuite:
+        timezone_name = "Australia/Hobart"
+
+        def execute(self, tool_name, arguments):
+            return {
+                "status": "ok",
+                "service_id": "service",
+                "next_available": {
+                    "service_id": "service",
+                    "start_time": slot.astimezone(main.ZoneInfo("UTC")).isoformat(),
+                    "end_time": (slot + timedelta(minutes=30)).astimezone(main.ZoneInfo("UTC")).isoformat(),
+                },
+                "raw_provider_payload": secret_marker,
+            }
+
+    monkeypatch.setattr(main, "get_booking_tool_suite", lambda: SameSlotSuite())
+    monkeypatch.setattr(main, "build_business_context", lambda query: "")
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
+    db = make_db()
+    thread = add_thread(db)
+    customer = Message(
+        id="audit-source-message", thread_id=thread.id, role="customer",
+        text="What time is available?", provider_message_id="audit-provider-message",
+        at=main.datetime.utcnow(),
+    )
+    db.add(customer)
+    db.commit()
+    client = SequenceClient([
+        FakeResponse(output=[FakeFunctionCall("get_next_available", {
+            "service_id": "service", "after": slot.isoformat(),
+        }, "lookup-one")]),
+        FakeResponse(output=[FakeFunctionCall("get_next_available", {
+            "service_id": "service", "after": slot.isoformat(),
+        }, "lookup-two")]),
+        FakeResponse(output_text="I have that time available."),
+    ])
+    monkeypatch.setattr(main, "openai_client", client)
+
+    run_sms_reply_logic(
+        db, thread.id, customer.text, customer.provider_message_id,
+        customer.at, dispatch_sms=False,
+    )
+
+    started = structured_events(db, "availability_lookup_started")
+    completed = structured_events(db, "availability_lookup_completed")
+    decision = structured_events(db, "booking_decision")
+    assert len(started) == len(completed) == 2
+    assert len({meta["lookup_id"] for _, meta in started}) == 2
+    correlation_ids = {meta["correlation_id"] for _, meta in started + completed + decision}
+    assert len(correlation_ids) == 1
+    assert all(meta["source_message_id"] == customer.id for _, meta in started + completed + decision)
+    assert all(meta["timezone"] == "Australia/Hobart" for _, meta in completed)
+    assert all(meta["result"]["candidate_range"]["first_start"] == slot.isoformat() for _, meta in completed)
+    persisted = " ".join(item.meta or "" for item in db.query(main.ThreadEvent).all())
+    assert secret_marker not in persisted
+    assert customer.text not in persisted
+    db.close()
+
+
+def test_lookup_failure_audit_keeps_only_safe_classification(monkeypatch):
+    secret_marker = "Bearer private-token customer@example.test"
+
+    class FailedSuite:
+        timezone_name = "Australia/Hobart"
+
+        def execute(self, tool_name, arguments):
+            return {"status": "unavailable", "reason": secret_marker}
+
+    monkeypatch.setattr(main, "get_booking_tool_suite", lambda: FailedSuite())
+    monkeypatch.setattr(main, "build_business_context", lambda query: "")
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
+    db = make_db()
+    thread = add_thread(db)
+    customer = Message(
+        id="failed-lookup-source", thread_id=thread.id, role="customer",
+        text="Are you available tomorrow?", provider_message_id="failed-lookup-provider",
+        at=main.datetime.utcnow(),
+    )
+    db.add(customer)
+    db.commit()
+    monkeypatch.setattr(main, "openai_client", SequenceClient([
+        FakeResponse(output=[FakeFunctionCall("get_times_tomorrow", {"service_id": "service"}, "failed")]),
+        FakeResponse(output_text="[[HANDOFF: live calendar result required]]"),
+    ]))
+
+    run_sms_reply_logic(
+        db, thread.id, customer.text, customer.provider_message_id,
+        customer.at, dispatch_sms=False,
+    )
+
+    failed = structured_events(db, "availability_lookup_failed")
+    assert len(failed) == 1
+    assert failed[0][1]["status_code"] == "provider_unavailable"
+    assert failed[0][1]["exception_classification"] == "expected_provider_error"
+    assert secret_marker not in failed[0][1].__str__()
+    db.close()
+
+
+@pytest.mark.parametrize("outcome_name", ["success", "conflict", "failure"])
+def test_booking_attempt_outcomes_are_correlation_linked_and_normalized(tmp_path, monkeypatch, outcome_name):
+    service = {"id": "service", "name": "Service", "duration": 30, "price": 100}
+    (tmp_path / "services.json").write_text(json.dumps([service]), encoding="utf-8")
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "load_working_hours", lambda: [
+        {"day": day, "enabled": True, "open": "00:00", "close": "23:59"}
+        for day in main.DAY_NAMES
+    ])
+    calendar = FakeCalendar()
+    monkeypatch.setattr(main, "calendar_service", calendar)
+    db = make_db()
+    thread = add_thread(db)
+    start = (current_business_time() + timedelta(days=2)).replace(
+        hour=14, minute=0, second=0, microsecond=0,
+    )
+    proposal = propose_conversational_booking(
+        thread, service_id="service", start_time=start.isoformat(),
+        customer_name="Example Customer", notes=None,
+    )["proposal"]
+    if outcome_name == "conflict":
+        calendar.busy = [{"start": start, "end": start + timedelta(minutes=30)}]
+    elif outcome_name == "failure":
+        calendar.create_booking = lambda **kwargs: False
+    audit = {
+        "correlation_id": "decision-correlation",
+        "source_message_id": "source-message",
+        "timezone": "Australia/Hobart",
+    }
+
+    result, confirmed = confirm_conversational_booking(
+        db, thread, "", proposal_override=proposal,
+        require_customer_confirmation=False, send_confirmation=False, audit=audit,
+    )
+    db.commit()
+
+    types = [event_type for event_type, _ in structured_events(db)]
+    assert "booking_attempted" in types
+    assert "availability_lookup_started" in types
+    assert "availability_lookup_completed" in types
+    expected = {
+        "success": "booking_succeeded",
+        "conflict": "booking_conflict",
+        "failure": "booking_failed",
+    }[outcome_name]
+    assert expected in types
+    outcome = structured_events(db, expected)[0][1]
+    assert outcome["correlation_id"] == audit["correlation_id"]
+    assert outcome["source_message_id"] == audit["source_message_id"]
+    assert outcome["requested_slot"] == start.isoformat()
+    assert confirmed is (outcome_name == "success")
+    assert result["status"] == {
+        "success": "confirmed", "conflict": "rejected", "failure": "failed",
+    }[outcome_name]
+    db.close()
+
+
 def test_calendar_only_validator_requires_a_fresh_lookup():
     assert main.validate_calendar_only_reply(
         "I have an opening at 3pm.", live_lookup_succeeded=False,

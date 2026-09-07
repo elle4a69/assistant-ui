@@ -19,8 +19,10 @@ import string
 import json
 import shutil
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import FastAPI, Depends, HTTPException, Query, status, UploadFile, File, BackgroundTasks, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import RedirectResponse
@@ -1129,6 +1131,125 @@ class ThreadEvent(Base):
     meta = Column(Text, nullable=True)
     
     thread = relationship("Thread", back_populates="events")
+
+
+AUDIT_SCHEMA_VERSION = 1
+
+
+def _audit_iso(value: Any, timezone_name: str = "Australia/Hobart") -> Optional[str]:
+    """Normalize an audit datetime without retaining the original input text."""
+    if not value:
+        return None
+    try:
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(
+            str(value).replace("Z", "+00:00")
+        )
+        zone = ZoneInfo(timezone_name)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=zone)
+        return parsed.astimezone(zone).isoformat()
+    except (TypeError, ValueError, ZoneInfoNotFoundError):
+        return None
+
+
+def _add_structured_thread_event(
+    db: Session,
+    thread: Thread,
+    event_type: str,
+    audit: Dict[str, Any],
+    **details: Any,
+) -> ThreadEvent:
+    """Persist allowlisted operational facts only; callers never pass free-form content."""
+    meta = {
+        "schema_version": AUDIT_SCHEMA_VERSION,
+        "correlation_id": audit.get("correlation_id"),
+        "source_message_id": audit.get("source_message_id"),
+        "timezone": audit.get("timezone", "Australia/Hobart"),
+        "sms_line": thread.sms_account_key,
+        **details,
+    }
+    event_row = ThreadEvent(
+        id=str(uuid.uuid4()),
+        thread_id=thread.id,
+        type=event_type,
+        agent_id="system",
+        meta=json.dumps(meta, separators=(",", ":"), sort_keys=True),
+        at=datetime.utcnow(),
+    )
+    db.add(event_row)
+    return event_row
+
+
+def _availability_policy_inputs(local_date: Optional[str]) -> Dict[str, Any]:
+    selected = None
+    try:
+        if local_date:
+            weekday = datetime.fromisoformat(local_date).strftime("%A")
+            selected = next(
+                (item for item in load_working_hours() if item.get("day") == weekday),
+                None,
+            )
+    except (TypeError, ValueError):
+        selected = None
+    return {
+        "working_hours": ({
+            "day": selected.get("day"),
+            "enabled": bool(selected.get("enabled")),
+            "open": selected.get("open"),
+            "close": selected.get("close"),
+        } if selected else None),
+        "lead_time_minutes": 0,
+        "buffer_before_minutes": 0,
+        "buffer_after_minutes": 0,
+        "booking_horizon_days": 180,
+    }
+
+
+def _availability_summary(result: Dict[str, Any], timezone_name: str) -> Dict[str, Any]:
+    slots = booking_slots_from_tool_result(result)
+    starts = [_audit_iso(slot.get("start"), timezone_name) for slot in slots]
+    ends = [_audit_iso(slot.get("end"), timezone_name) for slot in slots]
+    starts = [item for item in starts if item]
+    ends = [item for item in ends if item]
+    return {
+        "available": bool(slots),
+        "slot_count": len(slots),
+        "candidate_range": {
+            "first_start": min(starts) if starts else None,
+            "last_end": max(ends) if ends else None,
+            "returned_count": len(slots),
+            "bounded": True,
+        },
+        "conflict": {
+            "classification": "none_observed" if slots else "occupied_or_policy_limited",
+            "ids": [],
+        },
+    }
+
+
+def _add_decision_event(
+    db: Session,
+    thread: Thread,
+    audit: Dict[str, Any],
+    *,
+    result_code: str,
+    interpreted_slot: Optional[str],
+    pending_before: bool,
+    generated_reply_message_id: Optional[str],
+) -> None:
+    _add_structured_thread_event(
+        db, thread, "booking_decision", audit,
+        interpreted_slot=_audit_iso(interpreted_slot, audit.get("timezone", "Australia/Hobart")),
+        result_code=result_code,
+        reason_code=result_code,
+        pending_transition={
+            "before": pending_before,
+            "after": bool(thread.pending_booking),
+            "accepted_slot": _audit_iso(interpreted_slot, audit.get("timezone", "Australia/Hobart"))
+                if result_code in {"booking_created", "booking_already_confirmed"} else None,
+        },
+        generated_reply_message_id=generated_reply_message_id,
+    )
 
 
 def find_thread_by_phone(db: Session, phone: str, sms_account_key: str = "primary") -> Optional[Thread]:
@@ -3952,6 +4073,7 @@ def confirm_conversational_booking(
     proposal_override: Optional[Dict[str, Any]] = None,
     require_customer_confirmation: bool = True,
     send_confirmation: bool = True,
+    audit: Optional[Dict[str, Any]] = None,
 ) -> tuple[Dict[str, Any], bool]:
     """Create a booking from a validated proposal and re-check live availability.
 
@@ -3980,6 +4102,24 @@ def confirm_conversational_booking(
             "reason": "The proposed booking expired. Check availability and present it again.",
         }, False
 
+    audit = audit or {}
+    normalized_start = _audit_iso(start, audit.get("timezone", "Australia/Hobart"))
+    booking_inputs = {
+        "service_id": str(proposal.get("service_id") or ""),
+        "provider_binding": "secondary-line-provider" if thread.sms_account_key == "secondary" else "primary-line-provider",
+        "calendar_binding": "business-calendar",
+        "requested_slot": normalized_start,
+        "duration_minutes": duration,
+        "pending_before": bool(thread.pending_booking or proposal_override),
+    }
+    attempted_at = time.monotonic()
+    if audit:
+        _add_structured_thread_event(
+            db, thread, "booking_attempted", audit,
+            **booking_inputs,
+            status_code="attempted",
+        )
+
     existing = calendar_service.get_customer_bookings(
         thread.customer_phone,
         start - timedelta(minutes=1),
@@ -3988,15 +4128,105 @@ def confirm_conversational_booking(
     )
     if any(item["start"] == start for item in existing):
         thread.pending_booking = None
+        if audit:
+            existing_id = next(
+                (str(item.get("id")) for item in existing if item["start"] == start and item.get("id")),
+                None,
+            )
+            _add_structured_thread_event(
+                db, thread, "booking_succeeded", audit,
+                **booking_inputs,
+                status_code="already_confirmed",
+                internal_booking_id=existing_id,
+                external_booking_id=None,
+                pending_after=False,
+                elapsed_ms=round((time.monotonic() - attempted_at) * 1000),
+            )
         return {"status": "already_confirmed", "booking": proposal}, True
 
     # Never confirm from the short availability cache. Fetch the calendar again
     # immediately before the write so a newly occupied time is caught.
     if hasattr(calendar_service, "_cache"):
         calendar_service._cache.clear()
+    lookup_id = str(uuid.uuid4())
+    lookup_started = time.monotonic()
+    if audit:
+        _add_structured_thread_event(
+            db, thread, "availability_lookup_started", audit,
+            lookup_id=lookup_id,
+            tool="booking_prewrite_recheck",
+            requested_slot=normalized_start,
+            service_id=booking_inputs["service_id"],
+            provider_binding=booking_inputs["provider_binding"],
+            calendar_binding=booking_inputs["calendar_binding"],
+            lookup_source="legacy_calendar",
+            freshness="authoritative_live",
+            cache_status="cleared_and_bypassed",
+            pending_state={"proposal": booking_inputs["pending_before"], "accepted_slot": normalized_start},
+            policy_inputs=_availability_policy_inputs(normalized_start[:10] if normalized_start else None),
+        )
     availability_error = booking_availability_error(start, duration)
+    lookup_failed = bool(
+        availability_error
+        and availability_error.startswith("Live calendar availability could not be verified")
+    )
+    if audit:
+        lookup_details = {
+            "lookup_id": lookup_id,
+            "tool": "booking_prewrite_recheck",
+            "requested_slot": normalized_start,
+            "service_id": booking_inputs["service_id"],
+            "provider_binding": booking_inputs["provider_binding"],
+            "calendar_binding": booking_inputs["calendar_binding"],
+            "lookup_source": "legacy_calendar",
+            "freshness": "authoritative_live",
+            "cache_status": "cleared_and_bypassed",
+            "pending_state": {"proposal": booking_inputs["pending_before"], "accepted_slot": normalized_start},
+            "policy_inputs": _availability_policy_inputs(normalized_start[:10] if normalized_start else None),
+            "elapsed_ms": round((time.monotonic() - lookup_started) * 1000),
+        }
+        if lookup_failed:
+            _add_structured_thread_event(
+                db, thread, "availability_lookup_failed", audit,
+                **lookup_details,
+                status_code="calendar_unavailable",
+                exception_classification="expected_provider_error",
+            )
+        else:
+            _add_structured_thread_event(
+                db, thread, "availability_lookup_completed", audit,
+                **lookup_details,
+                result={
+                    "available": not bool(availability_error),
+                    "slot_count": 1 if not availability_error else 0,
+                    "candidate_range": {
+                        "first_start": normalized_start if not availability_error else None,
+                        "last_end": _audit_iso(start + timedelta(minutes=duration), audit.get("timezone", "Australia/Hobart")) if not availability_error else None,
+                        "returned_count": 1 if not availability_error else 0,
+                        "bounded": True,
+                    },
+                    "conflict": {
+                        "classification": (
+                            "calendar_conflict" if availability_error and "overlaps" in availability_error
+                            else "policy_rejected" if availability_error else "none_observed"
+                        ),
+                        "ids": [],
+                    },
+                },
+            )
     if availability_error:
         thread.pending_booking = None
+        if audit:
+            conflict = "calendar_conflict" if "overlaps" in availability_error else "policy_rejected"
+            _add_structured_thread_event(
+                db, thread, "booking_failed" if lookup_failed else "booking_conflict", audit,
+                **booking_inputs,
+                status_code="calendar_unavailable" if lookup_failed else conflict,
+                exception_classification="expected_provider_error" if lookup_failed else None,
+                conflict={"classification": "unknown_due_to_lookup_failure" if lookup_failed else conflict, "ids": []},
+                pending_after=False,
+                elapsed_ms=round((time.monotonic() - attempted_at) * 1000),
+            )
         return {"status": "rejected", "reason": availability_error}, False
 
     end = start + timedelta(minutes=duration)
@@ -4012,6 +4242,17 @@ def confirm_conversational_booking(
         customer_phone=thread.customer_phone,
     )
     if not booking_id:
+        if audit:
+            _add_structured_thread_event(
+                db, thread, "booking_failed", audit,
+                **booking_inputs,
+                status_code="provider_write_rejected",
+                exception_classification="provider_rejected",
+                internal_booking_id=None,
+                external_booking_id=None,
+                pending_after=bool(thread.pending_booking),
+                elapsed_ms=round((time.monotonic() - attempted_at) * 1000),
+            )
         return {"status": "failed", "reason": "The calendar did not accept the booking."}, False
 
     arrival_session, arrival_token = _issue_arrival_invite(
@@ -4075,6 +4316,7 @@ def confirm_conversational_booking(
             confirmation_message.role = "draft"
             thread.state = "needs-review"
         db.add(confirmation_message)
+        audit["generated_reply_message_id"] = confirmation_message.id
         db.add(ThreadEvent(
             id=str(uuid.uuid4()),
             thread_id=thread.id,
@@ -4091,6 +4333,16 @@ def confirm_conversational_booking(
 
     thread.pending_booking = None
     thread.pending_slots = None
+    if audit:
+        _add_structured_thread_event(
+            db, thread, "booking_succeeded", audit,
+            **booking_inputs,
+            status_code="created",
+            internal_booking_id=str(booking_id),
+            external_booking_id=str(booking_id) if getattr(calendar_service, "service", None) else None,
+            pending_after=False,
+            elapsed_ms=round((time.monotonic() - attempted_at) * 1000),
+        )
     return {"status": "confirmed", "booking": proposal}, True
 
 
@@ -5099,12 +5351,32 @@ def run_sms_reply_logic(
         .order_by(Message.at.asc(), Message.id.asc())
         .all()
     )
+    source_message = next((
+        message for message in reversed(history_msgs)
+        if message.role == "customer" and (
+            (provider_message_id and message.provider_message_id == provider_message_id)
+            or (message.text == body and message.at == received_at_naive)
+        )
+    ), None)
+    audit: Dict[str, Any] = {
+        "correlation_id": str(uuid.uuid4()),
+        "source_message_id": source_message.id if source_message else (provider_message_id or None),
+        "timezone": "Australia/Hobart",
+    }
     effective_body = current_customer_burst(history_msgs, body)
     clean_body = effective_body.strip().lower()
     if thread.pending_booking and is_explicit_booking_rejection(effective_body):
         thread.pending_booking = None
     pending_booking_at_turn_start = bool(thread.pending_booking)
     booking_proposal_candidate: Optional[str] = None
+    interpreted_slot: Optional[str] = None
+    if pending_booking_at_turn_start:
+        try:
+            interpreted_slot = json.loads(thread.pending_booking or "{}").get("start_time")
+        except (TypeError, json.JSONDecodeError):
+            interpreted_slot = None
+    decision_result_code = "reply_generated"
+    generated_reply_message_id: Optional[str] = None
     booking_or_availability_turn = (
         is_booking_or_availability_turn(effective_body)
         or clean_body in ("1", "2", "3")
@@ -5113,6 +5385,7 @@ def run_sms_reply_logic(
     live_calendar_lookup_succeeded = False
     # Historic offered times are not evidence for a later customer message.
     thread.pending_slots = None
+    db.flush()
 
     # A customer has already explicitly authorised this exact, previously shown
     # proposal. Do not make the calendar write depend on the language model
@@ -5125,8 +5398,14 @@ def run_sms_reply_logic(
             thread,
             effective_body,
             send_confirmation=dispatch_sms,
+            audit=audit,
         )
         booking_confirmed = booking_confirmed or confirmed_now
+        decision_result_code = (
+            "booking_already_confirmed"
+            if confirmation_result.get("status") == "already_confirmed"
+            else "booking_created" if confirmed_now else "booking_rejected"
+        )
         if confirmed_now:
             booking_arrival_link = (
                 confirmation_result.get("booking", {}).get("arrival_link")
@@ -5138,6 +5417,9 @@ def run_sms_reply_logic(
                 if isinstance(confirmation_result.get("booking"), dict)
                 else False
             )
+        # Preserve the booking and pending-state transition before later stale-read
+        # guards intentionally expire ORM objects.
+        db.flush()
 
     # Step 1: Read only the knowledge and Settings catalogue allowed for this account.
     if booking_or_availability_turn:
@@ -5378,21 +5660,7 @@ def run_sms_reply_logic(
                 store=False
             )
 
-            source_message = None
-            if provider_message_id:
-                source_message = db.query(Message).filter(
-                    Message.thread_id == thread.id,
-                    Message.role == "customer",
-                    Message.provider_message_id == provider_message_id,
-                ).first()
-            if not source_message:
-                source_message = db.query(Message).filter(
-                    Message.thread_id == thread.id,
-                    Message.role == "customer",
-                    Message.text == body,
-                    Message.at == received_at_naive,
-                ).first()
-            source_message_id = source_message.id if source_message else (provider_message_id or "")
+            source_message_id = audit.get("source_message_id") or ""
 
             max_tool_rounds = 6
             tool_round = 0
@@ -5496,7 +5764,85 @@ def run_sms_reply_logic(
                             args = json.loads(tool_call.arguments or "{}")
                         except (TypeError, json.JSONDecodeError):
                             args = {}
-                        tool_result = get_booking_tool_suite().execute(tool_call.name, args)
+                        try:
+                            suite = get_booking_tool_suite()
+                        except Exception:
+                            suite = None
+                        timezone_name = getattr(suite, "timezone_name", audit["timezone"])
+                        audit["timezone"] = timezone_name
+                        provider = getattr(suite, "provider", None)
+                        lookup_source = (
+                            "fastapi_bookings" if isinstance(provider, FastAPIBookingsDiscoveryProvider)
+                            else "legacy_calendar" if isinstance(provider, LegacyCalendarDiscoveryProvider)
+                            else "booking_discovery"
+                        )
+                        lookup_id = str(uuid.uuid4())
+                        lookup_started = time.monotonic()
+                        requested_slot = _audit_iso(args.get("after"), timezone_name)
+                        records_availability = tool_call.name in {
+                            "get_times_today", "get_times_tomorrow", "get_next_available",
+                        }
+                        if records_availability:
+                            _add_structured_thread_event(
+                                db, thread, "availability_lookup_started", audit,
+                                lookup_id=lookup_id,
+                                tool=tool_call.name,
+                                requested_slot=requested_slot,
+                                service_id=str(args.get("service_id") or "") or None,
+                                provider_binding="secondary-line-provider" if thread.sms_account_key == "secondary" else "primary-line-provider",
+                                calendar_binding="business-calendar",
+                                lookup_source=lookup_source,
+                                freshness="authoritative_live",
+                                cache_status="bypassed" if lookup_source == "legacy_calendar" else "not_applicable",
+                                pending_state={"proposal": bool(thread.pending_booking), "accepted_slot": None},
+                                policy_inputs=_availability_policy_inputs(requested_slot[:10] if requested_slot else None),
+                            )
+                        try:
+                            if suite is None:
+                                raise RuntimeError("booking discovery unavailable")
+                            tool_result = suite.execute(tool_call.name, args)
+                        except Exception:
+                            tool_result = {"status": "unavailable", "reason": "Availability lookup failed."}
+                            exception_classification = "unexpected_provider_error"
+                        else:
+                            exception_classification = None
+                        lookup_elapsed = round((time.monotonic() - lookup_started) * 1000)
+                        normalized_requested = (
+                            requested_slot
+                            or _audit_iso(tool_result.get("next_available", {}).get("start_time"), timezone_name)
+                                if isinstance(tool_result.get("next_available"), dict) else None
+                        )
+                        if not normalized_requested and tool_result.get("date"):
+                            normalized_requested = f"{tool_result['date']} ({timezone_name})"
+                        audit_details = {
+                            "lookup_id": lookup_id,
+                            "tool": tool_call.name,
+                            "requested_slot": normalized_requested,
+                            "service_id": str(args.get("service_id") or tool_result.get("service_id") or "") or None,
+                            "provider_binding": "secondary-line-provider" if thread.sms_account_key == "secondary" else "primary-line-provider",
+                            "calendar_binding": "business-calendar",
+                            "lookup_source": lookup_source,
+                            "freshness": "authoritative_live",
+                            "cache_status": "bypassed" if lookup_source == "legacy_calendar" else "not_applicable",
+                            "pending_state": {"proposal": bool(thread.pending_booking), "accepted_slot": None},
+                            "policy_inputs": _availability_policy_inputs(
+                                tool_result.get("date") or (normalized_requested[:10] if normalized_requested else None)
+                            ),
+                            "elapsed_ms": lookup_elapsed,
+                        }
+                        if records_availability and tool_result.get("status") == "ok":
+                            _add_structured_thread_event(
+                                db, thread, "availability_lookup_completed", audit,
+                                **audit_details,
+                                result=_availability_summary(tool_result, timezone_name),
+                            )
+                        elif records_availability:
+                            _add_structured_thread_event(
+                                db, thread, "availability_lookup_failed", audit,
+                                **audit_details,
+                                status_code="provider_unavailable" if tool_result.get("status") == "unavailable" else "lookup_rejected",
+                                exception_classification=exception_classification or "expected_provider_error",
+                            )
                         if (
                             tool_call.name in {
                                 "get_times_today", "get_times_tomorrow", "get_next_available",
@@ -5513,6 +5859,7 @@ def run_sms_reply_logic(
                             args = json.loads(tool_call.arguments or "{}")
                         except (TypeError, json.JSONDecodeError):
                             args = {}
+                        interpreted_slot = args.get("start_time")
                         if delayed_request_time:
                             tool_result = {
                                 "status": "rejected",
@@ -5555,8 +5902,10 @@ def run_sms_reply_logic(
                                         proposal_override=tool_result["proposal"],
                                         require_customer_confirmation=False,
                                         send_confirmation=dispatch_sms,
+                                        audit=audit,
                                     )
                                     booking_confirmed = booking_confirmed or confirmed_now
+                                    decision_result_code = "booking_created" if confirmed_now else "booking_rejected"
                                     if confirmed_now:
                                         booking_arrival_link = (
                                             tool_result.get("booking", {}).get("arrival_link")
@@ -5580,8 +5929,14 @@ def run_sms_reply_logic(
                                 thread,
                                 effective_body,
                                 send_confirmation=dispatch_sms,
+                                audit=audit,
                             )
                             booking_confirmed = booking_confirmed or confirmed_now
+                            decision_result_code = (
+                                "booking_already_confirmed"
+                                if tool_result.get("status") == "already_confirmed"
+                                else "booking_created" if confirmed_now else "booking_rejected"
+                            )
                             if confirmed_now:
                                 booking_arrival_link = (
                                     tool_result.get("booking", {}).get("arrival_link")
@@ -5683,6 +6038,13 @@ def run_sms_reply_logic(
     # confirmation for a completed booking. It carries the configured address
     # and arrival-link wording; do not follow it with an AI-generated duplicate.
     if booking_system_confirmation_handled:
+        _add_decision_event(
+            db, thread, audit,
+            result_code=decision_result_code,
+            interpreted_slot=interpreted_slot,
+            pending_before=pending_booking_at_turn_start,
+            generated_reply_message_id=audit.get("generated_reply_message_id"),
+        )
         db.commit()
         return booking_confirmed, slots_presented
 
@@ -5719,6 +6081,13 @@ def run_sms_reply_logic(
             }),
             at=datetime.utcnow(),
         ))
+        _add_decision_event(
+            db, thread, audit,
+            result_code="reply_rejected" if rejected_reply_reason else "model_unavailable",
+            interpreted_slot=interpreted_slot,
+            pending_before=pending_booking_at_turn_start,
+            generated_reply_message_id=None,
+        )
         db.commit()
         return booking_confirmed, slots_presented
             
@@ -5743,6 +6112,13 @@ def run_sms_reply_logic(
             meta=json.dumps({"reason": "reply-contained-only-a-repeated-link"}),
             at=datetime.utcnow(),
         ))
+        _add_decision_event(
+            db, thread, audit,
+            result_code="reply_rejected" if rejected_reply_reason else "model_unavailable",
+            interpreted_slot=interpreted_slot,
+            pending_before=pending_booking_at_turn_start,
+            generated_reply_message_id=None,
+        )
         db.commit()
         return booking_confirmed, False
 
@@ -5802,6 +6178,7 @@ def run_sms_reply_logic(
             at=reply_at_naive
         )
         db.add(draft_message)
+        generated_reply_message_id = draft_message.id
         thread.state = "needs-review"
         
         event_log = ThreadEvent(
@@ -5898,8 +6275,16 @@ def run_sms_reply_logic(
                 at=reply_at_naive,
             )
         db.add(system_message)
+        generated_reply_message_id = system_message.id
         db.add(event_log)
-            
+
+    _add_decision_event(
+        db, thread, audit,
+        result_code=decision_result_code,
+        interpreted_slot=interpreted_slot,
+        pending_before=pending_booking_at_turn_start,
+        generated_reply_message_id=generated_reply_message_id,
+    )
     db.commit()
     return booking_confirmed, slots_presented
 

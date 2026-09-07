@@ -86,6 +86,48 @@ function SmsAssistantThread({
           timeline.map((item, idx) => {
             if (item.type === 'event') {
               const e = item.data;
+              const diagnosticTypes = new Set([
+                'availability_lookup_started',
+                'availability_lookup_completed',
+                'availability_lookup_failed',
+                'booking_decision',
+                'booking_attempted',
+                'booking_succeeded',
+                'booking_conflict',
+                'booking_failed',
+              ]);
+              if (diagnosticTypes.has(e.type)) {
+                const correlation = String(e.meta?.correlation_id || 'unknown').slice(0, 8);
+                const outcome = e.meta?.result_code || e.meta?.status_code || e.meta?.result?.available;
+                const outcomeLabel = typeof outcome === 'boolean'
+                  ? (outcome ? 'available' : 'unavailable')
+                  : outcome;
+                return (
+                  <details key={`ev-${e.id || idx}`} className="group self-center my-1 w-full max-w-[85%] rounded-lg border border-slate-300 bg-slate-100 text-slate-700 shadow-2xs">
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-1.5 text-[10px] font-semibold">
+                      <span className="truncate">Diagnostics · {e.type.replaceAll('_', ' ')}</span>
+                      <span className="shrink-0 font-mono text-[9px] text-slate-500">{correlation}{outcomeLabel !== undefined ? ` · ${outcomeLabel}` : ''}</span>
+                    </summary>
+                    <div className="border-t border-slate-300 px-2.5 py-2">
+                      <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-[9px]">
+                        <dt className="font-bold text-slate-500">Correlation</dt><dd className="break-all font-mono">{e.meta?.correlation_id || '—'}</dd>
+                        <dt className="font-bold text-slate-500">Timestamp</dt><dd><time dateTime={e.at}>{e.at ? formatMessageTimestamp(e.at) : '—'}</time></dd>
+                        <dt className="font-bold text-slate-500">Source message</dt><dd className="break-all font-mono">{e.meta?.source_message_id || '—'}</dd>
+                        <dt className="font-bold text-slate-500">Local time</dt><dd>{e.meta?.requested_slot || e.meta?.interpreted_slot || '—'} · {e.meta?.timezone || '—'}</dd>
+                        <dt className="font-bold text-slate-500">Binding</dt><dd>{[e.meta?.sms_line, e.meta?.service_id, e.meta?.provider_binding, e.meta?.calendar_binding].filter(Boolean).join(' · ') || '—'}</dd>
+                        <dt className="font-bold text-slate-500">Result</dt><dd>{outcomeLabel ?? e.meta?.exception_classification ?? '—'}</dd>
+                        <dt className="font-bold text-slate-500">Freshness</dt><dd>{[e.meta?.lookup_source, e.meta?.freshness, e.meta?.cache_status].filter(Boolean).join(' · ') || '—'}</dd>
+                        <dt className="font-bold text-slate-500">Policy</dt><dd className="break-words font-mono">{e.meta?.policy_inputs ? JSON.stringify(e.meta.policy_inputs) : '—'}</dd>
+                        <dt className="font-bold text-slate-500">Candidates</dt><dd className="break-words font-mono">{e.meta?.result?.candidate_range ? JSON.stringify(e.meta.result.candidate_range) : '—'}</dd>
+                        <dt className="font-bold text-slate-500">Conflict</dt><dd className="break-words font-mono">{e.meta?.result?.conflict ? JSON.stringify(e.meta.result.conflict) : e.meta?.conflict ? JSON.stringify(e.meta.conflict) : '—'}</dd>
+                        <dt className="font-bold text-slate-500">Pending</dt><dd className="break-words font-mono">{e.meta?.pending_transition ? JSON.stringify(e.meta.pending_transition) : e.meta?.pending_state ? JSON.stringify(e.meta.pending_state) : '—'}</dd>
+                        <dt className="font-bold text-slate-500">Internal IDs</dt><dd className="break-all font-mono">{[e.meta?.lookup_id, e.meta?.internal_booking_id, e.meta?.external_booking_id, e.meta?.generated_reply_message_id].filter(Boolean).join(' · ') || '—'}</dd>
+                        <dt className="font-bold text-slate-500">Elapsed</dt><dd>{e.meta?.elapsed_ms !== undefined ? `${e.meta.elapsed_ms} ms` : '—'}</dd>
+                      </dl>
+                    </div>
+                  </details>
+                );
+              }
               let label = `Event: ${e.type}`;
               if (e.type === 'takeover') label = `👤 Agent ${e.agentId || ''} took over conversation`;
               else if (e.type === 'auto-reply-sent') label = `🤖 Tori sent auto-reply`;
