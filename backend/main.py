@@ -3147,6 +3147,11 @@ KNOWLEDGE_CURATOR_STATE_PATH = os.path.join(DATA_DIR, "knowledge_curator_state.j
 KNOWLEDGE_CURATOR_LOCK = threading.Lock()
 KNOWLEDGE_CURATOR_MAX_RUNS = 50
 KNOWLEDGE_CURATOR_MAX_PROPOSALS = 500
+KNOWLEDGE_CURATOR_MAX_MAINTENANCE_AUDITS = 50
+KNOWLEDGE_CURATOR_MAX_BACKUPS = 10
+# Use the deployment's supported model selection when it is configured.  The
+# fallback preserves the application default for existing installations.
+KNOWLEDGE_CURATOR_MODEL = os.getenv("KNOWLEDGE_CURATOR_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.6-terra"
 KNOWLEDGE_CURATOR_FINDING_TYPES = {
     "exact_duplicate",
     "incompatible_active_records",
@@ -3207,7 +3212,7 @@ def is_openai_quota_exhausted(exc: Exception) -> bool:
 
 
 def _curator_empty_state() -> Dict[str, Any]:
-    return {"version": 2, "runs": [], "proposals": []}
+    return {"version": 2, "runs": [], "proposals": [], "maintenance_history": []}
 
 
 def _bound_curator_proposals(proposals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -3233,7 +3238,13 @@ def _load_curator_state() -> Dict[str, Any]:
     proposals = state.get("proposals") if isinstance(state.get("proposals"), list) else []
     normalized = [_curator_safe_state_proposal(item) for item in proposals if isinstance(item, dict)]
     normalized_runs = [_curator_safe_state_run(item) for item in runs if isinstance(item, dict)]
-    return {"version": 2, "runs": normalized_runs[-KNOWLEDGE_CURATOR_MAX_RUNS:], "proposals": _bound_curator_proposals(normalized)}
+    maintenance = state.get("maintenance_history") if isinstance(state.get("maintenance_history"), list) else []
+    return {
+        "version": 2,
+        "runs": normalized_runs[-KNOWLEDGE_CURATOR_MAX_RUNS:],
+        "proposals": _bound_curator_proposals(normalized),
+        "maintenance_history": [_curator_safe_maintenance_entry(item) for item in maintenance if isinstance(item, dict)][-KNOWLEDGE_CURATOR_MAX_MAINTENANCE_AUDITS:],
+    }
 
 
 def _curator_safe_state_run(run: Dict[str, Any]) -> Dict[str, Any]:
@@ -3254,6 +3265,32 @@ def _curator_safe_state_run(run: Dict[str, Any]) -> Dict[str, Any]:
         "finding_counts": {str(key)[:80]: bounded_count(value) for key, value in counts.items() if isinstance(value, int) and not isinstance(value, bool)},
         "finding_count": bounded_count(run.get("finding_count")),
         "created_proposals": bounded_count(run.get("created_proposals")),
+        "safe_repairs_completed": bounded_count(run.get("safe_repairs_completed")),
+        "ai_helper_status": str(run.get("ai_helper_status") or "")[:80] or None,
+    }
+
+
+def _curator_safe_maintenance_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist only bounded repair bookkeeping, never source content."""
+    repairs = entry.get("repairs") if isinstance(entry.get("repairs"), list) else []
+    safe_repairs = []
+    for repair in repairs[:1000]:
+        if not isinstance(repair, dict):
+            continue
+        record_id = str(repair.get("record_id") or "").strip()[:160]
+        fields = [str(field)[:80] for field in repair.get("fields", []) if isinstance(field, str)][:12]
+        if record_id and fields:
+            safe_repairs.append({"record_id": record_id, "fields": fields})
+    try:
+        repaired_count = min(100000, max(0, int(entry.get("repaired_count") or 0)))
+    except (TypeError, ValueError):
+        repaired_count = 0
+    return {
+        "id": str(entry.get("id") or "")[:160],
+        "timestamp": str(entry.get("timestamp") or "")[:64],
+        "result": str(entry.get("result") or "")[:80],
+        "repaired_count": repaired_count,
+        "repairs": safe_repairs,
     }
 
 
@@ -3342,6 +3379,7 @@ def _save_curator_state(state: Dict[str, Any]) -> None:
         "version": 2,
         "runs": [_curator_safe_state_run(item) for item in state.get("runs", []) if isinstance(item, dict)][-KNOWLEDGE_CURATOR_MAX_RUNS:],
         "proposals": _bound_curator_proposals([_curator_safe_state_proposal(item) for item in state.get("proposals", []) if isinstance(item, dict)]),
+        "maintenance_history": [_curator_safe_maintenance_entry(item) for item in state.get("maintenance_history", []) if isinstance(item, dict)][-KNOWLEDGE_CURATOR_MAX_MAINTENANCE_AUDITS:],
     }
     temporary = f"{KNOWLEDGE_CURATOR_STATE_PATH}.{uuid.uuid4().hex}.tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
@@ -3529,6 +3567,182 @@ def _curator_valid_revision(value: Any) -> bool:
         return False
 
 
+def _curator_effective_record_snapshot(record: Dict[str, Any], *, source_index: int) -> Dict[str, Any]:
+    """The behaviour contract a metadata-only repair must preserve."""
+    normalized = normalize_knowledge_record(
+        record, source=LEARNED_INFORMATION_FILENAME, source_index=source_index, learned=True,
+    )
+    # Deliberately exclude technical timestamps and labels being persisted. All
+    # customer-facing and retrieval-relevant behaviour must compare exactly.
+    fields = (
+        "text", "canonical_key", "scope", "sms_account_key", "source_type", "status",
+        "review_status", "retrieval_enabled", "supersedes_id", "effective_from", "effective_until",
+        "applies_when", "customer_message", "customer", "question", "approved_reply", "reply",
+        "instruction", "example_reply", "owner_information", "owner_topic", "owner_guidance",
+    )
+    return {field: normalized.get(field) for field in fields}
+
+
+def _curator_authority_snapshot(records: List[Dict[str, Any]]) -> Dict[str, List[tuple[str, int, str]]]:
+    """Compare authority results for every customer-facing line before writing."""
+    snapshot: Dict[str, List[tuple[str, int, str]]] = {}
+    for account_key in ("primary", "secondary"):
+        resolved = resolve_knowledge_authority(records, account_key=account_key)
+        snapshot[account_key] = [
+            (str(item.get("id") or ""), int(item.get("revision") or 1), str(item.get("canonical_key") or ""))
+            for item in resolved
+        ]
+    return snapshot
+
+
+def _curator_legacy_timestamp(raw: Dict[str, Any]) -> str:
+    """Use only a valid pre-existing update/import timestamp, never the current time."""
+    for field in ("updated_at", "imported_at", "import_timestamp"):
+        value = raw.get(field)
+        if _knowledge_timestamp(value):
+            return _knowledge_timestamp_text(value)
+    return ""
+
+
+def _curator_has_authority_collision(items: List[Dict[str, Any]], candidate: Dict[str, Any], *, source_index: int) -> bool:
+    normalized = normalize_knowledge_record(candidate, source=LEARNED_INFORMATION_FILENAME, source_index=source_index, learned=True)
+    for other_index, other in enumerate(items):
+        if other_index == source_index or not isinstance(other, dict):
+            continue
+        other_normalized = normalize_knowledge_record(other, source=LEARNED_INFORMATION_FILENAME, source_index=other_index, learned=True)
+        if (
+            other_normalized.get("sms_account_key") == normalized.get("sms_account_key")
+            and other_normalized.get("canonical_key") == normalized.get("canonical_key")
+            and _curator_authority_role(other_normalized) == "authoritative_rule"
+            and _curator_authority_role(normalized) == "authoritative_rule"
+        ):
+            return True
+    return False
+
+
+def _curator_metadata_repair_candidate(items: List[Dict[str, Any]], index: int) -> tuple[Optional[Dict[str, Any]], List[str]]:
+    """Return an unambiguous behaviour-neutral legacy metadata repair only."""
+    raw = items[index]
+    if not isinstance(raw, dict) or not str(raw.get("id") or "").strip():
+        return None, []
+    normalized = normalize_knowledge_record(raw, source=LEARNED_INFORMATION_FILENAME, source_index=index, learned=True)
+    candidate = dict(raw)
+    repaired: List[str] = []
+    # Never coerce an invalid supplied value. Only materialise exactly the
+    # normaliser default that the record already uses in practice.
+    if not str(raw.get("revision") or raw.get("version") or "").strip() and normalized.get("revision") == 1:
+        candidate["revision"] = 1
+        candidate["version"] = 1
+        repaired.extend(["revision", "version"])
+    if not str(raw.get("status") or "").strip() and normalized.get("status") in KNOWLEDGE_RECORD_STATUSES:
+        candidate["status"] = normalized["status"]
+        repaired.append("status")
+    if not str(raw.get("canonical_key") or raw.get("key") or raw.get("topic") or "").strip() and normalized.get("canonical_key"):
+        if not _curator_has_authority_collision(items, candidate, source_index=index):
+            candidate["canonical_key"] = normalized["canonical_key"]
+            repaired.append("canonical_key")
+    existing_timestamp = _curator_legacy_timestamp(raw)
+    if not str(raw.get("created_at") or "").strip() and existing_timestamp:
+        candidate["created_at"] = existing_timestamp
+        repaired.append("created_at")
+    if not str(raw.get("updated_at") or "").strip() and _knowledge_timestamp(candidate.get("created_at")):
+        candidate["updated_at"] = _knowledge_timestamp_text(candidate["created_at"])
+        repaired.append("updated_at")
+    if not repaired:
+        return None, []
+    if _curator_effective_record_snapshot(raw, source_index=index) != _curator_effective_record_snapshot(candidate, source_index=index):
+        return None, []
+    return candidate, repaired
+
+
+def _curator_backup_directory(filepath: str) -> str:
+    return f"{filepath}.curator-backups"
+
+
+def _curator_bound_backups(directory: str) -> None:
+    backups = sorted(Path(directory).glob("*.jsonl"), key=lambda item: item.stat().st_mtime, reverse=True)
+    for old_backup in backups[KNOWLEDGE_CURATOR_MAX_BACKUPS:]:
+        old_backup.unlink(missing_ok=True)
+
+
+def _repair_legacy_knowledge_metadata() -> Dict[str, Any]:
+    """Atomically persist only proven legacy labels, with rollback and audit data."""
+    timestamp = datetime.utcnow().isoformat() + "Z"
+    audit: Dict[str, Any] = {"id": f"kcm-{uuid.uuid4()}", "timestamp": timestamp, "result": "no_changes", "repaired_count": 0, "repairs": []}
+    filepath = os.path.join(KNOWLEDGE_DIR, LEARNED_INFORMATION_FILENAME)
+    if not os.path.exists(filepath):
+        return audit
+    with LEARNED_INFORMATION_LOCK:
+        original = Path(filepath).read_text(encoding="utf-8")
+        lines = original.splitlines()
+        records: List[Dict[str, Any]] = []
+        positions: List[int] = []
+        for position, line in enumerate(lines):
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                records.append(value)
+                positions.append(position)
+        if len({str(item.get("id") or "") for item in records if str(item.get("id") or "")}) != len([item for item in records if str(item.get("id") or "")]):
+            audit["result"] = "skipped_ambiguous"
+            return audit
+        before_authority = _curator_authority_snapshot(records)
+        replacements: Dict[int, Dict[str, Any]] = {}
+        for index, raw in enumerate(records):
+            candidate, fields = _curator_metadata_repair_candidate(records, index)
+            if not candidate:
+                continue
+            proposed_records = list(records)
+            proposed_records[index] = candidate
+            if before_authority != _curator_authority_snapshot(proposed_records):
+                continue
+            replacements[index] = candidate
+            audit["repairs"].append({"record_id": str(raw["id"])[:160], "fields": fields})
+        if not replacements:
+            return audit
+        updated_lines = list(lines)
+        for index, candidate in replacements.items():
+            updated_lines[positions[index]] = json.dumps(candidate, ensure_ascii=False, sort_keys=True)
+        # Validate every line which the writer will own before replacing the
+        # original. Pre-existing malformed legacy lines remain byte-for-byte.
+        for index in replacements:
+            parsed = json.loads(updated_lines[positions[index]])
+            if not isinstance(parsed, dict) or _curator_effective_record_snapshot(parsed, source_index=index) != _curator_effective_record_snapshot(records[index], source_index=index):
+                audit["result"] = "validation_failed"
+                audit["repairs"] = []
+                return audit
+        backup_directory = _curator_backup_directory(filepath)
+        os.makedirs(backup_directory, exist_ok=True)
+        backup_path = os.path.join(backup_directory, f"{datetime.utcnow().strftime('%Y%m%dT%H%M%S%f')}-{uuid.uuid4().hex}.jsonl")
+        shutil.copy2(filepath, backup_path)
+        temporary = f"{filepath}.{uuid.uuid4().hex}.tmp"
+        try:
+            with open(temporary, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(updated_lines) + ("\n" if original.endswith("\n") else ""))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, filepath)
+            load_knowledge_base()
+            _curator_bound_backups(backup_directory)
+        except Exception:
+            try:
+                rollback_temp = f"{filepath}.{uuid.uuid4().hex}.rollback.tmp"
+                shutil.copy2(backup_path, rollback_temp)
+                os.replace(rollback_temp, filepath)
+                with contextlib.suppress(Exception):
+                    load_knowledge_base()
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+            audit["result"] = "rolled_back"
+            audit["repairs"] = []
+            return audit
+    audit["result"] = "completed"
+    audit["repaired_count"] = len(audit["repairs"])
+    return audit
+
+
 def _curator_finding(
     finding_type: str,
     records: List[Dict[str, Any]],
@@ -3628,7 +3842,7 @@ def inspect_knowledge_integrity(records: Optional[List[Dict[str, Any]]] = None, 
         if item.get("scope") == "internal" or item.get("category") == "internal_or_uncertain":
             findings.append(_curator_finding(
                 "owner_answer_required", [item], reason_code="curator_owner_answer_required", action="ask_owner",
-                owner_question="Should this record be corrected and assigned to a specific SMS line, or remain internal?",
+                owner_question="This information is currently kept out of customer replies. Should the agent ever use it?",
             ))
 
     # Exact duplicates and incompatible independent active authorities.  A
@@ -3670,7 +3884,7 @@ def inspect_knowledge_integrity(records: Optional[List[Dict[str, Any]]] = None, 
         if len(active) > 1 and len({str(item.get("text") or "").strip() for item in active}) > 1:
             findings.append(_curator_finding(
                 "incompatible_active_records", active, reason_code="curator_incompatible_active", action="ask_owner",
-                owner_question="These authoritative rules share the same scope, subject, source role and applicability. Which current rule should staff review?",
+                owner_question="We found two different answers for the same customer situation. Which instruction should guide the next review?",
                 evidence_details={"same_applicability": True, "applicability_status": "same_normalized_condition", "source_role": "authoritative_rule"},
             ))
 
@@ -3711,12 +3925,43 @@ def inspect_knowledge_integrity(records: Optional[List[Dict[str, Any]]] = None, 
     return list({item["fingerprint"]: item for item in findings}.values())
 
 
+def _classify_curator_model_failure(exc: Exception) -> str:
+    """Classify a provider failure without retaining provider text or secrets."""
+    code = _openai_error_code(exc)
+    status_code = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None)
+    name = type(exc).__name__.casefold()
+    if is_openai_quota_exhausted(exc):
+        return "openai_quota_exhausted"  # Kept for Phase 2.1 compatibility.
+    if code in {"invalid_api_key", "invalid_authentication", "authentication_error", "unauthorized"} or status_code in {401, 403}:
+        return "curator_model_authentication_failed"
+    if code in {"model_not_found", "model_not_available", "unsupported_model", "access_denied"} or status_code == 404:
+        return "curator_model_inaccessible"
+    if code in {"rate_limit_exceeded", "rate_limited"} or status_code == 429:
+        return "curator_model_rate_limited"
+    if "timeout" in code or "timeout" in name or "timedout" in name:
+        return "curator_model_timeout"
+    return "curator_model_provider_error"
+
+
+def _curator_owner_model_message(error_code: Optional[str]) -> str:
+    messages = {
+        "curator_model_not_configured": "The AI helper is not configured, but the safety checks completed successfully.",
+        "openai_quota_exhausted": "The AI helper needs available credits, but the safety checks completed successfully.",
+        "curator_model_inaccessible": "The AI helper is unavailable, but the safety checks completed successfully. Try again later.",
+        "curator_model_authentication_failed": "The AI helper is unavailable, but the safety checks completed successfully. Try again later.",
+        "curator_model_rate_limited": "The AI helper is busy, but the safety checks completed successfully. Try again later.",
+        "curator_model_timeout": "The AI helper took too long, but the safety checks completed successfully. Try again later.",
+        "curator_model_provider_error": "The AI helper was unavailable, but the safety checks completed successfully. Try again later.",
+    }
+    return messages.get(error_code or "", "Knowledge check completed.")
+
+
 def _curator_enrich_proposals(findings: List[Dict[str, Any]]) -> tuple[Dict[str, Dict[str, Any]], Optional[str]]:
     """Allow the model to refine safe proposals, never the underlying facts."""
     if not findings:
         return {}, None
     if not openai_client:
-        return {}, "curator_model_unavailable"
+        return {}, "curator_model_not_configured"
     safe_findings = [{
         "fingerprint": item["fingerprint"],
         "finding_type": item["finding_type"],
@@ -3742,16 +3987,14 @@ def _curator_enrich_proposals(findings: List[Dict[str, Any]]) -> tuple[Dict[str,
             else openai_client
         )
         response = request_client.responses.create(
-            model="gpt-5.6-terra",
+            model=KNOWLEDGE_CURATOR_MODEL,
             instructions=instructions,
             input=json.dumps({"findings": safe_findings}, ensure_ascii=False),
             store=False,
         )
         parsed = _parse_json_object(response.output_text or "").get("proposals", [])
     except Exception as exc:
-        if is_openai_quota_exhausted(exc):
-            return {}, "openai_quota_exhausted"
-        return {}, "curator_model_unavailable"
+        return {}, _classify_curator_model_failure(exc)
     allowed = {item["fingerprint"]: item for item in findings}
     enriched: Dict[str, Dict[str, Any]] = {}
     for item in parsed if isinstance(parsed, list) else []:
@@ -3781,6 +4024,10 @@ def run_knowledge_curator() -> Dict[str, Any]:
         raise HTTPException(status_code=409, detail="A knowledge audit is already running.")
     try:
         started = datetime.utcnow().isoformat() + "Z"
+        # The only automatic mutation is the independently verified metadata
+        # maintenance pass. It runs under both existing knowledge and curator
+        # locks, has a recoverable snapshot, and never changes authority.
+        maintenance = _repair_legacy_knowledge_metadata()
         findings = inspect_knowledge_integrity()
         enrichments, error_code = _curator_enrich_proposals(findings)
         state = _load_curator_state()
@@ -3818,19 +4065,17 @@ def run_knowledge_curator() -> Dict[str, Any]:
             "id": f"kcr-{uuid.uuid4()}",
             "status": "completed_with_warning" if error_code else "completed",
             "error_code": error_code,
-            "message": (
-                "OpenAI API credits or billing must be restored; deterministic findings were retained safely."
-                if error_code == "openai_quota_exhausted" else
-                "Model enrichment was unavailable; deterministic findings were retained safely."
-                if error_code else "Knowledge audit completed."
-            ),
+            "message": _curator_owner_model_message(error_code),
             "started_at": started,
             "completed_at": now_text,
             "finding_counts": counts,
             "finding_count": len(findings),
             "created_proposals": created,
+            "safe_repairs_completed": maintenance["repaired_count"],
+            "ai_helper_status": "ready" if not error_code else error_code,
         }
         state["runs"].append(run)
+        state.setdefault("maintenance_history", []).append(maintenance)
         _save_curator_state(state)
         return {"run": run, "proposals": _present_curator_state(state, unresolved_only=True)["proposals"]}
     finally:
