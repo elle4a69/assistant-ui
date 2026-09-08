@@ -584,7 +584,12 @@ class SMSExampleIndex:
         # Filter by minimum relevance score threshold (0.5) and strict intent filtering
         candidates: list[tuple[float, int]] = []
         for doc_id, base_score in scores.items():
-            if self.examples[doc_id].get("scope") not in {"shared", account_key}:
+            example_scope = self.examples[doc_id].get("scope")
+            if example_scope not in {"shared", account_key}:
+                continue
+            if example_scope == "shared" and not shared_knowledge_is_generic(
+                f"{self.examples[doc_id]['user_text']}\n{self.examples[doc_id]['reply_text']}"
+            ):
                 continue
             ex_intent = self.examples[doc_id]["intent"]
             # Strict intent filtering: Never return cross-intent examples
@@ -723,6 +728,8 @@ def render_style_examples(
         vars_map["phone"] = vars_map["business_phone"]
     if "address" not in vars_map and "street_address" in vars_map:
         vars_map["address"] = vars_map["street_address"]
+    if "information_url" not in vars_map and "line_information_url" in vars_map:
+        vars_map["information_url"] = vars_map["line_information_url"]
 
     rendered = []
     for incoming, reply in examples:
@@ -2177,6 +2184,27 @@ def get_line_profile(account_key: str) -> Dict[str, str]:
         account_key = "primary"
     return load_line_profiles()[account_key]
 
+
+def resolve_provider_context(account_key: str) -> Dict[str, str]:
+    """Resolve the only provider authority usable for one inbound SMS line.
+
+    SMS lines remain routing channels, but every responder path must bind its
+    settings, catalogue, knowledge and calendar work to this small immutable
+    context before it builds LLM input or invokes a booking tool.
+    """
+    if account_key not in FIRST_CONTACT_ACCOUNT_KEYS:
+        raise ValueError("Unknown SMS account; provider context cannot be resolved.")
+    profile = get_line_profile(account_key)
+    provider_name = profile["providerName"].strip()
+    if not provider_name:
+        raise ValueError("The SMS line has no mapped provider.")
+    return {
+        "account_key": account_key,
+        "sms_line": account_key,
+        "provider_name": provider_name,
+        "information_url": profile["informationUrl"].strip(),
+    }
+
 def _line_services_path(account_key: str) -> str:
     return os.path.join(DATA_DIR, LINE_SERVICE_FILENAMES[account_key])
 
@@ -2342,6 +2370,86 @@ RESERVED_TEMPLATE_VARIABLES = {
     "message", "knowledge", "slots", "current_time", "name", "service", "time"
 }
 TEMPLATE_VARIABLE_PATTERN = re.compile(r"\{([A-Za-z][A-Za-z0-9_]*)\}")
+SHARED_LITERAL_DATE_OR_TIME_PATTERN = re.compile(
+    r"\b(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
+    r"|\b\d{4}-\d{1,2}-\d{1,2}\b"
+    r"|\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b",
+    re.IGNORECASE,
+)
+
+# Reusable knowledge is deliberately a tiny, data-only template language.  It
+# is not Python, Jinja, an expression language, or a way to reach Settings.
+APPROVED_KNOWLEDGE_TEMPLATE_VARIABLES = frozenset({
+    "customer_first_name", "provider_name", "service_name", "service_price",
+    "service_duration", "requested_date", "requested_time", "available_slots",
+    "booking_reference", "provider_location", "information_url",
+})
+
+
+def validate_knowledge_template_variables(text: str) -> bool:
+    """Accept only the explicit inert variables supported by reusable knowledge."""
+    value = str(text or "")
+    if "{{" in value or "}}" in value or "{%" in value or "${" in value:
+        return False
+    return all(match.group(1) in APPROVED_KNOWLEDGE_TEMPLATE_VARIABLES
+               for match in TEMPLATE_VARIABLE_PATTERN.finditer(value))
+
+
+def resolve_knowledge_template(
+    text: str,
+    account_key: str,
+    *,
+    conversation_values: Optional[Dict[str, Any]] = None,
+    booking_values: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Resolve a reusable template from this provider only, or fail closed.
+
+    Values supplied by a caller are accepted only for the current conversation
+    and are checked against the selected provider catalogue where relevant.
+    """
+    text = re.sub(r"\{service\}", "{service_name}", str(text))
+    text = re.sub(r"\{price\}", "{service_price}", text)
+    text = re.sub(r"\{line_information_url\}", "{information_url}", text)
+    if not validate_knowledge_template_variables(text):
+        return None
+    if account_key == "shared":
+        return text if shared_knowledge_is_generic(text) and not TEMPLATE_VARIABLE_PATTERN.search(text) else None
+    context = resolve_provider_context(account_key)
+    values: Dict[str, Any] = {
+        "provider_name": context["provider_name"],
+        "information_url": context["information_url"],
+    }
+    line_values = get_line_business_variable_values(account_key)
+    if line_values.get("line_information_url"):
+        values["information_url"] = line_values["line_information_url"]
+    # A location is a provider setting only when it is available for this line;
+    # never fall back to a global setting which might belong to another line.
+    profile_location = str(get_line_profile(account_key).get("providerLocation") or "").strip()
+    if profile_location:
+        values["provider_location"] = profile_location
+    for source in (conversation_values or {}, booking_values or {}):
+        if not isinstance(source, dict):
+            return None
+        for key in APPROVED_KNOWLEDGE_TEMPLATE_VARIABLES:
+            if key in source and source[key] is not None:
+                values[key] = str(source[key])
+
+    service_name = values.get("service_name")
+    if service_name:
+        service = next((item for item in load_line_services(account_key)
+                        if str(item.get("name") or "") == service_name), None)
+        if not service:
+            return None
+        values["service_price"] = str(service.get("price", ""))
+        values["service_duration"] = str(service.get("duration", ""))
+    elif "{service_name}" in text:
+        # A generic reference is not a catalogue fact. It is safe only as
+        # wording and cannot name, price, or borrow a service.
+        values["service_name"] = "the relevant service"
+    rendered = render_template_variables(str(text), values)
+    if TEMPLATE_VARIABLE_PATTERN.search(rendered):
+        return None
+    return rendered
 
 
 def load_business_variables() -> List[Dict[str, Any]]:
@@ -2415,7 +2523,11 @@ def get_business_variable_values() -> Dict[str, str]:
 
 def get_line_business_variable_values(account_key: str) -> Dict[str, str]:
     """Add the selected line's identity fields without changing shared values."""
-    values = get_business_variable_values()
+    context = resolve_provider_context(account_key)
+    # The legacy global Settings file belongs to the original primary line.
+    # It is never a secondary provider source; secondary values must be added
+    # explicitly to that line profile/catalogue.
+    values = get_business_variable_values() if account_key == "primary" else {}
     profile = get_line_profile(account_key)
     information_url = profile["informationUrl"].strip()
     if information_url:
@@ -2425,6 +2537,9 @@ def get_line_business_variable_values(account_key: str) -> Dict[str, str]:
         values["website"] = information_url
         values["booking_url"] = information_url
     values.update({
+        # The global Settings value may describe the other line.  Identity is
+        # always overwritten from the account resolved for this conversation.
+        "provider_name": context["provider_name"],
         "line_key": account_key,
         "line_display_name": profile["displayName"],
         "line_provider_name": profile["providerName"],
@@ -2470,6 +2585,7 @@ def get_live_business_variables_context() -> str:
 
 def build_business_context(query: str, limit: int = 3, account_key: str = "primary") -> str:
     """Combine optional uploaded knowledge with authoritative live Settings."""
+    resolve_provider_context(account_key)
     output_parts = []
     matched_chunks = retrieve_knowledge_chunks(query, limit=limit, account_key=account_key)
     for result in matched_chunks:
@@ -2488,15 +2604,11 @@ def build_business_context(query: str, limit: int = 3, account_key: str = "prima
             # variables. Render them only for the receiving line before they
             # enter the model context; never leave historical template tokens
             # for the model to guess at.
-            rendered = render_style_examples(
-                [("", str(result["text"]))],
-                get_line_business_variable_values(account_key),
-            )[0][1]
+            rendered = resolve_knowledge_template(str(result["text"]), account_key)
+            if rendered is None:
+                _knowledge_reason("knowledge_excluded_unresolved_template", str(result.get("id") or ""))
+                continue
             output_parts.append(f"[Source: {result['source']}]\n{rendered}")
-
-    variables_context = get_live_business_variables_context()
-    if variables_context:
-        output_parts.append(variables_context)
 
     services_context = get_live_services_context(account_key)
     if services_context:
@@ -2514,6 +2626,7 @@ AUTHORITY_MATRIX = {
 
 def build_authority_context(query: str, account_key: str, *, booking_or_availability: bool) -> str:
     """Assemble only the source classes permitted to influence a customer reply."""
+    resolve_provider_context(account_key)
     if booking_or_availability:
         _knowledge_reason("knowledge_authority_overridden")
         return (
@@ -2563,7 +2676,7 @@ def generate_information_request_content(
 
     instructions = build_model_instructions(
         render_template_variables(system_prompt, {
-            **get_business_variable_values(),
+            **get_line_business_variable_values(thread.sms_account_key),
             "current_time": current_business_time().strftime("%A %d %B %Y, %I:%M %p %Z"),
         }),
         get_style_examples(customer_message.text, account_key=thread.sms_account_key),
@@ -2641,8 +2754,16 @@ def save_learned_information(
     return LEARNED_INFORMATION_FILENAME
 
 
-def _upsert_learned_information_entry(entry: Dict[str, Any]) -> None:
+def _upsert_learned_information_entry(entry: Dict[str, Any]) -> bool:
     """Write one JSONL learning safely, retaining malformed legacy lines."""
+    # All learning sources converge here.  Re-run the deterministic gate so a
+    # UI client, staff-edited draft, or future caller cannot persist a duplicate
+    # or unsafe reusable candidate by bypassing its earlier preview path.
+    if entry.get("source_type") != "curator_proposal":
+        prepared = prepare_learning_candidate(entry)
+        if prepared is None:
+            return False
+        entry = prepared
     entry_id = str(entry.get("id", "")).strip()
     if not entry_id:
         raise ValueError("A learned-information entry requires an id.")
@@ -2669,6 +2790,7 @@ def _upsert_learned_information_entry(entry: Dict[str, Any]) -> None:
             handle.write("\n".join(retained_lines) + "\n")
         os.replace(temp_path, filepath)
     load_knowledge_base()
+    return True
 
 
 def list_learned_information() -> List[Dict[str, Any]]:
@@ -2761,6 +2883,165 @@ def has_unsafe_literal_learning_detail(text: str) -> bool:
     # Keep curator and learning safeguards aligned: merely discussing how to
     # check availability is safe; claiming a concrete slot is not.
     return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in literal_patterns) or bool(_curator_dynamic_claim_detail(normalized))
+
+
+def _learning_other_provider_detail(text: str, account_key: str) -> bool:
+    """Detect known other-line facts before a reusable draft is persisted."""
+    normalized = str(text or "").casefold()
+    for other in FIRST_CONTACT_ACCOUNT_KEYS:
+        if other == account_key:
+            continue
+        profile = get_line_profile(other)
+        for detail in (profile.get("providerName"), profile.get("informationUrl")):
+            if detail and str(detail).casefold() in normalized:
+                return True
+        for service in load_line_services(other):
+            name = str(service.get("name") or "").strip()
+            if name and name.casefold() in normalized:
+                return True
+    return False
+
+
+def shared_knowledge_is_generic(text: str) -> bool:
+    """Shared material may contain only durable, non-provider-specific wording."""
+    value = str(text or "")
+    return (
+        not has_unsafe_literal_learning_detail(value)
+        and not any(_learning_other_provider_detail(value, account) for account in FIRST_CONTACT_ACCOUNT_KEYS)
+    )
+
+
+def sanitise_reusable_knowledge_template(text: str, account_key: str) -> Optional[str]:
+    """Bounded deterministic conversion of volatile reusable facts to tokens.
+
+    This deliberately declines uncertain personal data rather than guessing. It
+    is used after any optional model drafting step and before *any* candidate
+    write, so a model can never activate or bypass validation.
+    """
+    if account_key not in {*FIRST_CONTACT_ACCOUNT_KEYS, "shared"}:
+        return None
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    value = re.sub(r"\{service\}", "{service_name}", value)
+    value = re.sub(r"\{price\}", "{service_price}", value)
+    value = re.sub(r"\{line_information_url\}", "{information_url}", value)
+    if not value or (account_key != "shared" and _learning_other_provider_detail(value, account_key)):
+        return None
+    if account_key == "shared":
+        if SHARED_LITERAL_DATE_OR_TIME_PATTERN.search(value):
+            return None
+        # Unsafe shared submissions remain pending audit records, but
+        # shared_knowledge_is_generic prevents them from ever being retrieved
+        # or rendered for either provider.
+        return value if (
+            not any(_learning_other_provider_detail(value, account) for account in FIRST_CONTACT_ACCOUNT_KEYS)
+            and validate_knowledge_template_variables(value)
+        ) else None
+    context = resolve_provider_context(account_key)
+    if context["provider_name"]:
+        value = re.sub(re.escape(context["provider_name"]), "{provider_name}", value, flags=re.IGNORECASE)
+    if context["information_url"]:
+        value = re.sub(re.escape(context["information_url"]), "{information_url}", value, flags=re.IGNORECASE)
+    for service in load_line_services(account_key):
+        name = str(service.get("name") or "").strip()
+        if name:
+            value = re.sub(re.escape(name), "{service_name}", value, flags=re.IGNORECASE)
+    value = re.sub(r"https?://[^\s)]+", "{information_url}", value, flags=re.IGNORECASE)
+    value = re.sub(r"\$\s*\d+(?:\.\d{1,2})?", "{service_price}", value)
+    value = re.sub(r"\b\d+\s*(?:minutes?|mins?|hours?|hrs?)\b", "{service_duration}", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", "{requested_date}", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b", "{requested_time}", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b\d{4}-\d{1,2}-\d{1,2}\b", "{requested_date}", value)
+    value = re.sub(r"\b(?:available|free|opening|slot)s?\s+(?:at|from|between)\s+[^.!,;]+", "{available_slots}", value, flags=re.IGNORECASE)
+    if not validate_knowledge_template_variables(value):
+        return None
+    # Names, phone/email data, remaining literal dates/times, and availability
+    # assertions have no reliable deterministic source at reusable-rule time.
+    unsafe = (
+        has_unsafe_literal_learning_detail(value)
+        or bool(re.search(r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\b", value))
+        or bool(re.search(r"\b(?:available|free)\s+(?:at|on|until)\b", value, re.IGNORECASE))
+    )
+    return None if unsafe else value
+
+
+def _knowledge_meaning_signature(text: str) -> str:
+    value = re.sub(r"[^a-z0-9 ]+", " ", str(text or "").casefold())
+    value = " ".join(value.split())
+    if re.search(r"(?:what|which) day .*?(?:suit|thinking)|when would you like .*?(?:come|book)|preferred appointment day", value):
+        return "ask customer preferred appointment day"
+    replacements = {
+        "appointment": "booking", "appointments": "booking", "suits": "preferred",
+        "suit": "preferred", "thinking": "preferred", "come": "book",
+    }
+    return " ".join(replacements.get(token, token) for token in value.split())
+
+
+def classify_knowledge_candidate(entry: Dict[str, Any]) -> str:
+    """Classify a sanitised candidate before it can become a draft or record."""
+    account_key = str(entry.get("scope") or entry.get("sms_account_key") or "")
+    if account_key not in {*FIRST_CONTACT_ACCOUNT_KEYS, "shared"}:
+        return "uncertain"
+    candidate_text = str(entry.get("text") or entry.get("instruction") or "")
+    signature = _knowledge_meaning_signature(candidate_text)
+    if not signature:
+        return "uncertain"
+    if account_key == "shared":
+        applicable = [item for item in _curator_records() if item.get("sms_account_key") == "shared"
+                      and item.get("status") == "active" and item.get("review_status") == "approved"
+                      and _knowledge_bool(item.get("retrieval_enabled"))]
+    else:
+        active = resolve_knowledge_authority(_curator_records(), account_key=account_key)
+        applicable = [item for item in active if item.get("sms_account_key") in {account_key, "shared"}]
+    if re.search(r"\b(?:must not|never|instead|except)\b", candidate_text, re.IGNORECASE):
+        return "conflict" if any(item.get("canonical_key") == entry.get("canonical_key") for item in applicable) else "genuinely_new"
+    for item in applicable:
+        if _knowledge_meaning_signature(str(item.get("text") or "")) == signature:
+            return "duplicate"
+    same_key = [item for item in applicable if item.get("canonical_key") == entry.get("canonical_key")]
+    if not same_key:
+        return "genuinely_new"
+    if entry.get("proposed_supersedes_id") or re.search(r"\b(?:replace|supersede)\b", candidate_text, re.IGNORECASE):
+        return "replacement"
+    if any(re.search(r"\b(?:must not|never|instead|except)\b", candidate_text, re.IGNORECASE) for _ in same_key):
+        return "conflict"
+    return "material_addition"
+
+
+def prepare_learning_candidate(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Sanitise and deduplicate a candidate without retaining rejected content."""
+    prepared = dict(entry)
+    # Source messages remain in the normal account-bound message history. A
+    # reusable draft stores only its bounded template and source identifier,
+    # never a copied customer question, reply, name, phone, or owner payload.
+    for private_field in (
+        "question", "owner_information", "customer_message", "customer",
+        "reply", "approved_reply", "owner_guidance",
+    ):
+        prepared.pop(private_field, None)
+    account_key = str(prepared.get("scope") or prepared.get("sms_account_key") or "")
+    rendered_fields = {}
+    for field in ("topic", "applies_when", "instruction", "example_reply", "text"):
+        if field in prepared and prepared.get(field):
+            value = sanitise_reusable_knowledge_template(str(prepared[field]), account_key)
+            if value is None:
+                return None
+            rendered_fields[field] = value
+    prepared.update(rendered_fields)
+    if prepared.get("instruction"):
+        parts = [f"Topic: {prepared.get('topic', '')}", f"Applies when: {prepared.get('applies_when', '')}", f"Instruction: {prepared['instruction']}"]
+        if prepared.get("example_reply"):
+            parts.append(f"Example reply: {prepared['example_reply']}")
+        prepared["text"] = "\n".join(parts)
+    prepared["candidate_classification"] = classify_knowledge_candidate(prepared)
+    if prepared["candidate_classification"] in {"duplicate", "uncertain"}:
+        return None
+    prepared["pending_action"] = {
+        "material_addition": "review_material_addition",
+        "conflict": "review_conflict",
+        "replacement": "review_replacement",
+        "genuinely_new": "review_new_knowledge",
+    }[prepared["candidate_classification"]]
+    return prepared
 
 
 def approve_learned_information_entry(entry_id: str) -> Dict[str, Any]:
@@ -3164,6 +3445,7 @@ KNOWLEDGE_CURATOR_FINDING_TYPES = {
     "branched_supersession",
     "invalid_metadata",
     "literal_dynamic_authority",
+    "shared_provider_specific",
     "apparently_superseded",
     "owner_answer_required",
 }
@@ -3839,6 +4121,16 @@ def inspect_knowledge_integrity(records: Optional[List[Dict[str, Any]]] = None, 
                     replacement_draft=draft, evidence_details={"dynamic_type": dynamic_kind},
                 ))
 
+        if item.get("scope") == "shared":
+            text = str(item.get("text") or "")
+            matches = [key for key in FIRST_CONTACT_ACCOUNT_KEYS if _learning_other_provider_detail(text, "secondary" if key == "primary" else "primary")]
+            if matches:
+                findings.append(_curator_finding(
+                    "shared_provider_specific", [item], reason_code="curator_shared_provider_specific",
+                    action="ask_owner",
+                    owner_question="This shared rule contains provider-specific details. Select its proven provider before any scope change; no provider has been guessed.",
+                ))
+
         if item.get("scope") == "internal" or item.get("category") == "internal_or_uncertain":
             findings.append(_curator_finding(
                 "owner_answer_required", [item], reason_code="curator_owner_answer_required", action="ask_owner",
@@ -4024,10 +4316,13 @@ def run_knowledge_curator() -> Dict[str, Any]:
         raise HTTPException(status_code=409, detail="A knowledge audit is already running.")
     try:
         started = datetime.utcnow().isoformat() + "Z"
-        # The only automatic mutation is the independently verified metadata
-        # maintenance pass. It runs under both existing knowledge and curator
-        # locks, has a recoverable snapshot, and never changes authority.
-        maintenance = _repair_legacy_knowledge_metadata()
+        # A curator run is a manually initiated, proposal-only inspection.
+        # It must never rewrite, merge, scope, supersede or activate production
+        # knowledge merely because an operator requested a preview.
+        maintenance = {
+            "id": f"kcm-{uuid.uuid4()}", "timestamp": started,
+            "result": "proposal_only", "repaired_count": 0, "repairs": [],
+        }
         findings = inspect_knowledge_integrity()
         enrichments, error_code = _curator_enrich_proposals(findings)
         state = _load_curator_state()
@@ -4388,7 +4683,6 @@ def save_sms_pair_learning_candidates(candidates: List[Dict[str, str]]) -> Dict[
             or account_key not in FIRST_CONTACT_ACCOUNT_KEYS
             or not all(fields[key] for key in ("topic", "applies_when", "instruction"))
             or any(len(value) > 1200 for value in fields.values())
-            or any(has_unsafe_literal_learning_detail(value) for value in fields.values())
             or source_id in existing_source_ids
         ):
             skipped += 1
@@ -4401,7 +4695,7 @@ def save_sms_pair_learning_candidates(candidates: List[Dict[str, str]]) -> Dict[
         ]
         if fields["example_reply"]:
             text_parts.append(f"Example reply: {fields['example_reply']}")
-        _upsert_learned_information_entry({
+        persisted = _upsert_learned_information_entry({
             "id": f"sms-pair-{uuid.uuid4()}",
             "type": "sms_pair_template",
             "source_type": "sms_pair_template",
@@ -4424,6 +4718,9 @@ def save_sms_pair_learning_candidates(candidates: List[Dict[str, str]]) -> Dict[
             "retrieval_enabled": False,
             "review_source": "sms-pair-template",
         })
+        if not persisted:
+            skipped += 1
+            continue
         existing_source_ids.add(source_id)
         created += 1
     return {"created": created, "skipped": skipped}
@@ -4620,14 +4917,36 @@ class GoogleCalendarService:
         """Fail closed instead of treating a Google outage as an empty calendar."""
         return self.get_busy_slots(start, end, require_authoritative=True)
 
+    def get_busy_slots_for_account(
+        self,
+        start: datetime,
+        end: datetime,
+        sms_account_key: str,
+        *,
+        require_authoritative: bool = False,
+    ) -> List[Dict[str, datetime]]:
+        """Return shared-room occupancy after binding a valid SMS account.
+
+        Both providers use the same physical room and therefore must see every
+        occupied interval. The caller's provider identity remains mandatory and
+        is recorded separately on every booking event.
+        """
+        try:
+            resolve_provider_context(sms_account_key)
+            return self.get_busy_slots(start, end, require_authoritative=require_authoritative)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise OSError("Shared calendar availability could not be verified.") from exc
+
     def get_customer_bookings(
         self,
         customer_phone: str,
         start: datetime,
         end: datetime,
+        sms_account_key: str,
         db: Optional[Session] = None,
     ) -> List[Dict[str, Any]]:
-        """Return real calendar events owned by one customer, with local times."""
+        """Return this customer's bookings owned by the selected SMS account."""
+        resolve_provider_context(sms_account_key)
         from zoneinfo import ZoneInfo
 
         tz_hobart = ZoneInfo("Australia/Hobart")
@@ -4650,6 +4969,8 @@ class GoogleCalendarService:
                 for event_item in response.get("items", []):
                     description = event_item.get("description", "") or ""
                     private = event_item.get("extendedProperties", {}).get("private", {})
+                    if private.get("sms_account_key") != sms_account_key:
+                        continue
                     event_phone = private.get("customer_phone")
                     if not event_phone and "Customer phone:" in description:
                         event_phone = description.split("Customer phone:", 1)[1].splitlines()[0].strip()
@@ -4676,6 +4997,7 @@ class GoogleCalendarService:
         local_db = db or self.db_session_factory()
         try:
             local_events = local_db.query(CalendarEvent).filter(
+                CalendarEvent.sms_account_key == sms_account_key,
                 CalendarEvent.start_time < end_aware.replace(tzinfo=None),
                 CalendarEvent.end_time > start_aware.replace(tzinfo=None),
             ).all()
@@ -4698,7 +5020,11 @@ class GoogleCalendarService:
                 local_db.close()
         return sorted(results, key=lambda item: item["start"])
             
-    def create_booking(self, summary: str, start: datetime, end: datetime, customer_phone: str) -> Optional[str]:
+    def create_booking(
+        self, summary: str, start: datetime, end: datetime, customer_phone: str,
+        sms_account_key: str = "primary",
+    ) -> Optional[str]:
+        provider_context = resolve_provider_context(sms_account_key)
         # Clear cache on modification
         if hasattr(self, "_cache"):
             self._cache.clear()
@@ -4717,7 +5043,11 @@ class GoogleCalendarService:
                     "summary": summary,
                     "description": f"Customer phone: {customer_phone}",
                     "extendedProperties": {
-                        "private": {"customer_phone": canonical_phone_number(customer_phone)}
+                        "private": {
+                            "customer_phone": canonical_phone_number(customer_phone),
+                            "sms_account_key": sms_account_key,
+                            "provider_name": provider_context["provider_name"],
+                        }
                     },
                     "start": {
                         "dateTime": start_aware.isoformat(),
@@ -4738,6 +5068,7 @@ class GoogleCalendarService:
                         summary=summary,
                         start_time=start_aware.replace(tzinfo=None),
                         end_time=end_aware.replace(tzinfo=None),
+                        sms_account_key=sms_account_key,
                     )
                     db.merge(booking)
                     db.commit()
@@ -4758,7 +5089,8 @@ class GoogleCalendarService:
                 customer_phone=customer_phone,
                 summary=summary,
                 start_time=start_aware.replace(tzinfo=None),
-                end_time=end_aware.replace(tzinfo=None)
+                end_time=end_aware.replace(tzinfo=None),
+                sms_account_key=sms_account_key,
             )
             db.add(booking)
             db.commit()
@@ -5491,7 +5823,7 @@ def get_service_for_booking(service_id: str, account_key: Optional[str] = None) 
     ), None)
 
 
-def booking_availability_error(start: datetime, duration: int) -> Optional[str]:
+def booking_availability_error(start: datetime, duration: int, account_key: str = "primary") -> Optional[str]:
     """Return a customer-safe reason when an exact proposed slot cannot be booked."""
     now = current_business_time()
     end = start + timedelta(minutes=duration)
@@ -5522,15 +5854,22 @@ def booking_availability_error(start: datetime, duration: int) -> Optional[str]:
     ):
         return "The full appointment does not fit within working hours."
 
-    authoritative_loader = getattr(
-        calendar_service,
-        "get_busy_slots_authoritative",
-        calendar_service.get_busy_slots,
-    )
-    try:
-        busy_slots = authoritative_loader(start, end)
-    except (OSError, RuntimeError):
-        return "Live calendar availability could not be verified. No booking was made."
+    authoritative_loader = getattr(calendar_service, "get_busy_slots_for_account", None)
+    if not callable(authoritative_loader):
+        # Non-production adapters are used by the isolated test/simulation
+        # harness. The real calendar service always exposes the scoped method.
+        if isinstance(calendar_service, GoogleCalendarService):
+            return "Live calendar availability could not be verified. No booking was made."
+        authoritative_loader = getattr(calendar_service, "get_busy_slots_authoritative", calendar_service.get_busy_slots)
+        try:
+            busy_slots = authoritative_loader(start, end)
+        except (OSError, RuntimeError):
+            return "Live calendar availability could not be verified. No booking was made."
+    else:
+        try:
+            busy_slots = authoritative_loader(start, end, account_key, require_authoritative=True)
+        except (OSError, RuntimeError):
+            return "Live calendar availability could not be verified. No booking was made."
     if any(
         start < busy["end"] and end > busy["start"]
         for busy in busy_slots
@@ -5560,7 +5899,7 @@ def propose_conversational_booking(
     except (TypeError, ValueError):
         return {"status": "rejected", "reason": "The appointment time or duration is invalid."}
 
-    availability_error = booking_availability_error(start, duration)
+    availability_error = booking_availability_error(start, duration, thread.sms_account_key)
     if availability_error:
         return {"status": "rejected", "reason": availability_error}
 
@@ -5655,6 +5994,7 @@ def confirm_conversational_booking(
         thread.customer_phone,
         start - timedelta(minutes=1),
         start + timedelta(minutes=duration + 1),
+        thread.sms_account_key,
         db=db,
     )
     if any(item["start"] == start for item in existing):
@@ -5696,7 +6036,7 @@ def confirm_conversational_booking(
             pending_state={"proposal": booking_inputs["pending_before"], "accepted_slot": normalized_start},
             policy_inputs=_availability_policy_inputs(normalized_start[:10] if normalized_start else None),
         )
-    availability_error = booking_availability_error(start, duration)
+    availability_error = booking_availability_error(start, duration, thread.sms_account_key)
     lookup_failed = bool(
         availability_error
         and availability_error.startswith("Live calendar availability could not be verified")
@@ -5767,10 +6107,8 @@ def confirm_conversational_booking(
         f"({booking_provider_name})"
     )
     booking_id = calendar_service.create_booking(
-        summary=booking_summary,
-        start=start,
-        end=end,
-        customer_phone=thread.customer_phone,
+        summary=booking_summary, start=start, end=end,
+        customer_phone=thread.customer_phone, sms_account_key=thread.sms_account_key,
     )
     if not booking_id:
         if audit:
@@ -6611,8 +6949,9 @@ def load_booking_services() -> List[Dict[str, Any]]:
     return load_all_line_services()
 
 
-def get_booking_tool_suite() -> BookingToolSuite:
-    """Build the configured discovery adapter without exposing credentials to the model."""
+def get_booking_tool_suite(account_key: str) -> BookingToolSuite:
+    """Build discovery tools bound to the resolved provider, never all lines."""
+    resolve_provider_context(account_key)
     timezone_name = os.getenv("BOOKING_TIMEZONE", "Australia/Hobart")
     backend_name = os.getenv("BOOKING_BACKEND", "legacy").strip().casefold()
     if backend_name == "fastapi":
@@ -6620,15 +6959,15 @@ def get_booking_tool_suite() -> BookingToolSuite:
             base_url=os.getenv("FASTAPI_BOOKINGS_URL", ""),
             tenant=os.getenv("FASTAPI_BOOKINGS_TENANT"),
             token=os.getenv("FASTAPI_BOOKINGS_TOKEN"),
+            provider_id=os.getenv(f"FASTAPI_BOOKINGS_PROVIDER_{account_key.upper()}_ID"),
         )
     else:
-        busy_slots_loader = getattr(
-            calendar_service,
-            "get_busy_slots_authoritative",
-            calendar_service.get_busy_slots,
-        )
+        def busy_slots_loader(start: datetime, end: datetime) -> List[Dict[str, datetime]]:
+            return calendar_service.get_busy_slots_for_account(
+                start, end, account_key, require_authoritative=True,
+            )
         provider = LegacyCalendarDiscoveryProvider(
-            services_loader=load_booking_services,
+            services_loader=lambda: load_line_services(account_key),
             working_hours_loader=load_working_hours,
             busy_slots_loader=busy_slots_loader,
             timezone_name=timezone_name,
@@ -6924,6 +7263,12 @@ def run_sms_reply_logic(
     thread = db.query(Thread).filter(Thread.id == thread_id).first()
     if not thread:
         return False, False
+    # Bind authenticated thread -> SMS routing line -> provider before any
+    # retrieval, prompt rendering, tool construction or booking operation.
+    try:
+        provider_context = resolve_provider_context(thread.sms_account_key)
+    except ValueError:
+        return False, False
     if not account_allows_conversational_ai(thread.sms_account_key):
         print(f"[Conversational AI Skipped] Disabled for {thread.sms_account_key}.")
         return False, False
@@ -7061,6 +7406,7 @@ def run_sms_reply_logic(
         thread.customer_phone,
         now_local - timedelta(days=1),
         now_local + timedelta(days=14),
+        thread.sms_account_key,
         db=db,
     )
     requested_time = extract_requested_business_time(effective_body, now_local)
@@ -7219,6 +7565,13 @@ def run_sms_reply_logic(
                     "an old numbered option. If a live result cannot support a direct answer, output exactly "
                     "[[HANDOFF: live calendar result required]]."
                 )
+            instructions += (
+                "\n\nProvider isolation rule: Respond only from the services, settings, knowledge and live data "
+                "available to the provider handling this conversation. Never mention another SMS line or another "
+                "provider's services. Never infer that a service is offered when it is absent from the current "
+                "provider catalogue. Prices and durations must come from the current provider catalogue; availability "
+                "must come from the current provider live calendar."
+            )
             instructions += (
                 "\n\nSafety rule: never send a holding response such as 'I'll get back to you', "
                 "'I can't check that right now', 'just a sec', or similar. If the supplied facts "
@@ -7382,6 +7735,11 @@ def run_sms_reply_logic(
                         except (TypeError, json.JSONDecodeError):
                             args = {}
                         try:
+                            suite = get_booking_tool_suite(thread.sms_account_key)
+                        except TypeError:
+                            # Compatibility for isolated in-process test
+                            # adapters; the production factory requires the
+                            # resolved line argument above.
                             suite = get_booking_tool_suite()
                         except Exception:
                             suite = None
@@ -9382,12 +9740,12 @@ def process_inbound_sms(
 def webhook_sms(payload: WebhookSMSInput, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     supplied_destination = (payload.to or "").strip()
     matched_account = mobilemessage_service.matched_account_key_for_inbound_number(supplied_destination)
-    if supplied_destination and not matched_account:
+    if not supplied_destination or not matched_account:
         print("[Webhook Rejected] Inbound destination is not assigned to an enabled SMS account.")
         raise HTTPException(status_code=422, detail="Inbound SMS destination is not configured.")
-    # Missing `to` remains a legacy primary-line compatibility path. Any supplied
-    # destination must match exactly, so line 2 can never fall through to Tori.
-    return process_inbound_sms(payload, background_tasks, db, matched_account or "primary")
+    # An inbound message can enter only through an explicitly configured line.
+    # Missing, malformed, or unknown destinations must never default to primary.
+    return process_inbound_sms(payload, background_tasks, db, matched_account)
 
 
 @app.post("/api/admin/sms-simulator")
@@ -15899,7 +16257,7 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
             
         duration = service.get("duration", 60)
         end_dt = start_dt + timedelta(minutes=duration)
-        availability_error = booking_availability_error(start_dt, duration)
+        availability_error = booking_availability_error(start_dt, duration, sms_account_key)
         if availability_error:
             raise HTTPException(status_code=409, detail=availability_error)
 
@@ -15908,7 +16266,8 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
             summary=summary,
             start=start_dt,
             end=end_dt,
-            customer_phone=customer_phone
+            customer_phone=customer_phone,
+            sms_account_key=sms_account_key,
         )
         if not booking_id:
             raise HTTPException(status_code=500, detail="Failed to create booking in calendar service.")

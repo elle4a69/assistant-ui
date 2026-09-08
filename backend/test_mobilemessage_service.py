@@ -173,6 +173,63 @@ def test_account_rejects_sender_from_the_other_line(monkeypatch):
     post.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "accounts,destination,expected",
+    [
+        (
+            {
+                "primary": {"sender": "04 0000 0010", "enabled": True},
+                "secondary": {"sender": "+61 400 000 010", "enabled": True},
+            },
+            "61400000010",
+            None,
+        ),
+        (
+            {
+                "primary": {"sender": "61400000010", "enabled": True},
+                "secondary": {"sender": "61400000010", "enabled": True},
+            },
+            "61400000010",
+            None,
+        ),
+        (
+            {
+                "primary": {"sender": "61400000010", "enabled": True},
+                "secondary": {"sender": "61400000010", "enabled": False},
+            },
+            "04 0000 0010",
+            "primary",
+        ),
+    ],
+)
+def test_inbound_account_matching_requires_exactly_one_enabled_sender(monkeypatch, accounts, destination, expected):
+    monkeypatch.setattr(mobilemessage_service, "load_accounts_config", lambda: accounts)
+
+    assert mobilemessage_service.matched_account_key_for_inbound_number(destination) == expected
+
+
+@pytest.mark.parametrize("destination", [None, "", "   ", "61499999999"])
+def test_inbound_account_matching_rejects_missing_blank_and_unknown_destinations(monkeypatch, destination):
+    monkeypatch.setattr(
+        mobilemessage_service,
+        "load_accounts_config",
+        lambda: {"primary": {"sender": "61400000010", "enabled": True}},
+    )
+
+    assert mobilemessage_service.matched_account_key_for_inbound_number(destination) is None
+
+
+def test_save_accounts_config_rejects_duplicate_enabled_normalized_senders(monkeypatch, tmp_path):
+    config_path = tmp_path / "mobilemessage.json"
+    monkeypatch.setattr(mobilemessage_service, "CONFIG_PATH", str(config_path))
+
+    assert mobilemessage_service.save_accounts_config({
+        "primary": {"sender": "04 0000 0010", "enabled": True},
+        "secondary": {"sender": "+61 400 000 010", "enabled": True},
+    }) is False
+    assert not config_path.exists()
+
+
 def test_gateway_settings_do_not_expose_saved_password(monkeypatch):
     monkeypatch.setattr(
         main.mobilemessage_service,

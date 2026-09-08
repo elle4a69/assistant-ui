@@ -251,6 +251,7 @@ class FastAPIBookingsDiscoveryProvider:
         base_url: str,
         tenant: str | None = None,
         token: str | None = None,
+        provider_id: str | None = None,
         timeout_seconds: float = 8.0,
     ) -> None:
         if not base_url.strip():
@@ -258,11 +259,14 @@ class FastAPIBookingsDiscoveryProvider:
         self.base_url = base_url.rstrip("/")
         self.tenant = tenant
         self.token = token
+        self.provider_id = str(provider_id or "").strip()
         self.timeout_seconds = timeout_seconds
 
     def list_services(self) -> list[dict[str, Any]]:
         payload = self._request("GET", "/api/public/bootstrap")
         services = payload.get("data", {}).get("services", [])
+        if not self.provider_id:
+            return []
         return [
             {
                 "id": str(item["id"]),
@@ -274,6 +278,7 @@ class FastAPIBookingsDiscoveryProvider:
             }
             for item in services
             if item.get("id") is not None and item.get("active", True)
+            and self.provider_id in {str(value) for value in item.get("provider_ids", [])}
         ]
 
     def search_availability(
@@ -293,6 +298,8 @@ class FastAPIBookingsDiscoveryProvider:
             },
         )
         slots = payload.get("data", [])
+        if not self.provider_id:
+            return []
         return [
             {
                 "service_id": str(item.get("service", {}).get("id", service_id)),
@@ -302,8 +309,9 @@ class FastAPIBookingsDiscoveryProvider:
                 "start_time": item.get("start_time"),
                 "end_time": item.get("end_time"),
             }
-            for item in slots[:limit]
-        ]
+            for item in slots
+            if str(item.get("provider", {}).get("id") or "") == self.provider_id
+        ][:limit]
 
     def _request(
         self,

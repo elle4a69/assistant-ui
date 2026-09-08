@@ -295,11 +295,124 @@ def test_unknown_supplied_inbound_number_is_rejected_not_routed_to_tori(monkeypa
     db.close()
 
 
+@pytest.mark.parametrize("destination", [None, "", "   ", "61499999999"])
+def test_unproven_inbound_destinations_fail_closed_without_processing(monkeypatch, destination):
+    db = make_db()
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "load_accounts_config",
+        lambda: {
+            "primary": {"sender": "61400000010", "enabled": True},
+            "secondary": {"sender": "61420136756", "enabled": True},
+        },
+    )
+    processed = []
+    monkeypatch.setattr(main, "process_inbound_sms", lambda *args: processed.append(args))
+    payload = {
+        "sender": "0412 345 678",
+        "message": "This must not be routed.",
+        "message_id": "unproven-destination",
+        "received_at": "2026-08-13 10:00:00",
+    }
+    if destination is not None:
+        payload["to"] = destination
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        receive(db, payload)
+
+    assert exc_info.value.status_code == 422
+    assert processed == []
+    assert db.query(main.Thread).count() == 0
+    db.close()
+
+
+@pytest.mark.parametrize(
+    "accounts,destination",
+    [
+        (
+            {
+                "primary": {"sender": "04 0000 0010", "enabled": True},
+                "secondary": {"sender": "+61 400 000 010", "enabled": True},
+            },
+            "61400000010",
+        ),
+        (
+            {
+                "primary": {"sender": "61400000010", "enabled": True},
+                "secondary": {"sender": "61400000010", "enabled": True},
+            },
+            "61400000010",
+        ),
+    ],
+)
+def test_ambiguous_inbound_destination_fails_closed_without_processing_or_writes(monkeypatch, accounts, destination):
+    db = make_db()
+    monkeypatch.setattr(main.mobilemessage_service, "load_accounts_config", lambda: accounts)
+    processed = []
+    monkeypatch.setattr(main, "process_inbound_sms", lambda *args: processed.append(args))
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        receive(db, {
+            "sender": "0412 345 678",
+            "to": destination,
+            "message": "This must not be routed.",
+            "message_id": "ambiguous-destination",
+            "received_at": "2026-08-13 10:00:00",
+        })
+
+    assert exc_info.value.status_code == 422
+    assert processed == []
+    assert db.query(main.Thread).count() == 0
+    assert db.query(Message).count() == 0
+    assert db.query(InboundWebhookReceipt).count() == 0
+    db.close()
+
+
+@pytest.mark.parametrize(
+    ("destination", "expected_account"),
+    [
+        ("61400000010", "primary"),
+        ("+61 420 136 756", "secondary"),
+    ],
+)
+def test_valid_inbound_destinations_pass_only_the_proven_account(monkeypatch, destination, expected_account):
+    db = make_db()
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "load_accounts_config",
+        lambda: {
+            "primary": {"sender": "61400000010", "enabled": True},
+            "secondary": {"sender": "61420136756", "enabled": True},
+        },
+    )
+    processed = []
+    monkeypatch.setattr(main, "process_inbound_sms", lambda *args: processed.append(args) or {"status": "success"})
+
+    result = receive(db, {
+        "sender": "0412 345 678",
+        "to": destination,
+        "message": "Correctly routed.",
+        "message_id": f"valid-{expected_account}",
+        "received_at": "2026-08-13 10:00:00",
+    })
+
+    assert result == {"status": "success"}
+    assert len(processed) == 1
+    assert processed[0][-1] == expected_account
+    db.close()
+
+
 def test_real_inbound_message_id_still_deduplicates_retries(monkeypatch):
     db = make_db()
     monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", False)
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "load_accounts_config",
+        lambda: {"primary": {"sender": "61400000010", "enabled": True}},
+    )
     payload = {
         "sender": "0412 345 678",
+        "to": "61400000010",
         "message": "Hello",
         "message_id": "actual-inbound-id",
         "original_message_id": "outbound-correlation-only",
@@ -318,8 +431,14 @@ def test_real_inbound_message_id_still_deduplicates_retries(monkeypatch):
 def test_exact_retry_of_pre_fix_original_id_record_is_not_reinserted(monkeypatch):
     db = make_db()
     monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", False)
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "load_accounts_config",
+        lambda: {"primary": {"sender": "61400000010", "enabled": True}},
+    )
     payload = {
         "sender": "0412 345 678",
+        "to": "61400000010",
         "message": "Already stored",
         "original_message_id": "legacy-outbound-id",
         "received_at": "2026-08-11 10:00:00",
