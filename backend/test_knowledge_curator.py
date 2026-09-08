@@ -52,7 +52,7 @@ def finding_types(records):
         ([record("a", canonical_key="")], "invalid_metadata"),
         ([record("a", text="This service costs $100 for 30 minutes.")], "literal_dynamic_authority"),
         ([record("a", revision=1), record("b", revision=2, text="Updated wording.", retrieval_enabled=False, review_status="pending", status="quarantined")], "apparently_superseded"),
-        ([record("a", scope="internal", sms_account_key="internal", retrieval_enabled=False, status="quarantined", review_status="pending")], "owner_answer_required"),
+        ([record("a", scope="internal", sms_account_key="internal", retrieval_enabled=False, status="quarantined", review_status="pending", category="internal_or_uncertain")], "owner_answer_required"),
     ],
 )
 def test_deterministic_audit_detects_each_finding_class(records, expected):
@@ -508,6 +508,80 @@ def test_curator_lock_rejects_concurrent_run(monkeypatch):
         assert rejected.value.status_code == 409
     finally:
         main.KNOWLEDGE_CURATOR_LOCK.release()
+
+
+def test_conversational_interview_is_contextual_resumable_and_requires_confirmation(tmp_path, monkeypatch):
+    knowledge, data = curator_paths(tmp_path, monkeypatch, [record(
+        "private-location", key="location", text="Location: Wantirna.", scope="internal", sms_account_key="internal",
+        retrieval_enabled=False, status="quarantined", review_status="pending", category="internal_or_uncertain",
+    )])
+    main.run_knowledge_curator()
+    started = main.begin_knowledge_curator_interview()
+    assert "one at a time" in started["introduction"]
+    assert started["question"]["position"] == 1
+    assert any("Location: Wantirna" in message for message in started["question"]["messages"])
+    assert any(choice["label"] == "Keep it private" for choice in started["question"]["choices"])
+    assert "this record" not in " ".join(started["question"]["messages"]).casefold()
+    before_knowledge = knowledge.joinpath(main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8")
+    clarification = main.submit_knowledge_curator_interview_answer("maybe, I guess")
+    assert clarification["status"] == "clarification"
+    confirmation = main.submit_knowledge_curator_interview_answer("No, keep it private")
+    assert confirmation["status"] == "confirmation"
+    assert knowledge.joinpath(main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8") == before_knowledge
+    assert "Location: Wantirna" not in (data / "curator.json").read_text(encoding="utf-8")
+    completed = main.confirm_knowledge_curator_interview_answer()
+    assert completed["status"] == "complete"
+    assert main.confirm_knowledge_curator_interview_answer()["status"] == "complete"
+    proposal = main.get_knowledge_curator_state()["proposals"][0]
+    assert proposal["status"] == "resolved"
+    assert knowledge.joinpath(main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8") == before_knowledge
+
+
+def test_conversational_interview_creates_pending_draft_only_after_confirm(tmp_path, monkeypatch):
+    knowledge, _ = curator_paths(tmp_path, monkeypatch, [record("price", text="The service costs $100.")])
+    main.run_knowledge_curator()
+    started = main.begin_knowledge_curator_interview()
+    assert any("configured current price" in choice["label"] for choice in started["question"]["choices"])
+    before = knowledge.joinpath(main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8")
+    main.submit_knowledge_curator_interview_answer("Use the configured current price")
+    assert knowledge.joinpath(main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8") == before
+    main.confirm_knowledge_curator_interview_answer()
+    entries = main.list_learned_information()
+    draft = next(item for item in entries if item["id"].startswith("curator-"))
+    assert draft["status"] == "quarantined" and draft["review_status"] == "pending" and draft["retrieval_enabled"] is False
+
+
+def test_private_information_without_decision_reason_is_not_an_interview_question(tmp_path, monkeypatch):
+    curator_paths(tmp_path, monkeypatch, [record("private", scope="internal", sms_account_key="internal", retrieval_enabled=False, status="quarantined", review_status="pending")])
+    result = main.run_knowledge_curator()
+    assert all(item["finding_type"] != "owner_answer_required" for item in result["proposals"])
+    assert main.begin_knowledge_curator_interview()["status"] == "complete"
+
+
+def test_conversational_interview_keeps_one_question_order_after_confirmation(tmp_path, monkeypatch):
+    curator_paths(tmp_path, monkeypatch, [
+        record("one", key="one", text="First rule."),
+        record("two", key="one", text="Second rule."),
+        record("price", key="price", text="Costs $100."),
+    ])
+    main.run_knowledge_curator()
+    started = main.begin_knowledge_curator_interview()
+    assert started["question"]["position"] == 1
+    main.submit_knowledge_curator_interview_answer(started["question"]["choices"][0]["label"])
+    next_question = main.confirm_knowledge_curator_interview_answer()
+    assert next_question["status"] == "question"
+    assert next_question["question"]["position"] == 2
+
+
+def test_conversational_interview_never_substitutes_stale_content(tmp_path, monkeypatch):
+    curator_paths(tmp_path, monkeypatch, [record("price", text="The service costs $100.")])
+    main.run_knowledge_curator()
+    main.replace_learned_information_entry("price", {"text": "The service costs $200."})
+    started = main.begin_knowledge_curator_interview()
+    assert started["question"]["actionable"] is False
+    rendered = json.dumps(started)
+    assert "$100" not in rendered and "$200" not in rendered
+    assert "cannot safely continue" in rendered
 
 
 def test_curator_settings_api_is_admin_protected(tmp_path, monkeypatch):

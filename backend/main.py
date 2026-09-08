@@ -3149,6 +3149,7 @@ KNOWLEDGE_CURATOR_MAX_RUNS = 50
 KNOWLEDGE_CURATOR_MAX_PROPOSALS = 500
 KNOWLEDGE_CURATOR_MAX_MAINTENANCE_AUDITS = 50
 KNOWLEDGE_CURATOR_MAX_BACKUPS = 10
+KNOWLEDGE_CURATOR_MAX_INTERVIEW_ITEMS = 100
 # Use the deployment's supported model selection when it is configured.  The
 # fallback preserves the application default for existing installations.
 KNOWLEDGE_CURATOR_MODEL = os.getenv("KNOWLEDGE_CURATOR_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.6-terra"
@@ -3212,7 +3213,7 @@ def is_openai_quota_exhausted(exc: Exception) -> bool:
 
 
 def _curator_empty_state() -> Dict[str, Any]:
-    return {"version": 2, "runs": [], "proposals": [], "maintenance_history": []}
+    return {"version": 2, "runs": [], "proposals": [], "maintenance_history": [], "interview": None}
 
 
 def _bound_curator_proposals(proposals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -3244,6 +3245,7 @@ def _load_curator_state() -> Dict[str, Any]:
         "runs": normalized_runs[-KNOWLEDGE_CURATOR_MAX_RUNS:],
         "proposals": _bound_curator_proposals(normalized),
         "maintenance_history": [_curator_safe_maintenance_entry(item) for item in maintenance if isinstance(item, dict)][-KNOWLEDGE_CURATOR_MAX_MAINTENANCE_AUDITS:],
+        "interview": _curator_safe_interview_state(state.get("interview")),
     }
 
 
@@ -3291,6 +3293,36 @@ def _curator_safe_maintenance_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
         "result": str(entry.get("result") or "")[:80],
         "repaired_count": repaired_count,
         "repairs": safe_repairs,
+    }
+
+
+def _curator_safe_interview_state(value: Any) -> Optional[Dict[str, Any]]:
+    """Persist only resumable cursor data, never owner prose or knowledge text."""
+    if not isinstance(value, dict):
+        return None
+    proposal_ids = [str(item)[:160] for item in value.get("proposal_ids", []) if isinstance(item, str) and item.strip()]
+    skipped = [str(item)[:160] for item in value.get("skipped_ids", []) if isinstance(item, str) and item.strip()]
+    phase = str(value.get("phase") or "question")
+    if phase not in {"question", "clarification", "confirmation", "complete"}:
+        phase = "question"
+    pending = value.get("pending") if isinstance(value.get("pending"), dict) else None
+    safe_pending = None
+    if pending:
+        resolution = str(pending.get("resolution") or "")
+        if resolution in KNOWLEDGE_CURATOR_RESOLUTIONS:
+            safe_pending = {
+                "resolution": resolution,
+                "selected_record_ids": [str(item)[:160] for item in pending.get("selected_record_ids", []) if isinstance(item, str)][:20],
+                "choice_id": str(pending.get("choice_id") or "")[:80],
+            }
+    return {
+        "id": str(value.get("id") or "")[:160],
+        "proposal_ids": proposal_ids[:KNOWLEDGE_CURATOR_MAX_INTERVIEW_ITEMS],
+        "cursor": min(max(0, int(value.get("cursor") or 0)), len(proposal_ids)),
+        "skipped_ids": skipped[:KNOWLEDGE_CURATOR_MAX_INTERVIEW_ITEMS],
+        "phase": phase,
+        "pending": safe_pending,
+        "updated_at": str(value.get("updated_at") or "")[:64],
     }
 
 
@@ -3380,6 +3412,7 @@ def _save_curator_state(state: Dict[str, Any]) -> None:
         "runs": [_curator_safe_state_run(item) for item in state.get("runs", []) if isinstance(item, dict)][-KNOWLEDGE_CURATOR_MAX_RUNS:],
         "proposals": _bound_curator_proposals([_curator_safe_state_proposal(item) for item in state.get("proposals", []) if isinstance(item, dict)]),
         "maintenance_history": [_curator_safe_maintenance_entry(item) for item in state.get("maintenance_history", []) if isinstance(item, dict)][-KNOWLEDGE_CURATOR_MAX_MAINTENANCE_AUDITS:],
+        "interview": _curator_safe_interview_state(state.get("interview")),
     }
     temporary = f"{KNOWLEDGE_CURATOR_STATE_PATH}.{uuid.uuid4().hex}.tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
@@ -3839,7 +3872,11 @@ def inspect_knowledge_integrity(records: Optional[List[Dict[str, Any]]] = None, 
                     replacement_draft=draft, evidence_details={"dynamic_type": dynamic_kind},
                 ))
 
-        if item.get("scope") == "internal" or item.get("category") == "internal_or_uncertain":
+        # Private material remains private by default.  It only becomes an
+        # owner question when an earlier deterministic check explicitly marks
+        # it uncertain or a staff workflow asks for a decision.
+        raw_item = item.get("_raw") if isinstance(item.get("_raw"), dict) else item
+        if item.get("category") == "internal_or_uncertain" or _knowledge_bool(raw_item.get("owner_decision_required")):
             findings.append(_curator_finding(
                 "owner_answer_required", [item], reason_code="curator_owner_answer_required", action="ask_owner",
                 owner_question="This information is currently kept out of customer replies. Should the agent ever use it?",
@@ -4088,6 +4125,288 @@ def get_knowledge_curator_state() -> Dict[str, Any]:
     return _present_curator_state(state)
 
 
+# Owner interview -----------------------------------------------------------
+# This is intentionally not a general chat system.  It records a cursor and
+# a selected safe action only; question wording and record previews are made
+# afresh from the proposal's exact, current references on every request.
+_CURATOR_INTERVIEW_FINDINGS = {
+    "owner_answer_required", "incompatible_active_records", "exact_duplicate",
+    "apparently_superseded", "branched_supersession", "literal_dynamic_authority",
+}
+
+
+def _curator_owner_copy(value: Any) -> str:
+    """Return a short authenticated preview without contact details or secrets."""
+    text = str(value or "").strip().replace("\x00", " ")
+    text = re.sub(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b", "[private contact]", text)
+    text = re.sub(r"\+?\d[\d ()-]{7,}\d", "[private contact]", text)
+    text = re.sub(r"(?i)\b(api[_ -]?key|password|secret|token)\s*[:=]\s*\S+", r"\1: [hidden]", text)
+    return text[:600]
+
+
+def _curator_interview_preview(proposal: Dict[str, Any]) -> Dict[str, Any]:
+    """Safe question context; stale/missing refs deliberately never get content."""
+    current = {str(item.get("id")): item for item in _curator_records()}
+    statuses = _curator_reference_statuses(proposal, current)
+    previews = []
+    for item in statuses:
+        status = item.get("reference_status")
+        if status != "current":
+            previews.append({"reference_status": status, "message": {
+                "stale": "This saved information has changed since it was checked. Please run a new check.",
+                "missing": "This saved information is no longer available. Please run a new check.",
+                "malformed": "This item could not be safely identified. Please run a new check.",
+            }.get(status, "This item is unavailable.")})
+            continue
+        record = item["_record"]
+        raw = record.get("_raw") if isinstance(record.get("_raw"), dict) else record
+        source_type = str(record.get("source_type") or raw.get("source_type") or "").casefold()
+        # Message-pair sources may embed a customer utterance. Never show
+        # that raw source text in the interview; a safe staff-authored reply
+        # preview is enough to identify the example for an authenticated owner.
+        if any(marker in source_type for marker in KNOWLEDGE_CURATOR_CONTEXTUAL_SOURCE_MARKERS):
+            candidate = raw.get("instruction") or raw.get("approved_reply") or raw.get("example_reply")
+        else:
+            candidate = record.get("text") or raw.get("instruction") or raw.get("approved_reply") or raw.get("example_reply")
+        text = _curator_owner_copy(candidate)
+        previews.append({
+            "reference_status": "current",
+            "information": text or "Saved information is available, but it has no safe preview text.",
+            "current_treatment": "Private and not used in customer replies" if record.get("scope") == "internal" or not _knowledge_bool(record.get("retrieval_enabled")) else "Currently used in customer replies",
+            "line": {"primary": "Line 1", "secondary": "Line 2", "shared": "both lines"}.get(str(record.get("scope") or record.get("sms_account_key") or ""), "the relevant line"),
+        })
+    return {"actionable": bool(statuses) and all(item.get("reference_status") == "current" for item in statuses), "previews": previews}
+
+
+def _curator_interview_choices(proposal: Dict[str, Any], preview: Dict[str, Any]) -> List[Dict[str, Any]]:
+    finding = str(proposal.get("finding_type") or "")
+    first = next((item for item in preview["previews"] if item.get("reference_status") == "current"), {})
+    line = str(first.get("line") or "the relevant line")
+    if finding == "owner_answer_required":
+        return [
+            {"id": "share_line", "label": f"Yes, {line} can use it", "resolution": "add_safe_replacement_draft", "summary": f"Ask for a pending review draft so {line} may use this information after approval."},
+            {"id": "share_both", "label": "Use it on both lines", "resolution": "add_safe_replacement_draft", "summary": "Ask for a pending review draft so both lines may use this information after approval."},
+            {"id": "keep_private", "label": "Keep it private", "resolution": "needs_manual_investigation", "summary": "Keep this information private and out of customer replies."},
+            {"id": "change_information", "label": "Change the information", "resolution": "needs_manual_investigation", "summary": "Keep it private while a staff member corrects it through review."},
+            {"id": "not_sure", "label": "I'm not sure", "resolution": "dismiss_for_now", "summary": "Leave this unanswered for now; nothing will change."},
+        ]
+    if finding == "literal_dynamic_authority":
+        kind = str((proposal.get("evidence") or {}).get("dynamic_type") or "information")
+        source = "the live calendar" if kind in {"availability", "booking_time"} else "the configured current price"
+        return [
+            {"id": "use_authoritative_source", "label": f"Use {source}", "resolution": "add_safe_replacement_draft", "summary": f"Create a pending review draft that uses {source}, not this fixed statement."},
+            {"id": "keep_private", "label": "Keep it private", "resolution": "not_an_issue", "summary": "Keep the fixed statement out of customer replies."},
+            {"id": "correct_it", "label": "Mark it for correction", "resolution": "needs_manual_investigation", "summary": "Keep it out of customer replies until it is corrected through review."},
+        ]
+    if finding == "exact_duplicate":
+        return [
+            {"id": "same", "label": "They are the same", "resolution": "create_consolidation_draft", "summary": "Create one pending review draft; nothing becomes active."},
+            {"id": "different", "label": "They apply differently", "resolution": "keep_both_distinct", "summary": "Keep both unchanged because they describe different situations."},
+            {"id": "not_sure", "label": "I'm not sure", "resolution": "needs_manual_investigation", "summary": "Leave both unchanged for staff review."},
+        ]
+    if finding in {"apparently_superseded", "branched_supersession"}:
+        current = [item for item in preview["previews"] if item.get("reference_status") == "current"]
+        choices = [{"id": f"use_{index}", "label": f"Use: {item.get('information', 'this saved information')[:80]}", "resolution": "select_current_rule", "selected_index": index, "summary": "Record which existing guidance should remain current; it will not be activated or changed."} for index, item in enumerate(current)]
+        return choices + [{"id": "different_situations", "label": "They apply in different situations", "resolution": "keep_all_examples", "summary": "Keep the current guidance unchanged."}, {"id": "not_sure", "label": "I'm not sure", "resolution": "needs_manual_investigation", "summary": "Leave the guidance unchanged for staff review."}]
+    return [
+        {"id": "combine", "label": "Prepare one reviewed answer", "resolution": "create_merged_draft", "summary": "Create a pending combined draft; it will not be active."},
+        {"id": "different", "label": "They apply in different situations", "resolution": "keep_all_examples", "summary": "Keep both current items unchanged."},
+        {"id": "not_sure", "label": "I'm not sure", "resolution": "needs_manual_investigation", "summary": "Leave the current items unchanged for staff review."},
+    ]
+
+
+def _curator_interview_question(proposal: Dict[str, Any], position: int, total: int) -> Dict[str, Any]:
+    preview = _curator_interview_preview(proposal)
+    finding = str(proposal.get("finding_type") or "")
+    texts = [item.get("information") for item in preview["previews"] if item.get("information")]
+    if not preview["actionable"]:
+        return {"position": position, "total": total, "actionable": False, "messages": ["I cannot safely continue with this item because the saved information changed or is unavailable. Please run a new check."], "choices": []}
+    treatment = next((item.get("current_treatment") for item in preview["previews"] if item.get("current_treatment")), "Not currently used in customer replies")
+    question_by_finding = {
+        "owner_answer_required": f"Should customers messaging {next((item.get('line') for item in preview['previews'] if item.get('line')), 'this line')} be told this?",
+        "literal_dynamic_authority": "How should customer replies handle this changing information?",
+        "exact_duplicate": "Are these genuinely the same information?",
+        "apparently_superseded": "Which saved guidance is still valid?",
+        "branched_supersession": "Which saved guidance should remain current?",
+        "incompatible_active_records": "Which treatment is correct for customers?",
+    }
+    why = "Owner input is needed because the system cannot safely decide the business rule." if finding != "literal_dynamic_authority" else "Owner input is needed because prices and appointment times must come from their current authoritative source."
+    return {"position": position, "total": total, "actionable": True, "previews": preview["previews"], "messages": ["I found this saved information:", *[f"“{text}”" for text in texts], f"It is currently: {treatment}.", why, question_by_finding.get(finding, "What should happen with this information?")], "choices": _curator_interview_choices(proposal, preview)}
+
+
+def _curator_interview_candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    # Include stale, missing and malformed items so the owner sees an explicit
+    # safe explanation rather than a silently disappearing question. They are
+    # rendered non-actionable and every mutation path still fails closed.
+    return [item for item in state.get("proposals", []) if item.get("status") == "proposed" and item.get("finding_type") in _CURATOR_INTERVIEW_FINDINGS]
+
+
+def _curator_interview_response(state: Dict[str, Any]) -> Dict[str, Any]:
+    interview = _curator_safe_interview_state(state.get("interview"))
+    if not interview:
+        return {"status": "not_started", "remaining": len(_curator_interview_candidates(state))}
+    proposals = {str(item.get("id")): item for item in state.get("proposals", [])}
+    # Keep the original bounded order intact: filtering completed items would
+    # shift the cursor and accidentally skip the next unanswered question.
+    ids = list(interview["proposal_ids"])
+    interview["cursor"] = min(interview["cursor"], len(ids))
+    while interview["cursor"] < len(ids):
+        current_id = ids[interview["cursor"]]
+        if current_id in proposals and proposals[current_id].get("status") == "proposed":
+            break
+        interview["cursor"] += 1
+    if interview["cursor"] >= len(ids):
+        return {"status": "complete", "progress": {"answered": len(ids), "total": len(ids), "remaining": 0}, "messages": ["You are all caught up. Any drafts created are waiting in the learning review queue and are not active in customer replies."], "skipped": len(interview["skipped_ids"])}
+    proposal = proposals[ids[interview["cursor"]]]
+    question = _curator_interview_question(proposal, interview["cursor"] + 1, len(ids))
+    result = {"status": interview["phase"], "interview_id": interview["id"], "proposal_id": proposal["id"], "progress": {"answered": interview["cursor"], "total": len(ids), "remaining": len(ids) - interview["cursor"]}, "question": question}
+    if interview["phase"] == "clarification":
+        result["messages"] = ["I’m not sure which option you mean. Please choose one of the options below, or say it another way."]
+    elif interview["phase"] == "confirmation" and interview.get("pending"):
+        choice = next((item for item in question["choices"] if item["id"] == interview["pending"].get("choice_id")), None)
+        result["messages"] = [f"I understand that you want to {choice.get('summary') if choice else 'record this choice'}. Is that correct?"]
+    return result
+
+
+def begin_knowledge_curator_interview() -> Dict[str, Any]:
+    with KNOWLEDGE_CURATOR_LOCK:
+        state = _load_curator_state()
+        existing = _curator_safe_interview_state(state.get("interview"))
+        if existing and existing.get("phase") != "complete":
+            result = _curator_interview_response(state)
+            if result.get("status") == "complete":
+                existing["phase"] = "complete"
+                state["interview"] = existing
+                _save_curator_state(state)
+            return result
+        candidates = _curator_interview_candidates(state)
+        state["interview"] = {"id": f"kci-{uuid.uuid4()}", "proposal_ids": [item["id"] for item in candidates], "cursor": 0, "skipped_ids": [], "phase": "question", "pending": None, "updated_at": datetime.utcnow().isoformat() + "Z"}
+        _save_curator_state(state)
+        result = _curator_interview_response(state)
+        if result["status"] != "complete":
+            result["introduction"] = f"I found {len(candidates)} item{'s' if len(candidates) != 1 else ''} that need your input. I’ll take you through them one at a time. Nothing will be changed or shown to customers without confirmation."
+        return result
+
+
+def _curator_interpret_interview_answer(answer: str, choices: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    normalized = re.sub(r"\s+", " ", answer.casefold()).strip()
+    if not normalized:
+        return None
+    for choice in choices:
+        if normalized == choice["id"].replace("_", " ") or normalized == choice["label"].casefold():
+            return choice
+    if any(word in normalized for word in ("not sure", "don't know", "do not know", "later")):
+        return next((item for item in choices if item["id"] == "not_sure"), None)
+    if any(word in normalized for word in ("private", "no", "keep it")):
+        return next((item for item in choices if item["id"] == "keep_private"), None)
+    if any(word in normalized for word in ("both", "all lines")):
+        return next((item for item in choices if item["id"] == "share_both"), None)
+    if any(word in normalized for word in ("change", "outdated", "correct")):
+        return next((item for item in choices if item["id"] in {"change_information", "correct_it"}), None)
+    if normalized in {"yes", "yeah", "yep"} or normalized.startswith("yes "):
+        return next((item for item in choices if item["id"] in {"share_line", "use_authoritative_source", "same", "combine"}), None)
+    if any(word in normalized for word in ("different", "separate situations")):
+        return next((item for item in choices if item["id"] in {"different", "different_situations"}), None)
+    return None
+
+
+def submit_knowledge_curator_interview_answer(answer: str) -> Dict[str, Any]:
+    with KNOWLEDGE_CURATOR_LOCK:
+        state = _load_curator_state()
+        interview = _curator_safe_interview_state(state.get("interview"))
+        if not interview or interview.get("phase") == "complete":
+            raise ValueError("Start or resume the interview first.")
+        response = _curator_interview_response(state)
+        proposal = next((item for item in state["proposals"] if item.get("id") == response.get("proposal_id")), None)
+        if not proposal or not _curator_proposal_is_current(proposal):
+            raise ValueError("This information changed; run a fresh check before answering.")
+        choice = _curator_interpret_interview_answer(str(answer)[:1000], response["question"]["choices"])
+        if not choice:
+            interview["phase"] = "clarification"
+            state["interview"] = interview
+            _save_curator_state(state)
+            return _curator_interview_response(state)
+        selected = []
+        if choice.get("selected_index") is not None:
+            current_refs = [ref for ref in proposal.get("records", []) if isinstance(ref, dict)]
+            index = int(choice["selected_index"])
+            if index < len(current_refs):
+                selected = [str(current_refs[index].get("id"))]
+        interview.update({"phase": "confirmation", "pending": {"resolution": choice["resolution"], "selected_record_ids": selected, "choice_id": choice["id"]}, "updated_at": datetime.utcnow().isoformat() + "Z"})
+        state["interview"] = interview
+        _save_curator_state(state)
+        return _curator_interview_response(state)
+
+
+def confirm_knowledge_curator_interview_answer() -> Dict[str, Any]:
+    with KNOWLEDGE_CURATOR_LOCK:
+        state = _load_curator_state()
+        interview = _curator_safe_interview_state(state.get("interview"))
+        if not interview:
+            raise ValueError("There is no answer waiting for confirmation.")
+        if interview.get("phase") != "confirmation" or not interview.get("pending"):
+            return _curator_interview_response(state)
+        proposal_id = interview["proposal_ids"][interview["cursor"]]
+        pending = interview["pending"]
+    # Keep the established resolution function as the sole knowledge mutation
+    # boundary. Its own lock makes a double-click safe and idempotent.
+    try:
+        result = resolve_knowledge_curator_proposal(proposal_id, pending["resolution"], pending.get("selected_record_ids") or [])
+    except ValueError:
+        # A concurrent confirmation may have completed a non-draft answer in
+        # the small interval above. Treat only that exact already-resolved
+        # proposal as a successful idempotent repeat.
+        with KNOWLEDGE_CURATOR_LOCK:
+            latest = _load_curator_state()
+            existing = next((item for item in latest.get("proposals", []) if item.get("id") == proposal_id), None)
+            if not existing or existing.get("status") == "proposed" or existing.get("resolution") != pending.get("resolution"):
+                raise
+            result = dict(existing)
+    with KNOWLEDGE_CURATOR_LOCK:
+        state = _load_curator_state()
+        interview = _curator_safe_interview_state(state.get("interview"))
+        if not interview:
+            raise ValueError("The interview is no longer available.")
+        # Another successful click may have advanced it while this request was
+        # resolving. In that case return the current safe state without a
+        # second change.
+        if interview.get("cursor") >= len(interview.get("proposal_ids", [])) or interview["proposal_ids"][interview["cursor"]] != proposal_id:
+            return _curator_interview_response(state)
+        interview["cursor"] += 1
+        interview.update({"phase": "question", "pending": None, "updated_at": datetime.utcnow().isoformat() + "Z"})
+        state["interview"] = interview
+        _save_curator_state(state)
+        response = _curator_interview_response(state)
+        response["saved_message"] = "Saved for review. It is not active in customer replies yet." if result.get("draft_entry_id") else "Saved. Customer guidance has not changed."
+        return response
+
+
+def skip_knowledge_curator_interview_question() -> Dict[str, Any]:
+    with KNOWLEDGE_CURATOR_LOCK:
+        state = _load_curator_state()
+        interview = _curator_safe_interview_state(state.get("interview"))
+        if not interview or interview.get("phase") == "complete" or interview["cursor"] >= len(interview["proposal_ids"]):
+            raise ValueError("There is no question to skip.")
+        proposal_id = interview["proposal_ids"][interview["cursor"]]
+        interview["skipped_ids"] = list(dict.fromkeys([*interview.get("skipped_ids", []), proposal_id]))
+        interview.update({"cursor": interview["cursor"] + 1, "phase": "question", "pending": None, "updated_at": datetime.utcnow().isoformat() + "Z"})
+        state["interview"] = interview
+        _save_curator_state(state)
+        return _curator_interview_response(state)
+
+
+def reconsider_knowledge_curator_interview_answer() -> Dict[str, Any]:
+    with KNOWLEDGE_CURATOR_LOCK:
+        state = _load_curator_state()
+        interview = _curator_safe_interview_state(state.get("interview"))
+        if not interview or interview.get("phase") != "confirmation":
+            raise ValueError("There is no answer to change.")
+        interview.update({"phase": "question", "pending": None, "updated_at": datetime.utcnow().isoformat() + "Z"})
+        state["interview"] = interview
+        _save_curator_state(state)
+        return _curator_interview_response(state)
+
+
 def _curator_proposal_is_current(proposal: Dict[str, Any]) -> bool:
     current = {str(item.get("id")): item for item in _curator_records()}
     return all(item.get("reference_status") == "current" for item in _curator_reference_statuses(proposal, current))
@@ -4146,6 +4465,9 @@ def resolve_knowledge_curator_proposal(proposal_id: str, resolution: str, select
             "exact_duplicate": {"keep_both_distinct", "create_consolidation_draft", "needs_manual_investigation", "not_an_issue", "dismiss_for_now"},
             "invalid_metadata": {"create_metadata_repair_draft", "needs_manual_investigation", "not_an_issue", "dismiss_for_now"},
             "literal_dynamic_authority": {"add_safe_replacement_draft", "not_an_issue", "dismiss_for_now"},
+            # Sharing or correcting private material is never a direct scope
+            # change: it can only create the existing quarantined review draft.
+            "owner_answer_required": {"add_safe_replacement_draft", "needs_manual_investigation", "dismiss_for_now"},
         }
         allowed = allowed_by_finding.get(str(proposal.get("finding_type")), {"needs_manual_investigation", "not_an_issue", "dismiss_for_now"})
         if resolution not in allowed:
@@ -4172,6 +4494,8 @@ def resolve_knowledge_curator_proposal(proposal_id: str, resolution: str, select
             "create_metadata_repair_draft": "Repair the required metadata for the referenced record, then submit it through staff review. Do not activate it automatically.",
         }
         instruction = str(draft_data.get("instruction") if resolution == "add_safe_replacement_draft" else instruction_by_resolution.get(resolution, ""))[:2000]
+        if not instruction and resolution == "add_safe_replacement_draft" and proposal.get("finding_type") == "owner_answer_required":
+            instruction = "Staff review required before adapting this private information for customer replies. Do not activate it automatically."
         if not instruction:
             raise ValueError("This finding has no safe replacement draft.")
         if _curator_dynamic_claim_kind(instruction):
@@ -15410,6 +15734,54 @@ def list_knowledge_curator_state():
 @app.post("/api/settings/knowledge-curator/run")
 def run_knowledge_curator_endpoint():
     return run_knowledge_curator()
+
+
+@app.get("/api/settings/knowledge-curator/interview")
+def get_knowledge_curator_interview_endpoint():
+    with KNOWLEDGE_CURATOR_LOCK:
+        return _curator_interview_response(_load_curator_state())
+
+
+@app.post("/api/settings/knowledge-curator/interview/start")
+def start_knowledge_curator_interview_endpoint():
+    return begin_knowledge_curator_interview()
+
+
+@app.post("/api/settings/knowledge-curator/interview/answer")
+def answer_knowledge_curator_interview_endpoint(payload: Dict[str, Any]):
+    answer = payload.get("answer")
+    if not isinstance(answer, str) or not answer.strip():
+        raise HTTPException(status_code=422, detail="Please provide an answer.")
+    try:
+        return submit_knowledge_curator_interview_answer(answer)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/settings/knowledge-curator/interview/confirm")
+def confirm_knowledge_curator_interview_endpoint():
+    try:
+        return confirm_knowledge_curator_interview_answer()
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Knowledge curator proposal not found.")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/settings/knowledge-curator/interview/skip")
+def skip_knowledge_curator_interview_endpoint():
+    try:
+        return skip_knowledge_curator_interview_question()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/settings/knowledge-curator/interview/reconsider")
+def reconsider_knowledge_curator_interview_endpoint():
+    try:
+        return reconsider_knowledge_curator_interview_answer()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/settings/knowledge-curator/proposals/{proposal_id}/accept")

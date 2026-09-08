@@ -880,6 +880,32 @@ export interface KnowledgeCuratorState {
   proposals: KnowledgeCuratorProposal[];
 }
 
+export interface KnowledgeCuratorInterviewChoice {
+  id: string;
+  label: string;
+}
+
+export interface KnowledgeCuratorInterviewQuestion {
+  position: number;
+  total: number;
+  actionable: boolean;
+  messages: string[];
+  previews?: Array<{ reference_status: string; information?: string; current_treatment?: string; line?: string; message?: string }>;
+  choices: KnowledgeCuratorInterviewChoice[];
+}
+
+export interface KnowledgeCuratorInterview {
+  status: 'not_started' | 'question' | 'clarification' | 'confirmation' | 'complete';
+  interview_id?: string;
+  proposal_id?: string;
+  introduction?: string;
+  messages?: string[];
+  question?: KnowledgeCuratorInterviewQuestion;
+  progress?: { answered: number; total: number; remaining: number };
+  saved_message?: string;
+  remaining?: number;
+}
+
 export interface SmsLearningPreviewItem {
   id: string;
   account_key: 'primary' | 'secondary';
@@ -1030,6 +1056,42 @@ export async function getKnowledgeCuratorState(): Promise<KnowledgeCuratorState>
 export async function runKnowledgeCurator(): Promise<{ run: KnowledgeCuratorRun; proposals: KnowledgeCuratorProposal[] }> {
   const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator/run`, { method: 'POST' });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Knowledge audit could not run.');
+  return response.json();
+}
+
+export async function getKnowledgeCuratorInterview(): Promise<KnowledgeCuratorInterview> {
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator/interview`, { cache: 'no-store' });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Could not load the knowledge review.');
+  return response.json();
+}
+
+export async function startKnowledgeCuratorInterview(): Promise<KnowledgeCuratorInterview> {
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator/interview/start`, { method: 'POST' });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Could not start the knowledge review.');
+  return response.json();
+}
+
+export async function answerKnowledgeCuratorInterview(answer: string): Promise<KnowledgeCuratorInterview> {
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator/interview/answer`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answer }) });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Could not save that answer.');
+  return response.json();
+}
+
+export async function confirmKnowledgeCuratorInterview(): Promise<KnowledgeCuratorInterview> {
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator/interview/confirm`, { method: 'POST' });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Could not confirm that answer.');
+  return response.json();
+}
+
+export async function skipKnowledgeCuratorInterview(): Promise<KnowledgeCuratorInterview> {
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator/interview/skip`, { method: 'POST' });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Could not skip this question.');
+  return response.json();
+}
+
+export async function reconsiderKnowledgeCuratorInterview(): Promise<KnowledgeCuratorInterview> {
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator/interview/reconsider`, { method: 'POST' });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Could not change that answer.');
   return response.json();
 }
 

@@ -25,12 +25,16 @@ import {
   ManualLearningEntry,
   LearnedInformationEntry,
   KnowledgeCuratorState,
-  KnowledgeCuratorProposal,
+  KnowledgeCuratorInterview,
   SmsLearningPreview,
   getKnowledgeCuratorState,
+  getKnowledgeCuratorInterview,
   runKnowledgeCurator,
-  resolveKnowledgeCuratorProposal,
-  KnowledgeCuratorResolution,
+  startKnowledgeCuratorInterview,
+  answerKnowledgeCuratorInterview,
+  confirmKnowledgeCuratorInterview,
+  skipKnowledgeCuratorInterview,
+  reconsiderKnowledgeCuratorInterview,
   getKnowledgeFile,
   saveKnowledgeFile,
   deleteKnowledgeFile,
@@ -187,8 +191,10 @@ export default function SettingsView() {
   const [importingSmsLearningCandidates, setImportingSmsLearningCandidates] = useState(false);
   const [smsLearningPreview, setSmsLearningPreview] = useState<SmsLearningPreview | null>(null);
   const [knowledgeCurator, setKnowledgeCurator] = useState<KnowledgeCuratorState>({ runs: [], proposals: [] });
+  const [curatorInterview, setCuratorInterview] = useState<KnowledgeCuratorInterview>({ status: 'not_started', remaining: 0 });
   const [runningKnowledgeAudit, setRunningKnowledgeAudit] = useState(false);
-  const [updatingCuratorProposalId, setUpdatingCuratorProposalId] = useState<string | null>(null);
+  const [curatorReply, setCuratorReply] = useState('');
+  const [updatingCuratorInterview, setUpdatingCuratorInterview] = useState(false);
 
   // Modal states for File Editor & Moderation
   const [activeEditFile, setActiveEditFile] = useState<string | null>(null);
@@ -313,6 +319,7 @@ export default function SettingsView() {
     try { setLineProfiles(await retryOnce(getSmsLineProfiles)); } catch (e) { console.error('line profile fetch failed:', e); }
     try { setLearnedEntries(await retryOnce(listLearnedInformation)); } catch (e) { console.error('learned rules fetch failed:', e); }
     try { setKnowledgeCurator(await retryOnce(getKnowledgeCuratorState)); } catch (e) { console.error('knowledge curator fetch failed:', e); }
+    try { setCuratorInterview(await retryOnce(getKnowledgeCuratorInterview)); } catch (e) { console.error('knowledge curator interview fetch failed:', e); }
     try { setBlockedContacts(await retryOnce(listBlockedContacts)); } catch (e) { console.error('blocked contacts fetch failed:', e); }
   }, []);
 
@@ -767,6 +774,7 @@ export default function SettingsView() {
 
   const refreshKnowledgeCurator = async () => {
     setKnowledgeCurator(await getKnowledgeCuratorState());
+    setCuratorInterview(await getKnowledgeCuratorInterview());
   };
 
   const handleRunKnowledgeAudit = async () => {
@@ -787,22 +795,24 @@ export default function SettingsView() {
     }
   };
 
-  const handleCuratorProposal = async (proposal: KnowledgeCuratorProposal, resolution: KnowledgeCuratorResolution) => {
-    setUpdatingCuratorProposalId(proposal.id);
+  const handleCuratorInterview = async (action: 'start' | 'answer' | 'confirm' | 'skip' | 'reconsider', answer?: string) => {
+    setUpdatingCuratorInterview(true);
     try {
-      await resolveKnowledgeCuratorProposal(proposal.id, resolution, []);
-      if (['create_merged_draft', 'create_consolidation_draft', 'create_metadata_repair_draft', 'add_safe_replacement_draft'].includes(resolution)) {
+      const result = action === 'start' ? await startKnowledgeCuratorInterview()
+        : action === 'answer' ? await answerKnowledgeCuratorInterview(answer || '')
+          : action === 'confirm' ? await confirmKnowledgeCuratorInterview()
+            : action === 'reconsider' ? await reconsiderKnowledgeCuratorInterview() : await skipKnowledgeCuratorInterview();
+      setCuratorInterview(result);
+      setCuratorReply('');
+      if (action === 'confirm') {
         setLearnedEntries(await listLearnedInformation());
-        triggerBanner('success', 'A quarantined draft was added to the review queue. It is not active knowledge.');
-      } else {
-        triggerBanner('success', 'Resolution recorded. Knowledge was not changed.');
+        await refreshKnowledgeCurator();
       }
-      await refreshKnowledgeCurator();
     } catch (err) {
       console.error(err);
-      triggerBanner('error', err instanceof Error ? err.message : 'Proposal could not be updated.');
+      triggerBanner('error', err instanceof Error ? err.message : 'Knowledge review could not be updated.');
     } finally {
-      setUpdatingCuratorProposalId(null);
+      setUpdatingCuratorInterview(false);
     }
   };
 
@@ -1938,14 +1948,7 @@ export default function SettingsView() {
                   {(() => {
                     const latest = knowledgeCurator.runs[0];
                     const unresolved = knowledgeCurator.proposals.filter(item => item.status === 'proposed' || item.status === 'accepted');
-                    const decisions = unresolved.filter(item => ['owner_answer_required', 'incompatible_active_records', 'apparently_superseded', 'branched_supersession'].includes(item.finding_type));
-                    const decision = decisions.find(item => item.status === 'proposed');
-                    const dynamicClaims = unresolved.filter(item => item.finding_type === 'literal_dynamic_authority');
-                    const duplicates = unresolved.filter(item => item.finding_type === 'exact_duplicate');
-                    const privateItems = unresolved.filter(item => item.finding_type === 'owner_answer_required');
-                    const manualItems = unresolved.filter(item => !['owner_answer_required', 'incompatible_active_records', 'apparently_superseded', 'branched_supersession', 'literal_dynamic_authority', 'exact_duplicate', 'invalid_metadata'].includes(item.finding_type));
                     const needsAttention = unresolved.length > 0;
-                    const busy = decision && updatingCuratorProposalId === decision.id;
                     return <>
                       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                         <div>
@@ -1958,35 +1961,25 @@ export default function SettingsView() {
                         </button>
                       </div>
 
-                      {latest ? <div className="mt-3 grid gap-2 text-[11px] sm:grid-cols-2 lg:grid-cols-4">
+                      {latest ? <div className="mt-3 grid gap-2 text-[11px] sm:grid-cols-2 lg:grid-cols-3">
                         <div className="rounded-lg border border-violet-100 bg-white p-2"><strong>Safe repairs</strong><br />{latest.safe_repairs_completed ? `We safely repaired ${latest.safe_repairs_completed} older record${latest.safe_repairs_completed === 1 ? '' : 's'}.` : 'Nothing needed repair.'}</div>
-                        <div className="rounded-lg border border-violet-100 bg-white p-2"><strong>Decisions</strong><br />{decisions.length ? `We need your answer to ${decisions.length} business question${decisions.length === 1 ? '' : 's'}.` : 'No business decisions needed.'}</div>
-                        <div className="rounded-lg border border-violet-100 bg-white p-2"><strong>Private information</strong><br />{privateItems.length ? `${privateItems.length} item${privateItems.length === 1 ? '' : 's'} kept out of customer replies.` : 'Nothing is waiting privately.'}</div>
-                        <div className="rounded-lg border border-violet-100 bg-white p-2"><strong>Last checked</strong><br />{new Date(latest.completed_at).toLocaleString()}<br /><span className={latest.error_code ? 'text-amber-700' : 'text-emerald-700'}>AI helper: {latest.error_code ? latest.message : 'Ready'}</span></div>
+                        <div className="rounded-lg border border-violet-100 bg-white p-2"><strong>Remaining decisions</strong><br />{curatorInterview.progress ? `${curatorInterview.progress.remaining} question${curatorInterview.progress.remaining === 1 ? '' : 's'} remaining.` : `${unresolved.length} item${unresolved.length === 1 ? '' : 's'} awaiting safe review.`}</div>
+                        <div className="rounded-lg border border-violet-100 bg-white p-2"><strong>Last checked</strong><br />{new Date(latest.completed_at).toLocaleString()}<br /><span className={latest.error_code ? 'text-amber-700' : 'text-emerald-700'}>AI helper: {latest.error_code ? 'Unavailable — choices still work' : 'Ready'}</span></div>
                       </div> : <p className="mt-3 text-[11px] text-violet-700">No check has been run yet. Checks run only when you choose the button.</p>}
 
                       {latest?.safe_repairs_completed ? <p className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-[11px] text-emerald-900">{latest.safe_repairs_completed} older record{latest.safe_repairs_completed === 1 ? ' was' : 's were'} missing technical labels. They were repaired without changing what the agent knows or when it uses it.</p> : null}
 
-                      {decision ? <article className="mt-3 rounded-lg border border-violet-200 bg-white p-3 text-[11px]">
-                        <p className="font-bold text-violet-950">Business decision {decisions.indexOf(decision) + 1} of {decisions.length}</p>
-                        <p className="mt-2 font-semibold text-slate-800">{decision.owner_questions[0] || 'We need a business decision before changing any customer guidance.'}</p>
-                        <p className="mt-2 text-slate-650">{decision.finding_type === 'owner_answer_required' ? 'This information is private today. Clarification is needed because only you can decide whether customers should receive it.' : 'The customer could receive different answers. Clarification is needed because the system cannot safely choose a business rule.'}</p>
-                        <p className="mt-2 text-slate-650">This affects the relevant customer service line only. Any answer you choose becomes a pending review suggestion, never a live change.</p>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {decision.finding_type === 'incompatible_active_records' && <button type="button" onClick={() => handleCuratorProposal(decision, 'create_merged_draft')} disabled={busy || decision.actionable === false} className="rounded border border-violet-300 bg-violet-50 px-2 py-1 font-bold text-violet-900 disabled:opacity-50">Use this answer</button>}
-                          {decision.finding_type === 'incompatible_active_records' && <button type="button" onClick={() => handleCuratorProposal(decision, 'keep_all_examples')} disabled={busy || decision.actionable === false} className="rounded border border-slate-300 px-2 py-1 font-bold text-slate-700 disabled:opacity-50">Keep both because they apply differently</button>}
-                          {decision.finding_type === 'owner_answer_required' && <button type="button" onClick={() => handleCuratorProposal(decision, 'needs_manual_investigation')} disabled={busy || decision.actionable === false} className="rounded border border-slate-300 px-2 py-1 font-bold text-slate-700 disabled:opacity-50">Keep private</button>}
-                          <button type="button" onClick={() => handleCuratorProposal(decision, 'needs_manual_investigation')} disabled={busy || decision.actionable === false} className="rounded border border-amber-300 px-2 py-1 font-bold text-amber-800 disabled:opacity-50">Edit the answer</button>
-                          <button type="button" onClick={() => handleCuratorProposal(decision, 'dismiss_for_now')} disabled={busy || decision.actionable === false} className="rounded border border-slate-300 px-2 py-1 font-bold text-slate-700 disabled:opacity-50">Ask me later</button>
-                        </div>
-                      </article> : needsAttention ? <p className="mt-3 rounded-lg border border-dashed border-violet-200 bg-white/70 p-3 text-[11px] text-slate-600">There are no business questions waiting. Review the short summaries below when you are ready.</p> : null}
-
-                      <div className="mt-3 grid gap-2 text-[11px] sm:grid-cols-2">
-                        <div className="rounded-lg border border-amber-200 bg-white p-3"><strong>Potentially outdated prices or times</strong><br />{dynamicClaims.length ? `${dynamicClaims.length} item${dynamicClaims.length === 1 ? '' : 's'} should use Settings or the live calendar instead.` : 'None found.'}{dynamicClaims.map(item => <p key={item.id} className="mt-2 text-slate-650"><strong>Saved guidance:</strong> {item.evidence.trigger_excerpt ? `“${item.evidence.trigger_excerpt}”` : 'A specific price, duration, date, time, or available slot.'} It should be replaced by the current source before a customer reply.</p>)}</div>
-                        <div className="rounded-lg border border-slate-200 bg-white p-3"><strong>Duplicates</strong><br />{duplicates.length ? `${duplicates.length} possible duplicate${duplicates.length === 1 ? '' : 's'} will stay unchanged until reviewed.` : 'None found.'}</div>
-                        <div className="rounded-lg border border-slate-200 bg-white p-3"><strong>Private or uncertain information</strong><br />{privateItems.length ? `${privateItems.length} item${privateItems.length === 1 ? '' : 's'} kept private.` : 'None found.'}</div>
-                        <div className="rounded-lg border border-slate-200 bg-white p-3"><strong>Manual investigation</strong><br />{manualItems.length ? `${manualItems.length} item${manualItems.length === 1 ? '' : 's'} need support review.` : 'None needed.'}</div>
-                      </div>
+                      <article className="mt-3 rounded-xl border border-violet-200 bg-white p-3 text-sm" aria-live="polite">
+                        {curatorInterview.status === 'not_started' ? <div className="space-y-3"><p className="text-slate-700">{curatorInterview.remaining ? `There are ${curatorInterview.remaining} decisions ready for your input.` : 'There are no owner decisions ready right now.'}</p>{!!curatorInterview.remaining && <button type="button" onClick={() => handleCuratorInterview('start')} disabled={updatingCuratorInterview} className="rounded-lg bg-violet-700 px-3 py-2 text-xs font-bold text-white disabled:opacity-50">Start review</button>}</div> : curatorInterview.status === 'complete' ? <div className="space-y-2"><p className="font-bold text-violet-950">Review complete</p>{curatorInterview.messages?.map(message => <p key={message} className="text-slate-700">{message}</p>)}<button type="button" onClick={() => handleCuratorInterview('start')} disabled={updatingCuratorInterview} className="rounded border border-violet-300 px-3 py-2 text-xs font-bold text-violet-900 disabled:opacity-50">Check for new questions</button></div> : <div className="space-y-3">
+                          {curatorInterview.introduction && <p className="rounded-lg bg-violet-50 p-3 text-slate-800">{curatorInterview.introduction}</p>}
+                          {curatorInterview.progress && <p className="text-xs font-bold text-violet-900">Question {curatorInterview.question?.position || curatorInterview.progress.answered + 1} of {curatorInterview.progress.total}</p>}
+                          {curatorInterview.messages?.map(message => <p key={message} className="rounded-lg bg-slate-50 p-2 text-slate-700">{message}</p>)}
+                          {curatorInterview.question?.messages.map(message => <p key={message} className="text-slate-800">{message}</p>)}
+                          {curatorInterview.question?.previews?.map((preview, index) => <div key={`${preview.reference_status}-${index}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-slate-700">{preview.information ? <><p className="font-semibold">Saved information</p><p className="mt-1 whitespace-pre-wrap">“{preview.information}”</p></> : <p>{preview.message}</p>}</div>)}
+                          {curatorInterview.status === 'confirmation' ? <div className="flex flex-wrap gap-2"><button type="button" onClick={() => handleCuratorInterview('confirm')} disabled={updatingCuratorInterview} className="rounded-lg bg-violet-700 px-3 py-2 text-xs font-bold text-white disabled:opacity-50">Yes, save this</button><button type="button" onClick={() => handleCuratorInterview('reconsider')} disabled={updatingCuratorInterview} className="rounded border border-slate-300 px-3 py-2 text-xs font-bold text-slate-700 disabled:opacity-50">Change my answer</button></div> : <><div className="flex flex-wrap gap-2">{curatorInterview.question?.choices.map(choice => <button key={choice.id} type="button" onClick={() => handleCuratorInterview('answer', choice.label)} disabled={updatingCuratorInterview || curatorInterview.question?.actionable === false} className="rounded border border-violet-300 bg-violet-50 px-3 py-2 text-xs font-bold text-violet-900 disabled:opacity-50">{choice.label}</button>)}</div><form onSubmit={event => { event.preventDefault(); if (curatorReply.trim()) handleCuratorInterview('answer', curatorReply); }} className="flex flex-col gap-2 sm:flex-row"><label className="sr-only" htmlFor="curator-reply">Your answer</label><input id="curator-reply" value={curatorReply} onChange={event => setCuratorReply(event.target.value)} placeholder="Or type your answer" className="min-w-0 flex-1 rounded border border-slate-300 px-3 py-2 text-sm" disabled={updatingCuratorInterview || curatorInterview.question?.actionable === false} /><button type="submit" disabled={updatingCuratorInterview || !curatorReply.trim() || curatorInterview.question?.actionable === false} className="rounded bg-violet-700 px-3 py-2 text-xs font-bold text-white disabled:opacity-50">Send</button></form><div className="flex gap-2"><button type="button" onClick={() => handleCuratorInterview('skip')} disabled={updatingCuratorInterview} className="text-xs font-semibold text-slate-600 underline disabled:opacity-50">Skip for now</button><span className="text-xs text-slate-500">You can resume later from this page.</span></div></>}
+                          {curatorInterview.saved_message && <p className="rounded-lg border border-emerald-200 bg-emerald-50 p-2 text-xs text-emerald-900">{curatorInterview.saved_message}</p>}
+                        </div>}
+                      </article>
 
                       <details className="mt-3 rounded-lg border border-slate-200 bg-white p-3 text-[10px] text-slate-600"><summary className="cursor-pointer font-bold text-slate-800">Technical details for support</summary><p className="mt-2">The owner view intentionally hides internal identifiers and validation data. Current check: {latest?.finding_count ?? 0} findings, {latest?.created_proposals ?? 0} new review proposals, AI status {latest?.ai_helper_status || 'not checked'}.</p>{unresolved.map(item => <p key={item.id} className="mt-1 break-all">{item.id} · {item.finding_type} · {item.records.map(record => `${record.id} r${record.revision}`).join(', ')} · {item.reason_codes.join(', ')}</p>)}</details>
                     </>;
