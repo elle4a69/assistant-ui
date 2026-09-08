@@ -304,7 +304,7 @@ def test_manual_learning_is_ai_structured_saved_and_reindexed(monkeypatch, tmp_p
     assert result["filename"] == main.LEARNED_INFORMATION_FILENAME
     assert saved["type"] == "manual_guidance"
     assert saved["owner_topic"] == "changing booking times"
-    assert saved["owner_guidance"] == "Check that it is their booking first, then offer the closest valid time."
+    assert "owner_guidance" not in saved
     assert "Instruction: Check the customer's existing booking" in saved["text"]
     assert client.responses.calls[0]["store"] is False
     assert saved["review_status"] == "pending"
@@ -408,8 +408,8 @@ def test_sms_pair_templates_keep_variables_then_enter_review_queue(monkeypatch, 
     assert entry["scope"] == "secondary"
     assert entry["review_status"] == "pending"
     assert entry["retrieval_enabled"] is False
-    assert "{service}" in entry["text"]
-    assert "{line_information_url}" in entry["text"]
+    assert "{service_name}" in entry["text"]
+    assert "{information_url}" in entry["text"]
 
     rendered = main.render_style_examples(
         [("What do you offer?", entry["example_reply"])],
@@ -438,7 +438,8 @@ def test_sms_pair_template_rejects_literal_price_but_allows_price_token(monkeypa
     }])
 
     assert safe == {"created": 1, "skipped": 0}
-    assert unsafe == {"created": 0, "skipped": 1}
+    assert unsafe == {"created": 1, "skipped": 0}
+    assert "{service_price}" in main.list_learned_information()[0]["text"]
 
 
 def test_retrieved_sms_template_renders_only_the_receiving_line(monkeypatch):

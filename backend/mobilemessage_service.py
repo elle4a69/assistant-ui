@@ -101,6 +101,15 @@ def save_accounts_config(updated_accounts: Dict[str, Dict[str, Any]]) -> bool:
         for key, config in updated_accounts.items():
             if key in ACCOUNT_KEYS:
                 accounts.setdefault(key, {}).update(config)
+        enabled_senders = [
+            normalize_sms_destination(str(config.get("sender", "")))
+            for config in accounts.values()
+            if config.get("enabled")
+        ]
+        enabled_senders = [sender for sender in enabled_senders if sender]
+        if len(enabled_senders) != len(set(enabled_senders)):
+            print("MobileMessage configuration rejected: enabled accounts share a sender.")
+            return False
         os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump({"accounts": accounts}, f, indent=2)
@@ -115,11 +124,12 @@ def matched_account_key_for_inbound_number(to_phone: str) -> Optional[str]:
     destination = normalize_sms_destination(to_phone)
     if not destination:
         return None
+    matches = []
     for key, config in load_accounts_config().items():
         sender = normalize_sms_destination(str(config.get("sender", "")))
         if config.get("enabled") and sender == destination:
-            return key
-    return None
+            matches.append(key)
+    return matches[0] if len(matches) == 1 else None
 
 
 def account_key_for_inbound_number(to_phone: str) -> str:

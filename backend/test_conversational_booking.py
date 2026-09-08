@@ -33,15 +33,16 @@ class FakeCalendar:
     def get_busy_slots(self, start, end):
         return self.busy
 
-    def get_customer_bookings(self, phone, start, end, db=None):
+    def get_customer_bookings(self, phone, start, end, sms_account_key, db=None):
         return self.existing
 
-    def create_booking(self, summary, start, end, customer_phone):
+    def create_booking(self, summary, start, end, customer_phone, sms_account_key):
         self.created.append({
             "summary": summary,
             "start": start,
             "end": end,
             "customer_phone": customer_phone,
+            "sms_account_key": sms_account_key,
         })
         return True
 
@@ -190,6 +191,7 @@ def test_proposal_then_later_confirmation_books_without_a_web_form(tmp_path, mon
     assert len(calendar.created) == 1
     assert calendar.created[0]["summary"] == "Example Customer - 60 minute massage (Tori)"
     assert calendar.created[0]["end"] - calendar.created[0]["start"] == timedelta(minutes=60)
+    assert calendar.created[0]["sms_account_key"] == "primary"
     db.close()
 
 

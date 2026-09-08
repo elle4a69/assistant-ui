@@ -154,11 +154,17 @@ def test_new_inbound_restores_only_automatic_taken_over_state(monkeypatch):
     ))
     db.commit()
     monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "load_accounts_config",
+        lambda: {"primary": {"sender": "61400000010", "enabled": True}},
+    )
 
     for suffix, phone in (("automatic", "+61400000101"), ("explicit", "+61400000102")):
         main.webhook_sms(
             WebhookSMSInput.model_validate({
                 "from": phone,
+                "to": "61400000010",
                 "body": "New inbound",
                 "providerMessageId": f"provider-{suffix}",
                 "receivedAt": now.isoformat(),
@@ -217,6 +223,7 @@ def test_catch_up_endpoint_sends_one_reply_for_recent_message(monkeypatch):
     )
     monkeypatch.setattr(main.mobilemessage_service, "delivery_error", lambda _result: None)
     monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
 
     result = catch_up_missed_messages(db)
     assert result == {

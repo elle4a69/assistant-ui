@@ -172,6 +172,7 @@ def test_availability_starts_now_and_includes_customer_booking_context(monkeypat
     db.add(CalendarEvent(
         id="owned-booking",
         customer_phone=thread.customer_phone,
+        sms_account_key="primary",
         summary="Luka - 30 minutes",
         start_time=datetime(2026, 8, 11, 15, 45),
         end_time=datetime(2026, 8, 11, 16, 15),
@@ -211,6 +212,7 @@ def test_contradiction_of_existing_booking_is_not_sent(monkeypatch):
     db.add(CalendarEvent(
         id="owned-booking",
         customer_phone=thread.customer_phone,
+        sms_account_key="primary",
         summary="Luka - 30 minutes",
         start_time=datetime(2026, 8, 11, 15, 45),
         end_time=datetime(2026, 8, 11, 16, 15),
