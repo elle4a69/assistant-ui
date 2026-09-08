@@ -2755,12 +2755,12 @@ def has_unsafe_literal_learning_detail(text: str) -> bool:
         r"\b(?:price|cost|rate)\s*(?:is|:|of)?\s*\$?\s*\d",
         r"\b(?:cash|deposit)\b",
         r"\b(?:today|tomorrow)\b",
-        r"\b\d{1,2}(?::\d{2})?\s?(?:am|pm)\b",
         r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
         r"\b(?:address|directions?)\s*(?:is|:)",
-        r"\b(?:i(?:'m| am)|we(?:'re| are)|there(?:'s| is))\s+(?:available|availability)\b",
     )
-    return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in literal_patterns)
+    # Keep curator and learning safeguards aligned: merely discussing how to
+    # check availability is safe; claiming a concrete slot is not.
+    return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in literal_patterns) or bool(_curator_dynamic_claim_detail(normalized))
 
 
 def approve_learned_information_entry(entry_id: str) -> Dict[str, Any]:
@@ -3171,6 +3171,12 @@ KNOWLEDGE_CURATOR_ACTIONS = {
     "merge_duplicate",
 }
 KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES = {"proposed", "accepted"}
+KNOWLEDGE_CURATOR_RESOLUTIONS = {
+    "keep_all_examples", "select_current_rule", "create_merged_draft", "needs_manual_investigation",
+    "keep_both_distinct", "create_consolidation_draft", "create_metadata_repair_draft",
+    "add_safe_replacement_draft", "not_an_issue", "dismiss_for_now",
+}
+KNOWLEDGE_CURATOR_CONTEXTUAL_SOURCE_MARKERS = ("sms", "pair", "staff-edited", "staff_edited")
 
 
 def _openai_error_code(exc: Exception) -> str:
@@ -3201,7 +3207,7 @@ def is_openai_quota_exhausted(exc: Exception) -> bool:
 
 
 def _curator_empty_state() -> Dict[str, Any]:
-    return {"version": 1, "runs": [], "proposals": []}
+    return {"version": 2, "runs": [], "proposals": []}
 
 
 def _bound_curator_proposals(proposals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -3220,22 +3226,210 @@ def _load_curator_state() -> Dict[str, Any]:
         return _curator_empty_state()
     if not isinstance(state, dict):
         return _curator_empty_state()
+    # Version 1 had the same safe proposal identity but no response-only
+    # previews.  Read it losslessly enough for audit history, while dropping
+    # anything outside the bounded, content-minimised state contract.
     runs = state.get("runs") if isinstance(state.get("runs"), list) else []
     proposals = state.get("proposals") if isinstance(state.get("proposals"), list) else []
-    return {"version": 1, "runs": runs[-KNOWLEDGE_CURATOR_MAX_RUNS:], "proposals": _bound_curator_proposals(proposals)}
+    normalized = [_curator_safe_state_proposal(item) for item in proposals if isinstance(item, dict)]
+    normalized_runs = [_curator_safe_state_run(item) for item in runs if isinstance(item, dict)]
+    return {"version": 2, "runs": normalized_runs[-KNOWLEDGE_CURATOR_MAX_RUNS:], "proposals": _bound_curator_proposals(normalized)}
+
+
+def _curator_safe_state_run(run: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep migration history bounded and free of record/source payloads."""
+    counts = run.get("finding_counts") if isinstance(run.get("finding_counts"), dict) else {}
+    def bounded_count(value: Any) -> int:
+        try:
+            return min(100000, max(0, int(value)))
+        except (TypeError, ValueError):
+            return 0
+    return {
+        "id": str(run.get("id") or "")[:160],
+        "status": str(run.get("status") or "")[:80],
+        "error_code": str(run.get("error_code") or "")[:120] or None,
+        "message": str(run.get("message") or "")[:500],
+        "started_at": str(run.get("started_at") or "")[:64],
+        "completed_at": str(run.get("completed_at") or "")[:64],
+        "finding_counts": {str(key)[:80]: bounded_count(value) for key, value in counts.items() if isinstance(value, int) and not isinstance(value, bool)},
+        "finding_count": bounded_count(run.get("finding_count")),
+        "created_proposals": bounded_count(run.get("created_proposals")),
+    }
+
+
+def _curator_safe_state_proposal(proposal: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop accidental response-only source content before durable storage."""
+    allowed = {
+        "id", "fingerprint", "canonical_key", "scope", "finding_type", "records", "reason_codes", "evidence",
+        "proposed_action", "replacement_draft", "confidence", "owner_questions", "status", "created_at", "updated_at",
+        "last_seen_at", "draft_entry_id", "resolution", "selected_record_ids", "malformed_references", "malformed_reference_count",
+    }
+    safe = {key: value for key, value in proposal.items() if key in allowed}
+    # Inspect the original container before normalising it.  Dropping a bad
+    # ref would turn a mixed proposal into an actionable subset.
+    safe_refs, malformed = _curator_sanitize_record_references(proposal.get("records"))
+    # A prior safe migration no longer retains the malformed payload itself;
+    # retain its generated evidence too, but never accept a caller-supplied
+    # count as proof that no malformed reference existed.
+    persisted_malformed = _curator_safe_malformed_references(proposal.get("malformed_references"))
+    if isinstance(proposal.get("records"), list) and not proposal.get("records") and persisted_malformed:
+        malformed = []
+    malformed.extend(persisted_malformed)
+    unique_malformed = {(item.get("position"), item.get("reason_code")): item for item in malformed}
+    safe["records"] = safe_refs[:20]
+    safe["malformed_references"] = list(unique_malformed.values())[:20]
+    safe["malformed_reference_count"] = len(safe["malformed_references"])
+    details = safe.get("evidence") if isinstance(safe.get("evidence"), dict) else {}
+    safe["evidence"] = {
+        "reason_codes": [str(code)[:120] for code in details.get("reason_codes", [])][:10],
+        "record_count": min(20, max(0, int(details.get("record_count") or 0))),
+        **{key: details[key] for key in ("missing_fields", "invalid_fields", "dynamic_type", "same_applicability", "applicability_status", "source_role") if key in details},
+    }
+    safe["selected_record_ids"] = [str(value)[:160] for value in safe.get("selected_record_ids", [])][:20]
+    if safe.get("resolution") not in KNOWLEDGE_CURATOR_RESOLUTIONS:
+        safe.pop("resolution", None)
+    return safe
+
+
+KNOWLEDGE_CURATOR_MALFORMED_REFERENCE_REASONS = {
+    "records_not_list", "empty_records", "reference_not_object", "missing_reference_id", "invalid_reference_revision",
+}
+
+
+def _curator_sanitize_record_references(value: Any) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Produce usable refs and content-free evidence for every bad ref."""
+    if not isinstance(value, list):
+        return [], [{"position": None, "reference_status": "malformed", "reason_code": "records_not_list"}]
+    if not value:
+        return [], [{"position": None, "reference_status": "malformed", "reason_code": "empty_records"}]
+    valid, malformed = [], []
+    for position, ref in enumerate(value):
+        reason = ""
+        if not isinstance(ref, dict):
+            reason = "reference_not_object"
+        elif not str(ref.get("id") or "").strip():
+            reason = "missing_reference_id"
+        elif isinstance(ref.get("revision"), bool) or not isinstance(ref.get("revision"), int) or int(ref["revision"]) < 1:
+            reason = "invalid_reference_revision"
+        if reason:
+            malformed.append({"position": position, "reference_status": "malformed", "reason_code": reason})
+        else:
+            valid.append({"id": str(ref["id"])[:160], "revision": int(ref["revision"])})
+    return valid, malformed
+
+
+def _curator_safe_malformed_references(value: Any) -> List[Dict[str, Any]]:
+    """Read only prior generated metadata, never arbitrary malformed input."""
+    if not isinstance(value, list):
+        return []
+    safe = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        reason = str(item.get("reason_code") or "")
+        position = item.get("position")
+        if reason not in KNOWLEDGE_CURATOR_MALFORMED_REFERENCE_REASONS:
+            continue
+        if position is not None and (isinstance(position, bool) or not isinstance(position, int) or position < 0):
+            continue
+        safe.append({"position": position, "reference_status": "malformed", "reason_code": reason})
+    return safe
 
 
 def _save_curator_state(state: Dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(KNOWLEDGE_CURATOR_STATE_PATH), exist_ok=True)
     bounded = {
-        "version": 1,
-        "runs": list(state.get("runs", []))[-KNOWLEDGE_CURATOR_MAX_RUNS:],
-        "proposals": _bound_curator_proposals(list(state.get("proposals", []))),
+        "version": 2,
+        "runs": [_curator_safe_state_run(item) for item in state.get("runs", []) if isinstance(item, dict)][-KNOWLEDGE_CURATOR_MAX_RUNS:],
+        "proposals": _bound_curator_proposals([_curator_safe_state_proposal(item) for item in state.get("proposals", []) if isinstance(item, dict)]),
     }
     temporary = f"{KNOWLEDGE_CURATOR_STATE_PATH}.{uuid.uuid4().hex}.tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(bounded, handle, ensure_ascii=False, sort_keys=True)
     os.replace(temporary, KNOWLEDGE_CURATOR_STATE_PATH)
+
+
+def _curator_record_preview(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Authenticated Settings-only projection; deliberately never persisted."""
+    raw = record.get("_raw") if isinstance(record.get("_raw"), dict) else record
+    return {
+        "id": str(record.get("id") or ""), "revision": int(record.get("revision") or 1),
+        "scope": str(record.get("scope") or "internal"), "sms_line": str(record.get("sms_account_key") or "internal"),
+        "source_type": str(record.get("source_type") or ""), "topic": str(raw.get("topic") or ""),
+        "canonical_key": str(record.get("canonical_key") or ""),
+        "customer_message": str(raw.get("customer_message") or raw.get("customer") or raw.get("question") or ""),
+        "applies_when": str(raw.get("applies_when") or ""),
+        "approved_reply": str(raw.get("approved_reply") or raw.get("reply") or raw.get("instruction") or raw.get("example_reply") or ""),
+        "instruction": str(raw.get("instruction") or ""), "example_reply": str(raw.get("example_reply") or ""),
+        "knowledge_text": str(record.get("text") or ""), "status": str(record.get("status") or ""),
+        "review_status": str(record.get("review_status") or ""), "retrieval_enabled": _knowledge_bool(record.get("retrieval_enabled")),
+        "created_at": str(record.get("created_at") or ""), "updated_at": str(record.get("updated_at") or ""),
+        "metadata_issues": _curator_invalid_metadata_fields(record),
+    }
+
+
+def _curator_reference_statuses(proposal: Dict[str, Any], current: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Resolve refs exactly; never substitute a newer record for an old one."""
+    refs = proposal.get("records")
+    valid_refs, malformed = _curator_sanitize_record_references(refs)
+    persisted_malformed = _curator_safe_malformed_references(proposal.get("malformed_references"))
+    if isinstance(refs, list) and not refs and persisted_malformed:
+        malformed = []
+    malformed.extend(persisted_malformed)
+    statuses: List[Dict[str, Any]] = []
+    for ref in valid_refs:
+        record_id, expected = str(ref["id"])[:160], int(ref["revision"])
+        record = current.get(record_id)
+        if not record:
+            statuses.append({"reference_status": "missing", "id": record_id, "expected_revision": expected, "current_revision": None})
+            continue
+        actual = int(record.get("revision") or record.get("version") or 1)
+        if actual != expected:
+            statuses.append({"reference_status": "stale", "id": record_id, "expected_revision": expected, "current_revision": actual})
+            continue
+        statuses.append({"reference_status": "current", "id": record_id, "expected_revision": expected, "current_revision": actual, "_record": record})
+    for item in {(entry.get("position"), entry.get("reason_code")): entry for entry in malformed}.values():
+        statuses.append({"reference_status": "malformed", "id": "", "expected_revision": None, "current_revision": None, "position": item.get("position"), "reason_code": item.get("reason_code")})
+    return statuses
+
+
+def _curator_reference_status_preview(item: Dict[str, Any]) -> Dict[str, Any]:
+    preview = {key: item.get(key) for key in ("reference_status", "id", "expected_revision", "current_revision")}
+    if item.get("reference_status") == "malformed":
+        preview["position"] = item.get("position")
+        preview["reason_code"] = item.get("reason_code")
+    preview["revision"] = item.get("expected_revision") or 0
+    return preview
+
+
+def _present_curator_proposal(proposal: Dict[str, Any], current: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Attach response-only previews and excerpts to a durable safe proposal."""
+    result = dict(proposal)
+    reference_statuses = _curator_reference_statuses(proposal, current)
+    referenced = [item.get("_record") for item in reference_statuses if item.get("reference_status") == "current"]
+    result["record_previews"] = [
+        {"reference_status": "current", **_curator_record_preview(item["_record"])} if item.get("reference_status") == "current"
+        else _curator_reference_status_preview(item)
+        for item in reference_statuses
+    ]
+    result["actionable"] = all(item.get("reference_status") == "current" for item in reference_statuses)
+    evidence = dict(result.get("evidence") or {})
+    for item in referenced:
+        if item and evidence.get("dynamic_type"):
+            detail = _curator_dynamic_claim_detail(str(item.get("text") or ""))
+            if detail and detail["kind"] == evidence["dynamic_type"]:
+                evidence["trigger_excerpt"] = detail["excerpt"]
+                break
+    result["evidence"] = evidence
+    return result
+
+
+def _present_curator_state(state: Dict[str, Any], *, unresolved_only: bool = False) -> Dict[str, Any]:
+    current = {str(item.get("id")): item for item in _curator_records()}
+    proposals = state.get("proposals", [])
+    if unresolved_only:
+        proposals = [item for item in proposals if item.get("status") in KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES]
+    return {"runs": list(reversed(state.get("runs", []))), "proposals": [_present_curator_proposal(item, current) for item in reversed(proposals)]}
 
 
 def _curator_records() -> List[Dict[str, Any]]:
@@ -3254,15 +3448,78 @@ def _curator_records() -> List[Dict[str, Any]]:
     return sorted(records.values(), key=lambda item: item["id"])
 
 
+def _curator_dynamic_claim_detail(text: str) -> Optional[Dict[str, str]]:
+    """Find an actual volatile assertion, never an availability discussion.
+
+    This deliberately excludes template variables and instructions such as
+    "check live availability".  It is shared with the durable-learning gate.
+    """
+    value = re.sub(r"\{\{?[^{}]+\}?\}", "", str(text or ""))
+    patterns = (
+        ("price", r"\$\s*\d+(?:\.\d{1,2})?|\b(?:price|cost|rate)\b[^\n]{0,24}\b\d+(?:\.\d{1,2})?\b"),
+        ("duration", r"\b\d+\s*(?:minutes?|mins?|hours?|hrs?)\b"),
+        # Concrete dates/times are volatile only where the wording asserts an
+        # appointment/slot state.  Generic operational instructions remain safe.
+        ("availability", r"\b(?:available|availability|free|open)\b[^\n]{0,50}\b(?:slot|appointment|today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}[/-]\d{1,2})\b|\b(?:slot|appointment)\b[^\n]{0,35}\b(?:is|are|was|were)\s+(?:available|free|open)\b|\b(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}[/-]\d{1,2})\b[^\n]{0,35}\b(?:is|are|was|were)\s+(?:available|free|open)\b|\b(?:we(?:'re| are)|i(?:'m| am)|there(?:'s| is))\s+(?:an?\s+)?(?:available|free|open)\b[^\n]{0,55}\b(?:slot|appointment|today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}[/-]\d{1,2})\b"),
+        ("booking_time", r"\b(?:booked|booking|appointment)\b[^\n]{0,45}\b(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}[/-]\d{1,2})\b"),
+    )
+    for kind, pattern in patterns:
+        match = re.search(pattern, value, re.IGNORECASE)
+        if match:
+            return {"kind": kind, "excerpt": re.sub(r"\s+", " ", match.group(0)).strip()[:240]}
+    return None
+
+
 def _curator_dynamic_claim_kind(text: str) -> str:
-    value = str(text or "")
-    if re.search(r"\$\s*\d|\b(?:price|cost|rate)\b[^\n]{0,30}\d", value, re.IGNORECASE):
-        return "price"
-    if re.search(r"\b\d+\s*(?:minutes?|mins?|hours?|hrs?)\b", value, re.IGNORECASE):
-        return "duration"
-    if re.search(r"\b(?:available|availability|free slot|open slot)\b|\b\d{1,2}(?::\d{2})?\s?(?:am|pm)\b", value, re.IGNORECASE):
-        return "availability"
-    return ""
+    detail = _curator_dynamic_claim_detail(text)
+    return str(detail["kind"]) if detail else ""
+
+
+def _curator_authority_role(item: Dict[str, Any]) -> str:
+    """Semantic role for deterministic collisions, never a raw source label."""
+    source = str(item.get("source_type") or item.get("type") or "").casefold()
+    return "contextual_example" if any(marker in source for marker in KNOWLEDGE_CURATOR_CONTEXTUAL_SOURCE_MARKERS) else "authoritative_rule"
+
+
+# Kept as a private compatibility alias for any integrations using Phase 2.
+_curator_source_role = _curator_authority_role
+
+
+def _curator_applicability_key(item: Dict[str, Any]) -> str:
+    value = str(item.get("applies_when") or "").strip().casefold()
+    return re.sub(r"[^a-z0-9]+", " ", value).strip()
+
+
+def _curator_invalid_metadata_fields(item: Dict[str, Any]) -> Dict[str, List[str]]:
+    raw = item.get("_raw") if isinstance(item.get("_raw"), dict) else item
+    missing, invalid = [], []
+    required = ("id", "text", "created_at")
+    for field in required:
+        if not str(raw.get(field) or "").strip():
+            missing.append(field)
+    if not str(raw.get("updated_at") or raw.get("created_at") or "").strip():
+        missing.append("updated_at")
+    if not str(item.get("canonical_key") or "").strip() or not item.get("_canonical_key_explicit", True):
+        missing.append("canonical_key")
+    if str(raw.get("scope") or raw.get("sms_account_key") or "") not in {"shared", "primary", "secondary", "internal"}:
+        invalid.append("scope")
+    if str(raw.get("status") or "") not in KNOWLEDGE_RECORD_STATUSES:
+        invalid.append("status")
+    if str(raw.get("review_status") or "") not in LEARNING_REVIEW_STATUSES:
+        invalid.append("review_status")
+    if not _curator_valid_revision(raw.get("revision") or raw.get("version")):
+        invalid.append("revision")
+    if raw.get("created_at") and not _knowledge_timestamp(raw.get("created_at")):
+        invalid.append("created_at")
+    if raw.get("updated_at") and not _knowledge_timestamp(raw.get("updated_at")):
+        invalid.append("updated_at")
+    if raw.get("effective_from") and not _knowledge_timestamp(raw.get("effective_from")):
+        invalid.append("effective_from")
+    if raw.get("effective_until") and not _knowledge_timestamp(raw.get("effective_until")):
+        invalid.append("effective_until")
+    if _knowledge_timestamp(raw.get("effective_from")) and _knowledge_timestamp(raw.get("effective_until")) and _knowledge_timestamp(raw.get("effective_from")) > _knowledge_timestamp(raw.get("effective_until")):
+        invalid.append("effective_period")
+    return {"missing_fields": sorted(set(missing)), "invalid_fields": sorted(set(invalid))}
 
 
 def _curator_valid_revision(value: Any) -> bool:
@@ -3280,6 +3537,7 @@ def _curator_finding(
     action: str,
     owner_question: str = "",
     replacement_draft: Optional[Dict[str, str]] = None,
+    evidence_details: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     record_refs = sorted(
         ({"id": str(item.get("id", ""))[:160], "revision": int(item.get("revision") or 1)} for item in records),
@@ -3306,7 +3564,9 @@ def _curator_finding(
         "finding_type": finding_type,
         "records": record_refs,
         "reason_codes": [reason_code],
-        "evidence": {"reason_codes": [reason_code], "record_count": len(record_refs)},
+        # This remains deliberately content-free.  Authenticated response
+        # presentation resolves previews and trigger excerpts on demand.
+        "evidence": {"reason_codes": [reason_code], "record_count": len(record_refs), **(evidence_details or {})},
         "proposed_action": action if action in KNOWLEDGE_CURATOR_ACTIONS else "ask_owner",
         "replacement_draft": replacement_draft,
         "confidence": "deterministic",
@@ -3335,28 +3595,12 @@ def inspect_knowledge_integrity(records: Optional[List[Dict[str, Any]]] = None, 
         if predecessor:
             children[predecessor].append(item)
 
-        raw = item.get("_raw") if isinstance(item.get("_raw"), dict) else item
-        invalid = (
-            not str(item.get("id") or "")
-            or not str(item.get("canonical_key") or "")
-            or not item.get("_canonical_key_explicit", True)
-            or not str(item.get("text") or "")
-            or str(raw.get("scope") or raw.get("sms_account_key") or "") not in {"shared", "primary", "secondary", "internal"}
-            or str(raw.get("status") or "") not in KNOWLEDGE_RECORD_STATUSES
-            or str(raw.get("review_status") or "") not in LEARNING_REVIEW_STATUSES
-            or not _curator_valid_revision(raw.get("revision") or raw.get("version"))
-            or not _knowledge_timestamp(raw.get("created_at"))
-            or not _knowledge_timestamp(raw.get("updated_at") or raw.get("created_at"))
-            or (raw.get("effective_from") and not _knowledge_timestamp(raw.get("effective_from")))
-            or (raw.get("effective_until") and not _knowledge_timestamp(raw.get("effective_until")))
-            or (
-                _knowledge_timestamp(raw.get("effective_from")) is not None
-                and _knowledge_timestamp(raw.get("effective_until")) is not None
-                and _knowledge_timestamp(raw.get("effective_from")) > _knowledge_timestamp(raw.get("effective_until"))
-            )
-        )
-        if invalid:
-            findings.append(_curator_finding("invalid_metadata", [item], reason_code="curator_invalid_metadata", action="quarantine_for_review"))
+        metadata_issues = _curator_invalid_metadata_fields(item)
+        if metadata_issues["missing_fields"] or metadata_issues["invalid_fields"]:
+            findings.append(_curator_finding(
+                "invalid_metadata", [item], reason_code="curator_invalid_metadata", action="quarantine_for_review",
+                evidence_details=metadata_issues,
+            ))
 
         effective_from = _knowledge_timestamp(item.get("effective_from"))
         effective_until = _knowledge_timestamp(item.get("effective_until"))
@@ -3366,15 +3610,20 @@ def inspect_knowledge_integrity(records: Optional[List[Dict[str, Any]]] = None, 
             findings.append(_curator_finding("expired_record", [item], reason_code="curator_expired_record", action="quarantine_for_review"))
 
         if item.get("review_status") == "approved":
-            dynamic_kind = _curator_dynamic_claim_kind(str(item.get("text") or ""))
-            if dynamic_kind:
+            dynamic_detail = _curator_dynamic_claim_detail(str(item.get("text") or ""))
+            if dynamic_detail:
+                dynamic_kind = dynamic_detail["kind"]
                 instruction = {
                     "price": "Use the current configured service price and duration from Settings.",
                     "duration": "Use the current configured service price and duration from Settings.",
                     "availability": "Check the live calendar before discussing available dates or times.",
+                    "booking_time": "Check the live calendar before discussing booking dates or times.",
                 }[dynamic_kind]
                 draft = {"topic": str(item.get("canonical_key") or "Dynamic authority"), "instruction": instruction, "text": instruction}
-                findings.append(_curator_finding("literal_dynamic_authority", [item], reason_code=f"curator_literal_{dynamic_kind}", action="draft_supersession", replacement_draft=draft))
+                findings.append(_curator_finding(
+                    "literal_dynamic_authority", [item], reason_code=f"curator_literal_{dynamic_kind}", action="draft_supersession",
+                    replacement_draft=draft, evidence_details={"dynamic_type": dynamic_kind},
+                ))
 
         if item.get("scope") == "internal" or item.get("category") == "internal_or_uncertain":
             findings.append(_curator_finding(
@@ -3382,29 +3631,47 @@ def inspect_knowledge_integrity(records: Optional[List[Dict[str, Any]]] = None, 
                 owner_question="Should this record be corrected and assigned to a specific SMS line, or remain internal?",
             ))
 
-    # Exact duplicates and incompatible independent active authorities.
+    # Exact duplicates and incompatible independent active authorities.  A
+    # shared broad topic is not a collision identity: message pairs and staff
+    # edits are contextual examples, and authority requires a specific shared
+    # applicability condition as well as a matching role/source type.
     by_exact: Dict[tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
     by_key: Dict[tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    by_collision: Dict[tuple[str, str, str, str], List[Dict[str, Any]]] = defaultdict(list)
     for item in items:
         key = (str(item.get("scope")), str(item.get("canonical_key")))
         by_key[key].append(item)
         normalized_text = re.sub(r"\s+", " ", str(item.get("text") or "").strip().casefold())
         by_exact[(key[0], key[1], normalized_text)].append(item)
+        applicability = _curator_applicability_key(item)
+        authority_role = _curator_authority_role(item)
+        if authority_role == "authoritative_rule" and applicability:
+            by_collision[(key[0], key[1], authority_role, applicability)].append(item)
     for group in by_exact.values():
         if len(group) > 1:
             findings.append(_curator_finding("exact_duplicate", group, reason_code="curator_exact_duplicate", action="merge_duplicate"))
     for group in by_key.values():
-        active = [item for item in group if item.get("status") == "active" and item.get("review_status") == "approved" and _knowledge_bool(item.get("retrieval_enabled"))]
-        if len(active) > 1 and len({str(item.get("text") or "").strip() for item in active}) > 1:
-            findings.append(_curator_finding(
-                "incompatible_active_records", active, reason_code="curator_incompatible_active", action="ask_owner",
-                owner_question="Which of these record revisions is the current business rule?",
-            ))
+        active_authorities = [item for item in group if item.get("status") == "active" and item.get("review_status") == "approved" and _knowledge_bool(item.get("retrieval_enabled")) and _curator_authority_role(item) == "authoritative_rule"]
+        if len(active_authorities) > 1:
+            insufficient = [item for item in active_authorities if len(_curator_applicability_key(item)) < 3]
+            for item in insufficient:
+                findings.append(_curator_finding(
+                    "invalid_metadata", [item], reason_code="curator_missing_applicability", action="quarantine_for_review",
+                    evidence_details={"missing_fields": ["applies_when"], "invalid_fields": [], "applicability_status": "insufficient_for_collision"},
+                ))
         independent = [item for item in group if not item.get("supersedes_id")]
         if len(independent) > 1 and len({int(item.get("revision") or 1) for item in independent}) > 1:
             findings.append(_curator_finding(
                 "apparently_superseded", independent, reason_code="curator_apparent_supersession", action="ask_owner",
                 owner_question="Should the newer revision supersede the older record, or are both still required?",
+            ))
+    for group in by_collision.values():
+        active = [item for item in group if item.get("status") == "active" and item.get("review_status") == "approved" and _knowledge_bool(item.get("retrieval_enabled"))]
+        if len(active) > 1 and len({str(item.get("text") or "").strip() for item in active}) > 1:
+            findings.append(_curator_finding(
+                "incompatible_active_records", active, reason_code="curator_incompatible_active", action="ask_owner",
+                owner_question="These authoritative rules share the same scope, subject, source role and applicability. Which current rule should staff review?",
+                evidence_details={"same_applicability": True, "applicability_status": "same_normalized_condition", "source_role": "authoritative_rule"},
             ))
 
     for predecessor, successors in children.items():
@@ -3519,6 +3786,14 @@ def run_knowledge_curator() -> Dict[str, Any]:
         state = _load_curator_state()
         now_text = datetime.utcnow().isoformat() + "Z"
         by_fingerprint = {item.get("fingerprint"): item for item in state["proposals"]}
+        observed_fingerprints = {item["fingerprint"] for item in findings}
+        for prior in state["proposals"]:
+            if prior.get("status") in KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES and prior.get("fingerprint") not in observed_fingerprints:
+                # Reconciliation closes only the curator card. It never edits
+                # an existing record or any quarantined draft.
+                prior["status"] = "resolved_no_longer_detected"
+                prior["resolution"] = "dismiss_for_now"
+                prior["updated_at"] = now_text
         created = 0
         for finding in findings:
             existing = by_fingerprint.get(finding["fingerprint"])
@@ -3557,7 +3832,7 @@ def run_knowledge_curator() -> Dict[str, Any]:
         }
         state["runs"].append(run)
         _save_curator_state(state)
-        return {"run": run, "proposals": [item for item in state["proposals"] if item.get("status") in KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES]}
+        return {"run": run, "proposals": _present_curator_state(state, unresolved_only=True)["proposals"]}
     finally:
         KNOWLEDGE_CURATOR_LOCK.release()
 
@@ -3565,15 +3840,12 @@ def run_knowledge_curator() -> Dict[str, Any]:
 def get_knowledge_curator_state() -> Dict[str, Any]:
     with KNOWLEDGE_CURATOR_LOCK:
         state = _load_curator_state()
-    return {
-        "runs": list(reversed(state["runs"])),
-        "proposals": list(reversed(state["proposals"])),
-    }
+    return _present_curator_state(state)
 
 
 def _curator_proposal_is_current(proposal: Dict[str, Any]) -> bool:
-    current = {str(item.get("id")): int(item.get("revision") or item.get("version") or 1) for item in _curator_records()}
-    return all(current.get(str(ref.get("id"))) == int(ref.get("revision") or 1) for ref in proposal.get("records", []))
+    current = {str(item.get("id")): item for item in _curator_records()}
+    return all(item.get("reference_status") == "current" for item in _curator_reference_statuses(proposal, current))
 
 
 def transition_knowledge_curator_proposal(proposal_id: str, status_value: str) -> Dict[str, Any]:
@@ -3586,6 +3858,8 @@ def transition_knowledge_curator_proposal(proposal_id: str, status_value: str) -
             raise KeyError(proposal_id)
         if proposal.get("status") != "proposed":
             raise ValueError("Only unresolved proposed items can change state.")
+        if not _curator_proposal_is_current(proposal):
+            raise ValueError("The involved record revisions changed or are unavailable; run a fresh audit.")
         proposal["status"] = status_value
         proposal["updated_at"] = datetime.utcnow().isoformat() + "Z"
         _save_curator_state(state)
@@ -3593,31 +3867,71 @@ def transition_knowledge_curator_proposal(proposal_id: str, status_value: str) -
 
 
 def accept_knowledge_curator_proposal(proposal_id: str) -> Dict[str, Any]:
+    """Backward-compatible safe-replacement action used by Phase 2 clients."""
+    return resolve_knowledge_curator_proposal(proposal_id, "add_safe_replacement_draft")
+
+
+def resolve_knowledge_curator_proposal(proposal_id: str, resolution: str, selected_record_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Resolve a card without ever mutating current knowledge authority."""
+    if resolution not in KNOWLEDGE_CURATOR_RESOLUTIONS:
+        raise ValueError("Unknown curator resolution.")
+    selected = [str(value) for value in (selected_record_ids or []) if str(value).strip()]
     with KNOWLEDGE_CURATOR_LOCK:
         state = _load_curator_state()
         proposal = next((item for item in state["proposals"] if item.get("id") == proposal_id), None)
         if not proposal:
             raise KeyError(proposal_id)
-        if proposal.get("status") == "accepted" and proposal.get("draft_entry_id"):
+        if proposal.get("status") == "accepted" and proposal.get("draft_entry_id") and resolution == "add_safe_replacement_draft":
+            if not _curator_proposal_is_current(proposal):
+                raise ValueError("The involved record revisions changed or are unavailable; run a fresh audit.")
             return dict(proposal)
         if proposal.get("status") != "proposed":
-            raise ValueError("Only unresolved proposed items can be added to review.")
-        if proposal.get("proposed_action") not in {"draft_replacement", "draft_supersession"}:
-            raise ValueError("This proposal requires an owner answer and cannot create a draft.")
+            raise ValueError("Only unresolved proposed items can be resolved.")
         if not _curator_proposal_is_current(proposal):
             raise ValueError("The involved record revisions changed; run a fresh audit.")
         refs = proposal.get("records", [])
-        predecessor_id = str(refs[0].get("id")) if refs else ""
+        referenced_ids = {str(ref.get("id")) for ref in refs if isinstance(ref, dict)}
+        if len(selected) != len(set(selected)) or any(item not in referenced_ids for item in selected):
+            raise ValueError("Selected records must be current records referenced by this proposal.")
+        if resolution == "select_current_rule" and len(selected) != 1:
+            raise ValueError("Select exactly one current rule.")
+        draft_resolutions = {"create_merged_draft", "create_consolidation_draft", "create_metadata_repair_draft", "add_safe_replacement_draft"}
+        allowed_by_finding = {
+            "incompatible_active_records": {"keep_all_examples", "select_current_rule", "create_merged_draft", "needs_manual_investigation", "not_an_issue", "dismiss_for_now"},
+            "exact_duplicate": {"keep_both_distinct", "create_consolidation_draft", "needs_manual_investigation", "not_an_issue", "dismiss_for_now"},
+            "invalid_metadata": {"create_metadata_repair_draft", "needs_manual_investigation", "not_an_issue", "dismiss_for_now"},
+            "literal_dynamic_authority": {"add_safe_replacement_draft", "not_an_issue", "dismiss_for_now"},
+        }
+        allowed = allowed_by_finding.get(str(proposal.get("finding_type")), {"needs_manual_investigation", "not_an_issue", "dismiss_for_now"})
+        if resolution not in allowed:
+            raise ValueError("That resolution is not available for this finding.")
+
+        now_text = datetime.utcnow().isoformat() + "Z"
+        proposal["resolution"] = resolution
+        proposal["selected_record_ids"] = selected
+        if resolution not in draft_resolutions:
+            proposal["status"] = "resolved_not_an_issue" if resolution == "not_an_issue" else "resolved"
+            proposal["updated_at"] = now_text
+            _save_curator_state(state)
+            return dict(proposal)
+
         records = {str(item.get("id")): item for item in _curator_records()}
+        predecessor_id = str(refs[0].get("id")) if refs else ""
         predecessor = records.get(predecessor_id)
         if not predecessor:
-            raise ValueError("The proposed predecessor no longer exists.")
+            raise ValueError("The proposed record no longer exists.")
         draft_data = proposal.get("replacement_draft") if isinstance(proposal.get("replacement_draft"), dict) else {}
-        instruction = str(draft_data.get("instruction") or "Review this knowledge record and confirm the current durable business rule.")[:2000]
+        instruction_by_resolution = {
+            "create_merged_draft": "Create a staff-reviewed merged rule for the referenced records. Do not activate it until the separate approval gate confirms the business rule.",
+            "create_consolidation_draft": "Create a staff-reviewed consolidation draft for the referenced duplicate records. Do not activate it until separately approved.",
+            "create_metadata_repair_draft": "Repair the required metadata for the referenced record, then submit it through staff review. Do not activate it automatically.",
+        }
+        instruction = str(draft_data.get("instruction") if resolution == "add_safe_replacement_draft" else instruction_by_resolution.get(resolution, ""))[:2000]
+        if not instruction:
+            raise ValueError("This finding has no safe replacement draft.")
         if _curator_dynamic_claim_kind(instruction):
             raise ValueError("A curator draft cannot contain a literal dynamic value.")
         entry_id = f"curator-{proposal_id}"
-        now_text = datetime.utcnow().isoformat() + "Z"
         entry = {
             "id": entry_id,
             "type": "curator_proposal",
@@ -3634,7 +3948,7 @@ def accept_knowledge_curator_proposal(proposal_id: str) -> Dict[str, Any]:
             # A pending draft must not revoke live knowledge.  The actual
             # supersedes edge is written only in the final atomic approval.
             "supersedes_id": None,
-            "proposed_supersedes_id": predecessor_id,
+            "proposed_supersedes_id": predecessor_id if resolution == "add_safe_replacement_draft" else None,
             "revision": int(predecessor.get("revision") or 1) + 1,
             "version": int(predecessor.get("revision") or 1) + 1,
             "review_status": "pending",
@@ -3646,7 +3960,7 @@ def accept_knowledge_curator_proposal(proposal_id: str) -> Dict[str, Any]:
         _upsert_learned_information_entry(entry)
         proposal["status"] = "accepted"
         proposal["draft_entry_id"] = entry_id
-        proposal["updated_at"] = datetime.utcnow().isoformat() + "Z"
+        proposal["updated_at"] = now_text
         _save_curator_state(state)
         return dict(proposal)
 
@@ -14857,6 +15171,20 @@ def run_knowledge_curator_endpoint():
 def accept_knowledge_curator_proposal_endpoint(proposal_id: str):
     try:
         return {"status": "success", "proposal": accept_knowledge_curator_proposal(proposal_id)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Knowledge curator proposal not found.")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/settings/knowledge-curator/proposals/{proposal_id}/resolve")
+def resolve_knowledge_curator_proposal_endpoint(proposal_id: str, payload: Dict[str, Any]):
+    try:
+        resolution = str(payload.get("resolution") or "")
+        selected = payload.get("selected_record_ids")
+        if selected is not None and not isinstance(selected, list):
+            raise ValueError("selected_record_ids must be a list.")
+        return {"status": "success", "proposal": resolve_knowledge_curator_proposal(proposal_id, resolution, selected)}
     except KeyError:
         raise HTTPException(status_code=404, detail="Knowledge curator proposal not found.")
     except ValueError as exc:

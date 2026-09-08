@@ -809,6 +809,36 @@ export interface KnowledgeCuratorRecordRef {
   revision: number;
 }
 
+export interface KnowledgeCuratorRecordPreview extends KnowledgeCuratorRecordRef {
+  reference_status: 'current' | 'stale' | 'missing' | 'malformed';
+  expected_revision?: number | null;
+  current_revision?: number | null;
+  position?: number | null;
+  reason_code?: string;
+  scope?: string;
+  sms_line?: string;
+  source_type?: string;
+  topic?: string;
+  canonical_key?: string;
+  customer_message?: string;
+  applies_when?: string;
+  approved_reply?: string;
+  instruction?: string;
+  example_reply?: string;
+  knowledge_text?: string;
+  status?: string;
+  review_status?: string;
+  retrieval_enabled?: boolean;
+  created_at?: string;
+  updated_at?: string;
+  metadata_issues?: { missing_fields: string[]; invalid_fields: string[] };
+}
+
+export type KnowledgeCuratorResolution =
+  | 'keep_all_examples' | 'select_current_rule' | 'create_merged_draft' | 'needs_manual_investigation'
+  | 'keep_both_distinct' | 'create_consolidation_draft' | 'create_metadata_repair_draft'
+  | 'add_safe_replacement_draft' | 'not_an_issue' | 'dismiss_for_now';
+
 export interface KnowledgeCuratorProposal {
   id: string;
   fingerprint: string;
@@ -817,14 +847,18 @@ export interface KnowledgeCuratorProposal {
   finding_type: string;
   records: KnowledgeCuratorRecordRef[];
   reason_codes: string[];
-  evidence: { reason_codes: string[]; record_count: number };
+  evidence: { reason_codes: string[]; record_count: number; missing_fields?: string[]; invalid_fields?: string[]; dynamic_type?: string; same_applicability?: boolean; applicability_status?: string; source_role?: string; trigger_excerpt?: string };
   proposed_action: 'no_action' | 'ask_owner' | 'draft_replacement' | 'draft_supersession' | 'quarantine_for_review' | 'merge_duplicate';
   confidence: string;
   owner_questions: string[];
-  status: 'proposed' | 'accepted' | 'rejected' | 'dismissed' | 'applied';
+  status: 'proposed' | 'accepted' | 'rejected' | 'dismissed' | 'applied' | 'resolved' | 'resolved_not_an_issue' | 'resolved_no_longer_detected';
   created_at: string;
   updated_at: string;
   draft_entry_id?: string | null;
+  resolution?: KnowledgeCuratorResolution;
+  selected_record_ids?: string[];
+  record_previews?: KnowledgeCuratorRecordPreview[];
+  actionable?: boolean;
 }
 
 export interface KnowledgeCuratorRun {
@@ -1006,6 +1040,15 @@ export async function acceptKnowledgeCuratorProposal(id: string): Promise<Knowle
 export async function transitionKnowledgeCuratorProposal(id: string, transition: 'reject' | 'dismiss'): Promise<KnowledgeCuratorProposal> {
   const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator/proposals/${encodeURIComponent(id)}/${transition}`, { method: 'POST' });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Proposal state could not be changed.');
+  return (await response.json()).proposal;
+}
+
+export async function resolveKnowledgeCuratorProposal(id: string, resolution: KnowledgeCuratorResolution, selectedRecordIds: string[] = []): Promise<KnowledgeCuratorProposal> {
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator/proposals/${encodeURIComponent(id)}/resolve`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resolution, selected_record_ids: selectedRecordIds }),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Proposal could not be resolved.');
   return (await response.json()).proposal;
 }
 
