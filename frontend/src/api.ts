@@ -871,6 +871,8 @@ export interface KnowledgeCuratorRun {
   finding_counts: Record<string, number>;
   finding_count: number;
   created_proposals: number;
+  safe_repairs_completed?: number;
+  ai_helper_status?: string | null;
 }
 
 export interface KnowledgeCuratorState {

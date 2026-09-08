@@ -565,3 +565,94 @@ def test_quota_classifier_is_narrow_and_structured(code, expected):
 def test_quota_classifier_prefers_nested_provider_code_over_http_status():
     error = SimpleNamespace(code="429", body={"error": {"code": "insufficient_quota"}})
     assert main.is_openai_quota_exhausted(error) is True
+
+
+def test_safe_legacy_metadata_repair_preserves_effective_behaviour_and_reconciles_findings(tmp_path, monkeypatch):
+    legacy = record("legacy", text="Keep this exact customer wording.")
+    for field in ("revision", "version", "status", "canonical_key", "created_at"):
+        legacy.pop(field)
+    legacy["updated_at"] = "2030-01-02T00:00:00Z"
+    knowledge, data = curator_paths(tmp_path, monkeypatch, [legacy])
+    before = main.normalize_knowledge_record(legacy, source=main.LEARNED_INFORMATION_FILENAME, learned=True)
+    before_authority = main.resolve_knowledge_authority([legacy], "primary", NOW)
+
+    first = main.run_knowledge_curator()
+    saved = main.list_learned_information()[0]
+    after = main.normalize_knowledge_record(saved, source=main.LEARNED_INFORMATION_FILENAME, learned=True)
+    after_authority = main.resolve_knowledge_authority([saved], "primary", NOW)
+
+    for field in ("text", "applies_when", "scope", "sms_account_key", "review_status", "retrieval_enabled", "supersedes_id"):
+        assert before[field] == after[field]
+    assert [(item["id"], item["canonical_key"]) for item in before_authority] == [(item["id"], item["canonical_key"]) for item in after_authority]
+    assert saved["revision"] == saved["version"] == 1
+    assert saved["status"] == "active" and saved["created_at"] == saved["updated_at"]
+    assert first["run"]["safe_repairs_completed"] == 1
+    assert "invalid_metadata" not in first["run"]["finding_counts"]
+    state = json.loads((data / "curator.json").read_text(encoding="utf-8"))
+    audit = state["maintenance_history"][-1]
+    assert audit["result"] == "completed" and audit["repairs"] == [{"record_id": "legacy", "fields": ["revision", "version", "status", "canonical_key", "created_at"]}]
+    assert "Keep this exact" not in json.dumps(audit)
+    assert list((knowledge / f"{main.LEARNED_INFORMATION_FILENAME}.curator-backups").glob("*.jsonl"))
+    second = main.run_knowledge_curator()
+    assert second["run"]["safe_repairs_completed"] == 0
+
+
+def test_ambiguous_or_invalid_legacy_metadata_is_not_repaired(tmp_path, monkeypatch):
+    ambiguous = record("ambiguous", status="not-a-status", revision=0)
+    ambiguous.pop("canonical_key")
+    other = record("other", key="use-the-approved-wording", text="Different authority.")
+    knowledge, _ = curator_paths(tmp_path, monkeypatch, [ambiguous, other])
+    before = (knowledge / main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8")
+    result = main.run_knowledge_curator()
+    assert result["run"]["safe_repairs_completed"] == 0
+    assert (knowledge / main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8") == before
+    assert "invalid_metadata" in result["run"]["finding_counts"]
+
+
+def test_failed_metadata_bulk_repair_rolls_back_the_original_file(tmp_path, monkeypatch):
+    legacy = record("legacy")
+    legacy.pop("revision")
+    legacy.pop("version")
+    knowledge, _ = curator_paths(tmp_path, monkeypatch, [legacy])
+    filepath = knowledge / main.LEARNED_INFORMATION_FILENAME
+    before = filepath.read_text(encoding="utf-8")
+
+    def fail_reload():
+        raise RuntimeError("simulated reload failure")
+
+    monkeypatch.setattr(main, "load_knowledge_base", fail_reload)
+    repair = main._repair_legacy_knowledge_metadata()
+    assert repair["result"] == "rolled_back"
+    assert repair["repairs"] == []
+    assert filepath.read_text(encoding="utf-8") == before
+    assert list((knowledge / f"{main.LEARNED_INFORMATION_FILENAME}.curator-backups").glob("*.jsonl"))
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("invalid_api_key", "curator_model_authentication_failed"),
+        ("model_not_found", "curator_model_inaccessible"),
+        ("rate_limit_exceeded", "curator_model_rate_limited"),
+        ("timeout", "curator_model_timeout"),
+        ("server_error", "curator_model_provider_error"),
+    ],
+)
+def test_model_failures_are_safely_and_structurally_classified(code, expected):
+    error = SimpleNamespace(code=code, body={"error": {"code": code}})
+    assert main._classify_curator_model_failure(error) == expected
+    assert "provider" not in main._curator_owner_model_message(expected).casefold()
+
+
+def test_curator_uses_the_configured_supported_model_without_retrying(monkeypatch):
+    calls = []
+
+    class CapturingResponses:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(output_text='{"proposals": []}')
+
+    monkeypatch.setattr(main, "KNOWLEDGE_CURATOR_MODEL", "configured-supported-model")
+    monkeypatch.setattr(main, "openai_client", SimpleNamespace(responses=CapturingResponses()))
+    main._curator_enrich_proposals(main.inspect_knowledge_integrity([record("price", text="Costs $100.")], now=NOW))
+    assert len(calls) == 1 and calls[0]["model"] == "configured-supported-model" and calls[0]["store"] is False
