@@ -1,4 +1,4 @@
-import { FormEvent, TouchEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
   Check,
@@ -92,8 +92,9 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const [submittingInformation, setSubmittingInformation] = useState(false)
   const [quickToolsOpen, setQuickToolsOpen] = useState(false)
   const [error, setError] = useState('')
-  const touchStartX = useRef<number | null>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
+  const messageViewportRef = useRef<HTMLDivElement>(null)
+  const initiallyScrolledThreadRef = useRef<string | null>(null)
   const sendingRef = useRef(false)
   const reviewingDraftRef = useRef<string | null>(null)
   const selectedIdRef = useRef(selectedId)
@@ -102,6 +103,19 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const acknowledgedArrivalsRef = useRef(new Set<string>())
   const arrivalOpenIntentRef = useRef<{ threadId: string; sessionId: string } | null>(null)
   selectedIdRef.current = selectedId
+
+  useLayoutEffect(() => {
+    if (!selectedId) {
+      initiallyScrolledThreadRef.current = null
+      return
+    }
+    if (thread?.id !== selectedId || initiallyScrolledThreadRef.current === selectedId) return
+
+    const viewport = messageViewportRef.current
+    if (!viewport) return
+    viewport.scrollTop = viewport.scrollHeight
+    initiallyScrolledThreadRef.current = selectedId
+  }, [selectedId, thread?.id])
 
   useLayoutEffect(() => {
     const textarea = composerRef.current
@@ -518,17 +532,6 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     }
   }
 
-  const onTouchStart = (event: TouchEvent) => {
-    touchStartX.current = event.changedTouches[0]?.clientX ?? null
-  }
-
-  const onTouchEnd = (event: TouchEvent) => {
-    if (touchStartX.current === null) return
-    const distance = (event.changedTouches[0]?.clientX ?? 0) - touchStartX.current
-    touchStartX.current = null
-    if (distance > 80) setSelectedId(null)
-  }
-
   return (
     <div className="flex-1 w-full flex flex-col overflow-hidden bg-[#f4f6f8] text-slate-900">
       <div className="mx-auto flex h-full w-full max-w-2xl flex-col bg-white shadow-2xl shadow-slate-300/40">
@@ -708,12 +711,8 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
             </div>
           </section>
         ) : (
-          <section
-            className="flex min-h-0 flex-1 flex-col bg-[#eef1f5]"
-            onTouchStart={onTouchStart}
-            onTouchEnd={onTouchEnd}
-          >
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-4">
+          <section className="flex min-h-0 flex-1 flex-col bg-[#eef1f5]">
+            <div ref={messageViewportRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-4">
               <div className="mx-auto flex max-w-xl flex-col gap-2">
                 {orderedTimeline.map(item => {
                   if (item.kind === 'arrival') {

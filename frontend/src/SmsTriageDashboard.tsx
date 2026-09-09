@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef } from 'react';
 import {
   listThreads,
   getThread,
@@ -54,18 +54,23 @@ const CURRENT_AGENT_ID = 'agent-1';
 
 // Custom thread viewer using ThreadPrimitive
 function SmsAssistantThread({
+  threadId,
   messages,
   events = [],
   onApproveDraft,
   onDiscardDraft,
   onEditDraft
 }: {
+  threadId: string;
   messages: Message[];
   events?: any[];
   onApproveDraft?: (messageId: string) => void;
   onDiscardDraft?: (messageId: string) => void;
   onEditDraft?: (messageId: string, text: string) => void;
 }) {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const initiallyScrolledThreadRef = useRef<string | null>(null);
+
   // Combine and sort messages & events chronologically
   const timeline = useMemo(() => {
     const items: Array<{ type: 'message' | 'event'; at: string; data: any }> = [];
@@ -74,9 +79,18 @@ function SmsAssistantThread({
     return items.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
   }, [messages, events]);
 
+  useLayoutEffect(() => {
+    if (initiallyScrolledThreadRef.current === threadId) return;
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    viewport.scrollTop = viewport.scrollHeight;
+    initiallyScrolledThreadRef.current = threadId;
+  }, [threadId]);
+
   return (
     <ThreadPrimitive.Root className="flex flex-col flex-1 bg-slate-50 overflow-hidden">
       <ThreadPrimitive.Viewport
+        ref={viewportRef}
         autoScroll={false}
         scrollToBottomOnInitialize={false}
         scrollToBottomOnRunStart={false}
@@ -216,6 +230,7 @@ function SmsAssistantThread({
 
 // Component wrapper for assistant-ui Thread
 function CustomThreadWrapper({
+  threadId,
   messages,
   events,
   onSendReply,
@@ -224,6 +239,7 @@ function CustomThreadWrapper({
   onDiscardDraft,
   onEditDraft
 }: {
+  threadId: string;
   messages: Message[];
   events?: any[];
   onSendReply: (text: string) => void;
@@ -264,6 +280,7 @@ function CustomThreadWrapper({
     <AssistantRuntimeProvider runtime={runtime}>
       <div className="flex-1 h-full overflow-hidden border border-slate-200 rounded-lg bg-white flex flex-col">
         <SmsAssistantThread
+          threadId={threadId}
           messages={messages}
           events={events}
           onApproveDraft={onApproveDraft}
@@ -1126,6 +1143,7 @@ export default function SmsTriageDashboard() {
                   </div>
                 ) : (
                   <CustomThreadWrapper
+                    threadId={selectedThread.id}
                     messages={selectedThread.messages}
                     events={selectedThread.events}
                     onSendReply={handleSendReply}
