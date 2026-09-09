@@ -53,3 +53,17 @@ def test_exact_time_schema_requires_service_and_start():
 
 def test_customer_timestamp_not_worker_time_controls_tomorrow_date():
     assert main.parse_customer_requested_slot("tomorrow at 10", RECEIVED).date().isoformat() == "2026-09-10"
+
+
+def test_exact_lookup_cache_key_separates_account_slot_service_duration_and_calendar(monkeypatch):
+    services = {
+        ("primary", "service-a"): {"id": "service-a", "duration": 30},
+        ("secondary", "service-a"): {"id": "service-a", "duration": 60},
+        ("secondary", "service-b"): {"id": "service-b", "duration": 60},
+    }
+    monkeypatch.setattr(main, "get_service_for_booking", lambda service_id, account_key: services.get((account_key, service_id)))
+    base = main.exact_lookup_cache_key("secondary", "service-a", REQUESTED.isoformat())
+    assert base != main.exact_lookup_cache_key("primary", "service-a", REQUESTED.isoformat())
+    assert base != main.exact_lookup_cache_key("secondary", "service-b", REQUESTED.isoformat())
+    assert base != main.exact_lookup_cache_key("secondary", "service-a", "2026-09-10T11:00:00+10:00")
+    assert base != main.exact_lookup_cache_key("secondary", "service-a", REQUESTED.isoformat(), "other-calendar")
