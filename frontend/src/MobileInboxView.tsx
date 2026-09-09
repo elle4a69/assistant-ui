@@ -93,7 +93,6 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const [quickToolsOpen, setQuickToolsOpen] = useState(false)
   const [error, setError] = useState('')
   const touchStartX = useRef<number | null>(null)
-  const endRef = useRef<HTMLDivElement>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const sendingRef = useRef(false)
   const reviewingDraftRef = useRef<string | null>(null)
@@ -263,10 +262,6 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
       if (timeout !== undefined) window.clearTimeout(timeout)
     }
   }, [selectedId, loadThread])
-
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [thread?.events.length, thread?.messages.length])
 
   const filteredThreads = useMemo(() => {
     // Search results are already filtered by the server across the full thread.
@@ -825,7 +820,6 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                     </div>
                   )
                 })}
-                <div ref={endRef} />
               </div>
             </div>
 
