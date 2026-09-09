@@ -572,3 +572,108 @@ def test_model_input_consolidates_latest_customer_burst_with_deep_history():
         "content": "Combined customer turn:\nTomorrow\nAt 3pm",
     }
     assert not any(item["content"] == "Tomorrow" for item in model_input)
+
+
+def test_reply_pipeline_uses_chronological_thread_and_excludes_other_sms_account(monkeypatch):
+    db = make_db()
+    now = datetime.utcnow()
+    primary = main.Thread(
+        id="primary-context-thread",
+        customer_phone="+61412345678",
+        sms_account_key="primary",
+        state="auto-reply",
+        priority="medium",
+        sla_due_at=now,
+        unread_count=2,
+    )
+    secondary = main.Thread(
+        id="secondary-context-thread",
+        customer_phone=primary.customer_phone,
+        sms_account_key="secondary",
+        state="auto-reply",
+        priority="medium",
+        sla_due_at=now,
+        unread_count=1,
+    )
+    db.add_all([primary, secondary])
+    db.add_all([
+        Message(
+            id="primary-earlier-customer",
+            thread_id=primary.id,
+            role="customer",
+            text="Earlier primary-line context",
+            at=now,
+        ),
+        Message(
+            id="primary-earlier-agent",
+            thread_id=primary.id,
+            role="system",
+            text="Earlier primary-line reply",
+            at=now + main.timedelta(seconds=1),
+        ),
+        Message(
+            id="primary-fragment-one",
+            thread_id=primary.id,
+            role="customer",
+            text="First half of newest turn",
+            provider_message_id="primary-fragment-one-provider",
+            at=now + main.timedelta(seconds=2),
+        ),
+        Message(
+            id="primary-fragment-two",
+            thread_id=primary.id,
+            role="customer",
+            text="Second half of newest turn",
+            provider_message_id="primary-fragment-two-provider",
+            at=now + main.timedelta(seconds=3),
+        ),
+        Message(
+            id="secondary-private-context",
+            thread_id=secondary.id,
+            role="customer",
+            text="SECONDARY ACCOUNT MUST NOT LEAK",
+            at=now + main.timedelta(seconds=1),
+        ),
+    ])
+    db.commit()
+
+    class CapturingResponses:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            return type("Response", (), {"output": [], "output_text": "Got it."})()
+
+    responses = CapturingResponses()
+    monkeypatch.setattr(main, "openai_client", type("Client", (), {"responses": responses})())
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
+    monkeypatch.setattr(main, "match_qa_rule", lambda _body: None)
+    monkeypatch.setattr(main, "build_authority_context", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(main, "get_style_examples", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(main.calendar_service, "get_customer_bookings", lambda *_args, **_kwargs: [])
+
+    result = main.run_sms_reply_logic(
+        db,
+        primary.id,
+        "Second half of newest turn",
+        "primary-fragment-two-provider",
+        now + main.timedelta(seconds=3),
+        dispatch_sms=False,
+    )
+
+    assert result == (False, False)
+    model_input = responses.calls[0]["input"]
+    assert "Earlier primary-line context" in model_input[0]["content"]
+    assert "Earlier primary-line reply" in model_input[1]["content"]
+    assert "First half of newest turn" in model_input[-1]["content"]
+    assert "Second half of newest turn" in model_input[-1]["content"]
+    assert not any(
+        item["content"].strip() == "First half of newest turn"
+        for item in model_input
+    )
+    assert not any(
+        "SECONDARY ACCOUNT MUST NOT LEAK" in item["content"]
+        for item in model_input
+    )
+    db.close()

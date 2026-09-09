@@ -14461,7 +14461,6 @@ def _agent_execute_action(
 async def _run_agent_console(run_id: str, objective: str, max_steps: int) -> None:
     tool_catalog = compact_tool_catalog(OPERATIONS_TOOL_SCHEMAS, set(AGENT_CONSOLE_ALLOWED_TOOLS))
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + agent_console_total_timeout_seconds()
     try:
         conversation_context, durable_memory = await asyncio.to_thread(
             _load_agent_console_context,
@@ -14480,6 +14479,7 @@ async def _run_agent_console(run_id: str, objective: str, max_steps: int) -> Non
             {"role": "user", "content": f"Current owner message:\n{objective}"},
         ]
         await asyncio.to_thread(_agent_record_running, run_id)
+        deadline = loop.time() + agent_console_total_timeout_seconds()
         for step_number in range(1, max_steps + 1):
             if await _agent_stop_before_next_operation(run_id):
                 return
