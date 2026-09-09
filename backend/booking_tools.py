@@ -86,6 +86,35 @@ class BookingToolSuite:
             "next_available": slots[0] if slots else None,
         }
 
+    def check_exact_time(self, service_id: str, start_time: str) -> dict[str, Any]:
+        """Authoritatively evaluate one customer-requested local start time.
+
+        The exact candidate is queried first. Broader day searches are used
+        only to find alternatives after that exact result is known.
+        """
+        start = self._parse_requested_start(start_time)
+        checker = getattr(self.provider, "check_exact_time", None)
+        if callable(checker):
+            exact_slot = checker(service_id, start)
+        else:
+            exact_slot = next((
+                item for item in self.provider.search_availability(
+                    service_id, start, start + timedelta(minutes=1), 8,
+                )
+                if self._same_start(item.get("start_time"), start)
+            ), None)
+        before, after = self._nearest_alternatives(service_id, start)
+        return {
+            "status": "ok",
+            "timezone": self.timezone_name,
+            "service_id": service_id,
+            "requested_slot": start.isoformat(),
+            "available": exact_slot is not None,
+            "exact_slot": exact_slot,
+            "nearest_before": before,
+            "nearest_after": after,
+        }
+
     def execute(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Dispatch one model tool call and return a customer-safe JSON object."""
         try:
@@ -101,6 +130,11 @@ class BookingToolSuite:
                 return self.next_available(
                     str(arguments.get("service_id", "")),
                     arguments.get("after"),
+                )
+            if tool_name == "check_exact_time":
+                return self.check_exact_time(
+                    str(arguments.get("service_id", "")),
+                    str(arguments.get("start_time", "")),
                 )
         except (BookingToolError, OSError, ValueError) as exc:
             return {"status": "unavailable", "reason": str(exc)}
@@ -120,6 +154,43 @@ class BookingToolSuite:
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=self.timezone)
         return max(parsed.astimezone(self.timezone), self._now())
+
+    def _parse_requested_start(self, value: str) -> datetime:
+        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=self.timezone)
+        return parsed.astimezone(self.timezone)
+
+    def _same_start(self, value: Any, requested: datetime) -> bool:
+        try:
+            return self._parse_requested_start(str(value)).replace(second=0, microsecond=0) == requested.replace(second=0, microsecond=0)
+        except (TypeError, ValueError):
+            return False
+
+    def _nearest_alternatives(self, service_id: str, requested: datetime) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        before = None
+        after = None
+        for offset in range(31):
+            if before is None:
+                day_start = datetime.combine(requested.date() - timedelta(days=offset), time.min, self.timezone)
+                candidates = [item for item in self.provider.search_availability(service_id, day_start, day_start + timedelta(days=1), 128) if self._slot_start(item) and self._slot_start(item) < requested]
+                if candidates:
+                    before = max(candidates, key=self._slot_start)
+            if after is None:
+                day_start = datetime.combine(requested.date() + timedelta(days=offset), time.min, self.timezone)
+                candidates = [item for item in self.provider.search_availability(service_id, day_start, day_start + timedelta(days=1), 128) if self._slot_start(item) and self._slot_start(item) > requested]
+                if candidates:
+                    after = min(candidates, key=self._slot_start)
+            if before is not None and after is not None:
+                break
+        return before, after
+
+    def _slot_start(self, item: dict[str, Any]) -> datetime | None:
+        try:
+            return self._parse_requested_start(str(item.get("start_time")))
+        except (TypeError, ValueError):
+            return None
 
     def _times_for_date(
         self,
@@ -225,6 +296,14 @@ class LegacyCalendarDiscoveryProvider:
                         })
             cursor += timedelta(minutes=self.slot_interval_minutes)
         return slots
+
+    def check_exact_time(self, service_id: str, start: datetime) -> dict[str, Any] | None:
+        service = next((item for item in self.services_loader() if isinstance(item, dict) and str(item.get("id", "")) == service_id), None)
+        if not service:
+            raise BookingToolError("That service is not available.")
+        duration = timedelta(minutes=max(1, int(service.get("duration", 60))))
+        slots = self.search_availability(service_id, start, start + duration, 1)
+        return next((item for item in slots if item["start_time"] == start.astimezone(self.timezone).isoformat()), None)
 
     def _round_up(self, value: datetime) -> datetime:
         value = value.astimezone(self.timezone)
@@ -396,6 +475,21 @@ BOOKING_DISCOVERY_TOOL_SCHEMAS = [
                 "after": {"type": ["string", "null"]},
             },
             "required": ["service_id", "after"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "check_exact_time",
+        "description": "Authoritatively check one exact requested local appointment start for one service, returning the exact result and nearest valid alternatives.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "service_id": {"type": "string"},
+                "start_time": {"type": "string"},
+            },
+            "required": ["service_id", "start_time"],
             "additionalProperties": False,
         },
         "strict": True,

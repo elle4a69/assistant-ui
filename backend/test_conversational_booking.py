@@ -765,6 +765,7 @@ def test_assistant_uses_immediate_booking_tool_and_no_form_or_confirmation_tool(
     assert '"name": "propose_booking"' in live_tool_schema
     assert '"name": "confirm_booking"' not in live_tool_schema
     assert discovery_tool_names == {
+        "check_exact_time",
         "get_current_time",
         "list_booking_services",
         "get_times_today",

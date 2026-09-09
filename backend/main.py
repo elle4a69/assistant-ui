@@ -5749,16 +5749,16 @@ def to_naive_utc(dt: datetime) -> datetime:
 
 def current_business_time() -> datetime:
     from zoneinfo import ZoneInfo
-    return datetime.now(ZoneInfo("Australia/Hobart"))
+    return datetime.now(ZoneInfo(BOOKING_LOCAL_TIMEZONE))
 
 
 def parse_business_datetime(value: str) -> datetime:
-    """Parse an ISO timestamp and return the same instant in Hobart local time."""
+    """Parse an ISO timestamp and return the same instant in Melbourne local time."""
     from zoneinfo import ZoneInfo
 
     normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
     parsed = datetime.fromisoformat(normalized)
-    business_tz = ZoneInfo("Australia/Hobart")
+    business_tz = ZoneInfo(BOOKING_LOCAL_TIMEZONE)
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=business_tz)
     return parsed.astimezone(business_tz)
@@ -6329,6 +6329,45 @@ def requested_time_at_receipt(message: str, received_local: datetime) -> Optiona
         if weekday_match is not None:
             requested += timedelta(days=(weekday_match - received_local.weekday()) % 7)
     return requested
+
+
+BOOKING_LOCAL_TIMEZONE = "Australia/Melbourne"
+
+
+def parse_customer_requested_slot(message: str, received_at: datetime) -> Optional[datetime]:
+    """Parse a customer clock time against the inbound timestamp in Melbourne."""
+    text = (message or "").casefold()
+    match = re.search(r"(?<!\d)(1[0-2]|0?[1-9])(?:(?::|\.)([0-5]\d))?\s*(am|pm)?\b", text)
+    if not match:
+        return None
+    received = received_at.replace(tzinfo=timezone.utc) if received_at.tzinfo is None else received_at
+    local_received = received.astimezone(ZoneInfo(BOOKING_LOCAL_TIMEZONE))
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    meridiem = match.group(3)
+    if meridiem:
+        hour = (hour % 12) + (12 if meridiem == "pm" else 0)
+    elif re.search(r"\b(?:afternoon|evening|tonight)\b", text):
+        hour = (hour % 12) + 12
+    else:
+        hour %= 12
+    requested_date = local_received.date() + timedelta(days=1 if re.search(r"\btomorrow\b", text) else 0)
+    return datetime.combine(requested_date, datetime.min.time(), ZoneInfo(BOOKING_LOCAL_TIMEZONE)).replace(hour=hour, minute=minute)
+
+
+def explicitly_requested_service(message: str, services: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    normalized = " ".join(re.sub(r"[^a-z0-9]+", " ", (message or "").casefold()).split())
+    for service in services:
+        service_id = str(service.get("id") or "").casefold()
+        name = " ".join(re.sub(r"[^a-z0-9]+", " ", str(service.get("name") or "").casefold()).split())
+        if (service_id and re.search(rf"(?<![a-z0-9]){re.escape(service_id)}(?![a-z0-9])", normalized)) or (name and re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", normalized)):
+            return service
+    return None
+
+
+def customer_slot_label(value: datetime) -> str:
+    local = value.astimezone(ZoneInfo(BOOKING_LOCAL_TIMEZONE))
+    return f"{local.strftime('%A')} at {local.strftime('%I:%M%p').lstrip('0').lower()}"
 
 
 def delayed_requested_time(
@@ -6952,7 +6991,7 @@ def load_booking_services() -> List[Dict[str, Any]]:
 def get_booking_tool_suite(account_key: str) -> BookingToolSuite:
     """Build discovery tools bound to the resolved provider, never all lines."""
     resolve_provider_context(account_key)
-    timezone_name = os.getenv("BOOKING_TIMEZONE", "Australia/Hobart")
+    timezone_name = os.getenv("BOOKING_TIMEZONE", BOOKING_LOCAL_TIMEZONE)
     backend_name = os.getenv("BOOKING_BACKEND", "legacy").strip().casefold()
     if backend_name == "fastapi":
         provider = FastAPIBookingsDiscoveryProvider(
@@ -7214,7 +7253,7 @@ def validate_availability_claim(
     ) and re.search(r"\b(?:i\s+can|can\s+do|book|available)\b", normalized_reply):
         return "AI attempted to combine separate short appointments into a longer service"
 
-    claimed_time = extract_requested_business_time(reply, now_local)
+    claimed_time = requested_time_at_receipt(reply, now_local)
     if not claimed_time:
         return None
     negative = bool(re.search(
@@ -7398,6 +7437,83 @@ def run_sms_reply_logic(
         now_local,
     )
     requested_duration = requested_duration_minutes(history_msgs, effective_body)
+    requested_slot = parse_customer_requested_slot(effective_body, burst_received_at)
+    pending_service_state: Optional[Dict[str, Any]] = None
+    try:
+        candidate_state = json.loads(thread.pending_booking or "")
+        if isinstance(candidate_state, dict) and candidate_state.get("state") == "awaiting_service":
+            pending_service_state = candidate_state
+            requested_slot = parse_business_datetime(candidate_state["requested_slot"])
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+        pass
+    precomputed_reply: Optional[str] = None
+    has_relative_date = bool(re.search(r"\btomorrow\b", effective_body, re.IGNORECASE))
+
+    # Exact relative-time requests are resolved before prompt/model work. This
+    # closes the draft-before-lookup race and prevents a capped broad list from
+    # deciding an explicit requested clock time.
+    if requested_slot and not delayed_request_time and (has_relative_date or pending_service_state):
+        service = explicitly_requested_service(effective_body, load_line_services(thread.sms_account_key))
+        if not service:
+            thread.pending_booking = json.dumps({
+                "state": "awaiting_service", "requested_slot": requested_slot.isoformat(),
+                "sms_account_key": thread.sms_account_key, "created_at": datetime.utcnow().isoformat(),
+            })
+            interpreted_slot = requested_slot.isoformat()
+            precomputed_reply = f"What service would you like for {customer_slot_label(requested_slot)}?"
+        else:
+            service_id = str(service["id"])
+            lookup_id = str(uuid.uuid4())
+            lookup_started = time.monotonic()
+            lookup_fields = {
+                "lookup_id": lookup_id, "tool": "check_exact_time",
+                "requested_slot": requested_slot.isoformat(), "service_id": service_id,
+                "provider_binding": "secondary-line-provider" if thread.sms_account_key == "secondary" else "primary-line-provider",
+                "calendar_binding": "business-calendar", "lookup_source": "booking_discovery",
+                "freshness": "authoritative_live", "cache_status": "bypassed",
+                "pending_state": {"proposal": bool(thread.pending_booking), "accepted_slot": None},
+                "policy_inputs": _availability_policy_inputs(requested_slot.date().isoformat()),
+            }
+            _add_structured_thread_event(db, thread, "availability_lookup_started", audit, **lookup_fields)
+            try:
+                exact_result = get_booking_tool_suite(thread.sms_account_key).execute("check_exact_time", {
+                    "service_id": service_id, "start_time": requested_slot.isoformat(),
+                })
+            except Exception:
+                exact_result = {"status": "unavailable"}
+            interpreted_slot = requested_slot.isoformat()
+            lookup_fields["elapsed_ms"] = round((time.monotonic() - lookup_started) * 1000)
+            if exact_result.get("status") != "ok":
+                _add_structured_thread_event(db, thread, "availability_lookup_failed", audit,
+                    **lookup_fields, status_code="provider_unavailable", exception_classification="expected_provider_error")
+                precomputed_reply = f"I couldn't verify {customer_slot_label(requested_slot)} just now. Could you confirm the service you want?"
+            else:
+                exact_slot = exact_result.get("exact_slot")
+                live_calendar_lookup_succeeded = True
+                if isinstance(exact_slot, dict):
+                    availability_tool_slots.extend(booking_slots_from_tool_result({"service_id": service_id, "slots": [exact_slot]}))
+                _add_structured_thread_event(db, thread, "availability_lookup_completed", audit, **lookup_fields,
+                    result={"available": bool(exact_slot), "slot_count": 1 if exact_slot else 0,
+                            "candidate_range": {"first_start": requested_slot.isoformat() if exact_slot else None,
+                                                "last_end": exact_slot.get("end_time") if isinstance(exact_slot, dict) else None,
+                                                "returned_count": 1 if exact_slot else 0, "bounded": True},
+                            "conflict": {"classification": "none_observed" if exact_slot else "occupied_or_policy_limited", "ids": []}})
+                if not exact_slot:
+                    alternatives = []
+                    for key, lead in (("nearest_before", "before"), ("nearest_after", "after")):
+                        candidate = exact_result.get(key)
+                        if isinstance(candidate, dict) and candidate.get("start_time"):
+                            alternatives.append(f"{lead} {customer_slot_label(parse_business_datetime(candidate['start_time']))}")
+                    if alternatives:
+                        precomputed_reply = f"{customer_slot_label(requested_slot)} isn't available. The closest option{'s are' if len(alternatives) > 1 else ' is'} {', and '.join(alternatives)}."
+                    else:
+                        precomputed_reply = f"{customer_slot_label(requested_slot)} isn't available, and I couldn't find a nearby valid alternative."
+                else:
+                    thread.pending_booking = json.dumps({
+                        "state": "awaiting_customer_name", "requested_slot": requested_slot.isoformat(),
+                        "service_id": service_id, "sms_account_key": thread.sms_account_key,
+                        "created_at": datetime.utcnow().isoformat(),
+                    })
     
     # Step 2: Supply customer-owned booking context, but never inject generic
     # 30-minute openings. Exact availability comes only from the booking tools,
@@ -7409,7 +7525,11 @@ def run_sms_reply_logic(
         thread.sms_account_key,
         db=db,
     )
-    requested_time = extract_requested_business_time(effective_body, now_local)
+    requested_time = (
+        requested_slot
+        if has_relative_date or pending_service_state
+        else extract_requested_business_time(effective_body, now_local)
+    )
     booking_guidance, requested_booking_confirmed = customer_booking_guidance(
         customer_bookings,
         requested_time,
@@ -7431,19 +7551,22 @@ def run_sms_reply_logic(
     if thread.pending_booking:
         try:
             pending = json.loads(thread.pending_booking)
-            pending_start = parse_business_datetime(pending["start_time"])
-            duration_guidance = (
-                f", {pending['duration']} minutes"
-                if pending.get("show_duration", True) else
-                ", duration is hidden customer-facing scheduling data and must not be stated"
-            )
-            slots_str += (
-                "\nPending conversational booking proposal (not booked yet): "
-                f"{pending['service_name']}{duration_guidance}, "
-                f"{pending_start.strftime('%A %d %B %Y at %I:%M %p')}, "
-                f"customer {pending['customer_name']}. "
-                "Only confirm_booking can finalize it, and only after an explicit customer confirmation."
-            )
+            if pending.get("state") in {"awaiting_service", "awaiting_customer_name"}:
+                slots_str += "\nPending booking detail state: preserve the requested time and never infer a service."
+            else:
+                pending_start = parse_business_datetime(pending["start_time"])
+                duration_guidance = (
+                    f", {pending['duration']} minutes"
+                    if pending.get("show_duration", True) else
+                    ", duration is hidden customer-facing scheduling data and must not be stated"
+                )
+                slots_str += (
+                    "\nPending conversational booking proposal (not booked yet): "
+                    f"{pending['service_name']}{duration_guidance}, "
+                    f"{pending_start.strftime('%A %d %B %Y at %I:%M %p')}, "
+                    f"customer {pending['customer_name']}. "
+                    "Only confirm_booking can finalize it, and only after an explicit customer confirmation."
+                )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             thread.pending_booking = None
     # Step 3 & 4: Load prompts templates
@@ -7485,8 +7608,8 @@ def run_sms_reply_logic(
     # Keep response handling fail-closed even before a Q&A or model branch runs.
     # Catch-up calls this function directly, so every path must have a defined
     # reply value for the validation and failure handling below.
-    assistant_reply: Optional[str] = None
-    if thread.sms_account_key == "primary":
+    assistant_reply: Optional[str] = precomputed_reply
+    if assistant_reply is None and thread.sms_account_key == "primary":
         assistant_reply = match_qa_rule(effective_body)
     rejected_reply_reason: Optional[str] = None
     if assistant_reply:
@@ -7710,6 +7833,7 @@ def run_sms_reply_logic(
                     "get_times_today",
                     "get_times_tomorrow",
                     "get_next_available",
+                    "check_exact_time",
                 }
                 ordered_tool_calls = sorted(
                     tool_calls,
@@ -7729,6 +7853,7 @@ def run_sms_reply_logic(
                         "get_times_today",
                         "get_times_tomorrow",
                         "get_next_available",
+                        "check_exact_time",
                     }:
                         try:
                             args = json.loads(tool_call.arguments or "{}")
@@ -7753,9 +7878,9 @@ def run_sms_reply_logic(
                         )
                         lookup_id = str(uuid.uuid4())
                         lookup_started = time.monotonic()
-                        requested_slot = _audit_iso(args.get("after"), timezone_name)
+                        requested_slot = _audit_iso(args.get("start_time") or args.get("after"), timezone_name)
                         records_availability = tool_call.name in {
-                            "get_times_today", "get_times_tomorrow", "get_next_available",
+                            "get_times_today", "get_times_tomorrow", "get_next_available", "check_exact_time",
                         }
                         if records_availability:
                             _add_structured_thread_event(
@@ -7820,7 +7945,7 @@ def run_sms_reply_logic(
                             )
                         if (
                             tool_call.name in {
-                                "get_times_today", "get_times_tomorrow", "get_next_available",
+                                "get_times_today", "get_times_tomorrow", "get_next_available", "check_exact_time",
                             }
                             and tool_result.get("status") == "ok"
                         ):
@@ -7995,6 +8120,9 @@ def run_sms_reply_logic(
             
     # A newer fragment may arrive while the model is working. The newer job owns
     # the combined reply; this result must not create a draft, failure, or SMS.
+    # Persist deterministic preflight state before refreshing the session so a
+    # service-selection prompt cannot lose its interpreted requested time.
+    db.flush()
     db.expire_all()
     if not is_latest_customer_turn(db, thread_id, provider_message_id, received_at_naive, body):
         db.rollback()
@@ -8145,6 +8273,7 @@ def run_sms_reply_logic(
             at=datetime.utcnow(),
         ))
     elif TRAINING_MODE_ENABLED or draft_only:
+        reply_at_naive = datetime.utcnow()
         draft_message = Message(
             id=str(uuid.uuid4()),
             thread_id=thread.id,
@@ -8196,6 +8325,7 @@ def run_sms_reply_logic(
 
         # Store as sent only after the gateway accepts the SMS. On failure the
         # reply remains a visible draft for human retry/review.
+        reply_at_naive = datetime.utcnow()
         system_message = Message(
             id=str(uuid.uuid4()),
             thread_id=thread.id,
