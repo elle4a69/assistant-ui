@@ -6370,6 +6370,24 @@ def customer_slot_label(value: datetime) -> str:
     return f"{local.strftime('%A')} at {local.strftime('%I:%M%p').lstrip('0').lower()}"
 
 
+def exact_lookup_cache_key(
+    account_key: str,
+    service_id: str,
+    start_time: str,
+    calendar_binding: str = "business-calendar",
+) -> Optional[tuple[str, str, str, int, str]]:
+    """Return the decision-local identity for an exact live availability result."""
+    service = get_service_for_booking(service_id, account_key)
+    if not service:
+        return None
+    try:
+        start = parse_business_datetime(start_time).replace(second=0, microsecond=0)
+        duration = max(1, int(service.get("duration", 0)))
+    except (TypeError, ValueError):
+        return None
+    return account_key, start.isoformat(), str(service["id"]), duration, calendar_binding
+
+
 def delayed_requested_time(
     message: str,
     received_at_naive: datetime,
@@ -7438,6 +7456,7 @@ def run_sms_reply_logic(
     )
     requested_duration = requested_duration_minutes(history_msgs, effective_body)
     requested_slot = parse_customer_requested_slot(effective_body, burst_received_at)
+    exact_lookup_results: Dict[tuple[str, str, str, int, str], Dict[str, Any]] = {}
     pending_service_state: Optional[Dict[str, Any]] = None
     try:
         candidate_state = json.loads(thread.pending_booking or "")
@@ -7481,6 +7500,11 @@ def run_sms_reply_logic(
                 })
             except Exception:
                 exact_result = {"status": "unavailable"}
+            cache_key = exact_lookup_cache_key(
+                thread.sms_account_key, service_id, requested_slot.isoformat(),
+            )
+            if cache_key and exact_result.get("status") == "ok":
+                exact_lookup_results.setdefault(cache_key, exact_result)
             interpreted_slot = requested_slot.isoformat()
             lookup_fields["elapsed_ms"] = round((time.monotonic() - lookup_started) * 1000)
             if exact_result.get("status") != "ok":
@@ -7859,6 +7883,18 @@ def run_sms_reply_logic(
                             args = json.loads(tool_call.arguments or "{}")
                         except (TypeError, json.JSONDecodeError):
                             args = {}
+                        exact_cache_key = (
+                            exact_lookup_cache_key(
+                                thread.sms_account_key,
+                                str(args.get("service_id") or ""),
+                                str(args.get("start_time") or ""),
+                            )
+                            if tool_call.name == "check_exact_time" else None
+                        )
+                        cached_exact_result = (
+                            exact_lookup_results.get(exact_cache_key)
+                            if exact_cache_key else None
+                        )
                         try:
                             suite = get_booking_tool_suite(thread.sms_account_key)
                         except TypeError:
@@ -7893,19 +7929,27 @@ def run_sms_reply_logic(
                                 calendar_binding="business-calendar",
                                 lookup_source=lookup_source,
                                 freshness="authoritative_live",
-                                cache_status="bypassed" if lookup_source == "legacy_calendar" else "not_applicable",
+                                cache_status="memory_hit" if cached_exact_result else (
+                                    "bypassed" if lookup_source == "legacy_calendar" else "not_applicable"
+                                ),
                                 pending_state={"proposal": bool(thread.pending_booking), "accepted_slot": None},
                                 policy_inputs=_availability_policy_inputs(requested_slot[:10] if requested_slot else None),
                             )
-                        try:
-                            if suite is None:
-                                raise RuntimeError("booking discovery unavailable")
-                            tool_result = suite.execute(tool_call.name, args)
-                        except Exception:
-                            tool_result = {"status": "unavailable", "reason": "Availability lookup failed."}
-                            exception_classification = "unexpected_provider_error"
-                        else:
+                        if cached_exact_result:
+                            tool_result = cached_exact_result
                             exception_classification = None
+                        else:
+                            try:
+                                if suite is None:
+                                    raise RuntimeError("booking discovery unavailable")
+                                tool_result = suite.execute(tool_call.name, args)
+                            except Exception:
+                                tool_result = {"status": "unavailable", "reason": "Availability lookup failed."}
+                                exception_classification = "unexpected_provider_error"
+                            else:
+                                exception_classification = None
+                            if exact_cache_key and tool_result.get("status") == "ok":
+                                exact_lookup_results.setdefault(exact_cache_key, tool_result)
                         lookup_elapsed = round((time.monotonic() - lookup_started) * 1000)
                         normalized_requested = (
                             requested_slot
@@ -7923,7 +7967,9 @@ def run_sms_reply_logic(
                             "calendar_binding": "business-calendar",
                             "lookup_source": lookup_source,
                             "freshness": "authoritative_live",
-                            "cache_status": "bypassed" if lookup_source == "legacy_calendar" else "not_applicable",
+                            "cache_status": "memory_hit" if cached_exact_result else (
+                                "bypassed" if lookup_source == "legacy_calendar" else "not_applicable"
+                            ),
                             "pending_state": {"proposal": bool(thread.pending_booking), "accepted_slot": None},
                             "policy_inputs": _availability_policy_inputs(
                                 tool_result.get("date") or (normalized_requested[:10] if normalized_requested else None)

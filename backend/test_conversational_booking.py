@@ -1073,6 +1073,68 @@ def test_sequential_same_slot_lookups_share_correlation_and_are_redacted(monkeyp
     db.close()
 
 
+def test_duplicate_exact_lookup_reuses_preflight_result_without_information_request(tmp_path, monkeypatch):
+    service = {"id": "service", "name": "Service", "duration": 60, "price": 100}
+    (tmp_path / "line_1_services.json").write_text("[]", encoding="utf-8")
+    (tmp_path / "line_2_services.json").write_text(json.dumps([service]), encoding="utf-8")
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "current_business_time", lambda: main.parse_business_datetime("2026-09-09T12:00:00+10:00"))
+    monkeypatch.setattr(main, "build_authority_context", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(main.calendar_service, "get_customer_bookings", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
+    monkeypatch.setattr(main, "match_qa_rule", lambda _body: None)
+    requested = "2026-09-10T10:00:00+10:00"
+
+    class CountingExactSuite:
+        timezone_name = "Australia/Melbourne"
+
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, tool_name, arguments):
+            assert tool_name == "check_exact_time"
+            assert arguments == {"service_id": "service", "start_time": requested}
+            self.calls += 1
+            return {
+                "status": "ok", "timezone": self.timezone_name, "service_id": "service",
+                "requested_slot": requested, "available": True,
+                "exact_slot": {"service_id": "service", "start_time": requested, "end_time": "2026-09-10T11:00:00+10:00"},
+                "nearest_before": None, "nearest_after": None,
+            }
+
+    suite = CountingExactSuite()
+    monkeypatch.setattr(main, "get_booking_tool_suite", lambda _account_key: suite)
+    db = make_db()
+    thread = add_thread(db)
+    thread.sms_account_key = "secondary"
+    db.add(Message(
+        id="duplicate-exact-prior", thread_id=thread.id, role="system", text="Hello",
+        at=main.datetime(2026, 9, 8, 1, 24, 38),
+    ))
+    customer = Message(
+        id="duplicate-exact-source", thread_id=thread.id, role="customer",
+        text="Can I book Service tomorrow morning around 10am?",
+        provider_message_id="duplicate-exact-provider", at=main.datetime(2026, 9, 9, 1, 24, 38),
+    )
+    db.add(customer)
+    db.commit()
+    client = SequenceClient([
+        FakeResponse(output=[FakeFunctionCall("check_exact_time", {"service_id": "service", "start_time": requested}, "duplicate-exact")]),
+        FakeResponse(output_text="Yes, tomorrow at 10am is available. What name should I put the booking under?"),
+    ])
+    monkeypatch.setattr(main, "openai_client", client)
+
+    run_sms_reply_logic(db, thread.id, customer.text, customer.provider_message_id, customer.at, dispatch_sms=False)
+
+    assert suite.calls == 1
+    assert db.query(Message).filter(Message.role == "system").filter(Message.text.like("Yes, tomorrow at 10am%")).one()
+    assert db.query(main.ThreadEvent).filter(main.ThreadEvent.type == "information-request").count() == 0
+    completed = structured_events(db, "availability_lookup_completed")
+    assert len(completed) == 2
+    assert completed[1][1]["cache_status"] == "memory_hit"
+    db.close()
+
+
 def test_lookup_failure_audit_keeps_only_safe_classification(monkeypatch):
     secret_marker = "Bearer private-token customer@example.test"
 
