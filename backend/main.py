@@ -10086,6 +10086,32 @@ def get_thread_detail(thread_id: str, db: Session = Depends(get_db)):
     }
 
 
+@app.delete("/api/threads/{thread_id}/review-flags")
+def clear_thread_review_flags(thread_id: str, db: Session = Depends(get_db)):
+    """Acknowledge review on only the selected account-owned conversation."""
+    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    cleared = thread.state == "needs-review"
+    if cleared:
+        cleared_at = datetime.utcnow()
+        thread.state = "auto-reply"
+        thread.pending_slots = None
+        thread.updated_at = cleared_at
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread.id,
+            type="review-status-cleared",
+            agent_id="message-review-clear",
+            meta=json.dumps({"reason": "operator cleared current message flags"}),
+            at=cleared_at,
+        ))
+        db.commit()
+
+    return {"status": "success", "cleared": cleared, "state": thread.state}
+
+
 @app.post("/api/threads/{thread_id}/arrivals/{session_id}/acknowledge")
 def acknowledge_thread_arrival(
     thread_id: str,

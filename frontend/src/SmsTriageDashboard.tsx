@@ -13,6 +13,7 @@ import {
   approveDraft,
   discardDraft,
   updateDraft,
+  clearThreadReviewFlags,
   respondToInformationRequest,
   acknowledgeThreadArrival,
   deleteBooking,
@@ -38,12 +39,16 @@ import {
   Calendar,
   CalendarCheck,
   ArrowLeft,
+  ChevronLeft,
+  ChevronRight,
+  FlagOff,
   Trash2,
   X,
   DoorOpen
 } from 'lucide-react';
 import { formatMessageTimestamp } from './messageTimestamp';
 import { dismissArrivalPushNotification, stopIncomingAlarm } from './incomingMessageAlarm';
+import { getMessageReviewNavigation } from './messageReviewNavigation';
 
 const CURRENT_AGENT_ID = 'agent-1';
 
@@ -337,6 +342,7 @@ export default function SmsTriageDashboard() {
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [selectedThread, setSelectedThread] = useState<ThreadDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  const [clearingReviewFlags, setClearingReviewFlags] = useState(false);
 
   // Form Inputs
   const [replyText, setReplyText] = useState('');
@@ -350,6 +356,7 @@ export default function SmsTriageDashboard() {
   const threadListRequestRef = useRef(0);
   const threadDetailRequestRef = useRef(0);
   const selectedThreadIdRef = useRef(selectedThreadId);
+  const navigationAnchorRef = useRef(0);
   const acknowledgedArrivalsRef = useRef(new Set<string>());
   const arrivalOpenIntentRef = useRef<{ threadId: string; sessionId: string } | null>(null);
   selectedThreadIdRef.current = selectedThreadId;
@@ -506,10 +513,45 @@ export default function SmsTriageDashboard() {
 
   // Handlers
   const handleSelectThread = (thread: ThreadListItem) => {
+    const listIndex = threads.findIndex(item => item.id === thread.id);
+    if (listIndex >= 0) navigationAnchorRef.current = listIndex;
     arrivalOpenIntentRef.current = thread.pendingArrivalSessionId
       ? { threadId: thread.id, sessionId: thread.pendingArrivalSessionId }
       : null;
+    selectedThreadIdRef.current = thread.id;
     setSelectedThreadId(thread.id);
+    setSelectedThread(null);
+    setShowNotesMobile(false);
+  };
+
+  const navigation = getMessageReviewNavigation(
+    threads.map(thread => thread.id),
+    selectedThreadId,
+    navigationAnchorRef.current,
+  );
+
+  const navigateToThreadIndex = (index: number | null) => {
+    if (index === null) return;
+    const thread = threads[index];
+    if (thread) handleSelectThread(thread);
+  };
+
+  const handleClearReviewFlags = async () => {
+    if (!selectedThreadId || clearingReviewFlags) return;
+    const selectedIndex = threads.findIndex(thread => thread.id === selectedThreadId);
+    if (selectedIndex >= 0) navigationAnchorRef.current = selectedIndex;
+    setClearingReviewFlags(true);
+    try {
+      const result = await clearThreadReviewFlags(selectedThreadId);
+      setSelectedThread(current => current?.id === selectedThreadId
+        ? { ...current, state: result.state }
+        : current);
+      await Promise.all([fetchThreadsList(), fetchThreadDetail(selectedThreadId, true)]);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to clear review flags');
+    } finally {
+      setClearingReviewFlags(false);
+    }
   };
 
   const handleTakeOver = async () => {
@@ -986,7 +1028,46 @@ export default function SmsTriageDashboard() {
                 </div>
               </div>
 
-              <div className="flex items-center gap-1.5 sm:gap-2 w-full sm:w-auto justify-end sm:justify-start">
+              <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 w-full sm:w-auto justify-end sm:justify-start">
+                <nav className="flex items-center gap-1" aria-label="Message review navigation">
+                  <button
+                    type="button"
+                    onClick={() => navigateToThreadIndex(navigation.previousIndex)}
+                    disabled={navigation.previousIndex === null}
+                    aria-label="Previous message"
+                    className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1.5 text-[10px] font-bold text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 sm:text-xs"
+                  >
+                    <ChevronLeft className="h-3.5 w-3.5" /> Previous
+                  </button>
+                  <span className="sr-only" aria-live="polite">
+                    {navigation.position === null
+                      ? `${navigation.total} messages available in the current list`
+                      : `Message ${navigation.position} of ${navigation.total}`}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => navigateToThreadIndex(navigation.nextIndex)}
+                    disabled={navigation.nextIndex === null}
+                    aria-label="Next message"
+                    className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1.5 text-[10px] font-bold text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 sm:text-xs"
+                  >
+                    Next <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                </nav>
+
+                {selectedThread.state === 'needs-review' && (
+                  <button
+                    type="button"
+                    onClick={handleClearReviewFlags}
+                    disabled={clearingReviewFlags}
+                    aria-label="Clear all flags from this message"
+                    className="inline-flex items-center gap-1 rounded border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[10px] font-bold text-rose-700 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50 sm:text-xs"
+                  >
+                    <FlagOff className="h-3.5 w-3.5" />
+                    {clearingReviewFlags ? 'Clearing…' : 'Clear all flags'}
+                  </button>
+                )}
+
                 {/* Mobile Notes Button */}
                 <button
                   onClick={() => setShowNotesMobile(true)}

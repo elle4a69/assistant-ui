@@ -217,6 +217,48 @@ def test_clear_review_only_threads_preserves_pending_drafts():
     db.close()
 
 
+def test_clear_current_thread_review_flags_is_scoped_idempotent_and_preserves_messages():
+    db = make_db()
+    add_thread(db, "thread-current")
+    add_thread(db, "thread-other")
+    current = db.query(Thread).filter(Thread.id == "thread-current").one()
+    current.sms_account_key = "secondary"
+    current.pending_slots = json.dumps(["legacy-slot"])
+    db.add_all([
+        Message(id="customer-current", thread_id="thread-current", role="customer", text="Keep me", at=datetime.utcnow()),
+        Message(id="draft-current", thread_id="thread-current", role="draft", text="Keep this too", at=datetime.utcnow()),
+        Message(id="customer-other", thread_id="thread-other", role="customer", text="Untouched", at=datetime.utcnow()),
+    ])
+    db.commit()
+
+    result = main.clear_thread_review_flags("thread-current", db)
+
+    assert result == {"status": "success", "cleared": True, "state": "auto-reply"}
+    assert db.query(Thread).filter(Thread.id == "thread-current").one().sms_account_key == "secondary"
+    assert db.query(Thread).filter(Thread.id == "thread-current").one().pending_slots is None
+    assert db.query(Thread).filter(Thread.id == "thread-other").one().state == "needs-review"
+    assert db.query(Message).filter(Message.thread_id == "thread-current").count() == 2
+    event = db.query(ThreadEvent).filter(ThreadEvent.type == "review-status-cleared").one()
+    assert event.thread_id == "thread-current"
+    assert event.agent_id == "message-review-clear"
+
+    assert main.clear_thread_review_flags("thread-current", db) == {
+        "status": "success", "cleared": False, "state": "auto-reply",
+    }
+    assert db.query(ThreadEvent).filter(ThreadEvent.type == "review-status-cleared").count() == 1
+    db.close()
+
+
+def test_clear_current_thread_review_flags_rejects_unknown_thread():
+    db = make_db()
+
+    with pytest.raises(main.HTTPException) as error:
+        main.clear_thread_review_flags("missing", db)
+
+    assert error.value.status_code == 404
+    db.close()
+
+
 def test_edited_draft_is_saved_to_learning_review_after_approval(monkeypatch, tmp_path):
     client = FakeLearningClient(lambda kwargs: json.dumps({"classifications": [{
         "id": json.loads(kwargs["input"])["records"][0]["id"],

@@ -345,6 +345,23 @@ export async function getThread(id: string): Promise<ThreadDetail> {
   return response.json();
 }
 
+export interface ClearThreadReviewFlagsResult {
+  status: string;
+  cleared: boolean;
+  state: string;
+}
+
+export async function clearThreadReviewFlags(id: string): Promise<ClearThreadReviewFlagsResult> {
+  const response = await apiFetch(`${API_BASE}/api/threads/${id}/review-flags`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Failed to clear review flags: ${response.statusText}`);
+  }
+  return response.json();
+}
+
 export async function takeOverThread(id: string, agentId: string): Promise<{ status: string; state: string; assignedAgentId: string }> {
   const response = await apiFetch(`${API_BASE}/api/threads/${id}/takeover`, {
     method: 'POST',
