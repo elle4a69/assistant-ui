@@ -4850,6 +4850,7 @@ class GoogleCalendarService:
         end: datetime,
         *,
         require_authoritative: bool = False,
+        exclude_event_id: Optional[str] = None,
     ) -> List[Dict[str, datetime]]:
         import time
         from zoneinfo import ZoneInfo
@@ -4860,7 +4861,7 @@ class GoogleCalendarService:
         end_aware = end.astimezone(tz_hobart) if end.tzinfo is not None else end.replace(tzinfo=tz_hobart)
         
         # Cache lookup
-        cache_key = (start_aware.isoformat(), end_aware.isoformat())
+        cache_key = (start_aware.isoformat(), end_aware.isoformat(), exclude_event_id or "")
         now_ts = time.time()
         if not require_authoritative and hasattr(self, "_cache") and cache_key in self._cache:
             cached_ts, cached_val = self._cache[cache_key]
@@ -4874,13 +4875,30 @@ class GoogleCalendarService:
         if self.service:
             try:
                 calendar_id = os.getenv("CALENDAR_ID", "primary")
-                body = {
-                    "timeMin": start_aware.isoformat(),
-                    "timeMax": end_aware.isoformat(),
-                    "items": [{"id": calendar_id}]
-                }
-                res = self.service.freebusy().query(body=body).execute()
-                busy_list = res.get("calendars", {}).get(calendar_id, {}).get("busy", [])
+                if exclude_event_id:
+                    res = self.service.events().list(
+                        calendarId=calendar_id,
+                        timeMin=start_aware.isoformat(),
+                        timeMax=end_aware.isoformat(),
+                        orderBy="startTime",
+                        singleEvents=True,
+                    ).execute()
+                    busy_list = []
+                    for event_item in res.get("items", []):
+                        if str(event_item.get("id") or "") == exclude_event_id:
+                            continue
+                        event_start = event_item.get("start", {}).get("dateTime")
+                        event_end = event_item.get("end", {}).get("dateTime")
+                        if event_start and event_end:
+                            busy_list.append({"start": event_start, "end": event_end})
+                else:
+                    body = {
+                        "timeMin": start_aware.isoformat(),
+                        "timeMax": end_aware.isoformat(),
+                        "items": [{"id": calendar_id}]
+                    }
+                    res = self.service.freebusy().query(body=body).execute()
+                    busy_list = res.get("calendars", {}).get(calendar_id, {}).get("busy", [])
                 
                 for b in busy_list:
                     b_start = datetime.fromisoformat(b["start"].replace("Z", "+00:00")).astimezone(tz_hobart)
@@ -4900,6 +4918,8 @@ class GoogleCalendarService:
                 events = db.query(CalendarEvent).filter(
                     (CalendarEvent.start_time < end_naive) & (CalendarEvent.end_time > start_naive)
                 ).all()
+                if exclude_event_id:
+                    events = [event for event in events if event.id != exclude_event_id]
                 parsed_busy = [{"start": e.start_time.replace(tzinfo=tz_hobart), "end": e.end_time.replace(tzinfo=tz_hobart)} for e in events]
             finally:
                 db.close()
@@ -4924,6 +4944,7 @@ class GoogleCalendarService:
         sms_account_key: str,
         *,
         require_authoritative: bool = False,
+        exclude_event_id: Optional[str] = None,
     ) -> List[Dict[str, datetime]]:
         """Return shared-room occupancy after binding a valid SMS account.
 
@@ -4933,7 +4954,16 @@ class GoogleCalendarService:
         """
         try:
             resolve_provider_context(sms_account_key)
-            return self.get_busy_slots(start, end, require_authoritative=require_authoritative)
+            if exclude_event_id:
+                return self.get_busy_slots(
+                    start,
+                    end,
+                    require_authoritative=require_authoritative,
+                    exclude_event_id=exclude_event_id,
+                )
+            return self.get_busy_slots(
+                start, end, require_authoritative=require_authoritative,
+            )
         except (OSError, RuntimeError, ValueError) as exc:
             raise OSError("Shared calendar availability could not be verified.") from exc
 
@@ -5100,6 +5130,55 @@ class GoogleCalendarService:
             return False
         finally:
             db.close()
+
+    def reschedule_booking(
+        self,
+        booking: CalendarEvent,
+        start: datetime,
+        end: datetime,
+        sms_account_key: str,
+    ) -> bool:
+        """Move one validated booking without creating a replacement event."""
+        resolve_provider_context(sms_account_key)
+        if booking.sms_account_key != sms_account_key:
+            return False
+        from zoneinfo import ZoneInfo
+        local_tz = ZoneInfo(BOOKING_LOCAL_TIMEZONE)
+        start_aware = start.astimezone(local_tz) if start.tzinfo else start.replace(tzinfo=local_tz)
+        end_aware = end.astimezone(local_tz) if end.tzinfo else end.replace(tzinfo=local_tz)
+        if end_aware <= start_aware:
+            return False
+        if hasattr(self, "_cache"):
+            self._cache.clear()
+
+        if self.service:
+            try:
+                calendar_id = os.getenv("CALENDAR_ID", "primary")
+                current = self.service.events().get(
+                    calendarId=calendar_id, eventId=booking.id,
+                ).execute() or {}
+                private = current.get("extendedProperties", {}).get("private", {})
+                if (
+                    private.get("sms_account_key") != sms_account_key
+                    or canonical_phone_number(private.get("customer_phone") or "")
+                    != canonical_phone_number(booking.customer_phone or "")
+                ):
+                    return False
+                self.service.events().patch(
+                    calendarId=calendar_id,
+                    eventId=booking.id,
+                    body={
+                        "start": {"dateTime": start_aware.isoformat()},
+                        "end": {"dateTime": end_aware.isoformat()},
+                    },
+                ).execute()
+            except Exception as exc:
+                print(f"Error rescheduling Google Calendar booking: {exc}")
+                return False
+
+        booking.start_time = start_aware.replace(tzinfo=None)
+        booking.end_time = end_aware.replace(tzinfo=None)
+        return True
 
     def delete_booking(self, booking_id: str) -> bool:
         # Clear cache on modification
@@ -5823,7 +5902,13 @@ def get_service_for_booking(service_id: str, account_key: Optional[str] = None) 
     ), None)
 
 
-def booking_availability_error(start: datetime, duration: int, account_key: str = "primary") -> Optional[str]:
+def booking_availability_error(
+    start: datetime,
+    duration: int,
+    account_key: str = "primary",
+    *,
+    exclude_event_id: Optional[str] = None,
+) -> Optional[str]:
     """Return a customer-safe reason when an exact proposed slot cannot be booked."""
     now = current_business_time()
     end = start + timedelta(minutes=duration)
@@ -5867,7 +5952,18 @@ def booking_availability_error(start: datetime, duration: int, account_key: str 
             return "Live calendar availability could not be verified. No booking was made."
     else:
         try:
-            busy_slots = authoritative_loader(start, end, account_key, require_authoritative=True)
+            if exclude_event_id:
+                busy_slots = authoritative_loader(
+                    start,
+                    end,
+                    account_key,
+                    require_authoritative=True,
+                    exclude_event_id=exclude_event_id,
+                )
+            else:
+                busy_slots = authoritative_loader(
+                    start, end, account_key, require_authoritative=True,
+                )
         except (OSError, RuntimeError):
             return "Live calendar availability could not be verified. No booking was made."
     if any(
@@ -6334,9 +6430,47 @@ def requested_time_at_receipt(message: str, received_local: datetime) -> Optiona
 BOOKING_LOCAL_TIMEZONE = "Australia/Melbourne"
 
 
+def is_booking_cancellation_or_constraint(message: str) -> bool:
+    """Return true when a mentioned time is a conflict, not a requested slot."""
+    normalized = " ".join((message or "").casefold().replace("’", "'").split())
+    return any(re.search(pattern, normalized) for pattern in (
+        r"\b(?:cancel|cancellation|no service|don't book|do not book)\b",
+        r"\b(?:can't|cant|cannot|can not|won't|wont|unable to)\s+(?:make|do|come|attend)\b",
+        r"\b(?:i|we)(?:'m| am| are|'re)?\s+(?:at )?work\b",
+        r"\b(?:have|got|start)\s+work\s+(?:at|by)\b",
+        r"\b(?:not|aren't|isn't|am not)\s+(?:free|available)\b",
+        r"\b(?:too late|running late|so i(?:'m| am) not late)\b",
+    ))
+
+
+def is_explicit_booking_cancellation_request(message: str) -> bool:
+    """Recognise a clear request to cancel without treating schedule constraints as one."""
+    normalized = " ".join((message or "").casefold().replace("’", "'").split())
+    return bool(re.search(
+        r"\b(?:cancel(?:\s+(?:it|that|the\s+(?:booking|appointment)))?|"
+        r"don't\s+book(?:\s+it)?|do\s+not\s+book(?:\s+it)?)\b",
+        normalized,
+    ))
+
+
+def is_explicit_reschedule_request(message: str) -> bool:
+    """Recognise an affirmative request to move an existing appointment."""
+    normalized = " ".join((message or "").casefold().replace("’", "'").split())
+    if re.search(r"\b(?:cancel|no service|don't book|do not book)\b", normalized):
+        return False
+    return bool(re.search(
+        r"\b(?:reschedul(?:e|ing)|rebook|move|change|push|make)\b.{0,50}"
+        r"\b(?:to|for|at|it)\b.{0,20}"
+        r"(?<!\d)(?:1[0-2]|0?[1-9])(?:(?::|\.)(?:[0-5]\d))?\s*(?:am|pm)?\b",
+        normalized,
+    ))
+
+
 def parse_customer_requested_slot(message: str, received_at: datetime) -> Optional[datetime]:
     """Parse a customer clock time against the inbound timestamp in Melbourne."""
     text = (message or "").casefold()
+    if is_booking_cancellation_or_constraint(text) and not is_explicit_reschedule_request(text):
+        return None
     match = re.search(r"(?<!\d)(1[0-2]|0?[1-9])(?:(?::|\.)([0-5]\d))?\s*(am|pm)?\b", text)
     if not match:
         return None
@@ -6355,6 +6489,53 @@ def parse_customer_requested_slot(message: str, received_at: datetime) -> Option
     return datetime.combine(requested_date, datetime.min.time(), ZoneInfo(BOOKING_LOCAL_TIMEZONE)).replace(hour=hour, minute=minute)
 
 
+def parse_reschedule_target_slot(message: str, received_at: datetime) -> Optional[datetime]:
+    """Parse the final clock time in an explicit move request as its destination."""
+    if not is_explicit_reschedule_request(message):
+        return None
+    matches = list(re.finditer(
+        r"(?<!\d)(1[0-2]|0?[1-9])(?:(?::|\.)([0-5]\d))?\s*(am|pm)?\b",
+        (message or "").casefold(),
+    ))
+    if not matches:
+        return None
+    target = matches[-1].group(0)
+    date_words = " ".join(re.findall(
+        r"\b(?:today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+        (message or "").casefold(),
+    ))
+    return parse_customer_requested_slot(f"{date_words} {target}".strip(), received_at)
+
+
+def align_reschedule_target_with_existing_booking(
+    message: str,
+    requested: datetime,
+    existing_start: datetime,
+) -> datetime:
+    """Resolve omitted date/meridiem from the appointment being moved."""
+    normalized = (message or "").casefold()
+    aligned = requested
+    has_date = bool(re.search(
+        r"\b(?:today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|"
+        r"\b\d{4}-\d{2}-\d{2}\b",
+        normalized,
+    ))
+    if not has_date:
+        aligned = aligned.replace(
+            year=existing_start.year,
+            month=existing_start.month,
+            day=existing_start.day,
+        )
+    target_clock = list(re.finditer(
+        r"(?<!\d)(1[0-2]|0?[1-9])(?:(?::|\.)([0-5]\d))?\s*(am|pm)?\b",
+        normalized,
+    ))
+    if target_clock and not target_clock[-1].group(3):
+        hour12 = aligned.hour % 12
+        aligned = aligned.replace(hour=hour12 + (12 if existing_start.hour >= 12 else 0))
+    return aligned
+
+
 def explicitly_requested_service(message: str, services: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     normalized = " ".join(re.sub(r"[^a-z0-9]+", " ", (message or "").casefold()).split())
     for service in services:
@@ -6363,6 +6544,116 @@ def explicitly_requested_service(message: str, services: List[Dict[str, Any]]) -
         if (service_id and re.search(rf"(?<![a-z0-9]){re.escape(service_id)}(?![a-z0-9])", normalized)) or (name and re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", normalized)):
             return service
     return None
+
+
+def validated_reschedule_target(
+    db: Session,
+    thread: Thread,
+    now_local: datetime,
+) -> Optional[CalendarEvent]:
+    """Return one current booking proven to belong to this exact conversation."""
+    canonical_customer = canonical_phone_number(thread.customer_phone)
+    candidates = db.query(CalendarEvent).filter(
+        CalendarEvent.thread_id == thread.id,
+        CalendarEvent.sms_account_key == thread.sms_account_key,
+        CalendarEvent.status == "scheduled",
+        CalendarEvent.end_time > now_local.replace(tzinfo=None),
+    ).order_by(CalendarEvent.start_time.asc(), CalendarEvent.id.asc()).all()
+    owned = [
+        booking for booking in candidates
+        if canonical_phone_number(booking.customer_phone or "") == canonical_customer
+    ]
+    return owned[0] if len(owned) == 1 else None
+
+
+def reschedule_conversational_booking(
+    db: Session,
+    thread: Thread,
+    target: CalendarEvent,
+    requested_start: datetime,
+    audit: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Revalidate and move one account/thread-bound booking in place."""
+    if (
+        target.thread_id != thread.id
+        or target.sms_account_key != thread.sms_account_key
+        or canonical_phone_number(target.customer_phone or "")
+        != canonical_phone_number(thread.customer_phone)
+        or target.status != "scheduled"
+    ):
+        return {"status": "rejected", "reason": "The booking could not be identified safely."}
+    local_tz = ZoneInfo(BOOKING_LOCAL_TIMEZONE)
+    old_start = target.start_time.replace(tzinfo=local_tz)
+    old_end = target.end_time.replace(tzinfo=local_tz)
+    duration = max(1, int((old_end - old_start).total_seconds() // 60))
+    requested_end = requested_start + timedelta(minutes=duration)
+    if requested_start.replace(second=0, microsecond=0) == old_start.replace(second=0, microsecond=0):
+        return {"status": "already_rescheduled", "start": requested_start}
+
+    availability_error = booking_availability_error(
+        requested_start,
+        duration,
+        thread.sms_account_key,
+        exclude_event_id=target.id,
+    )
+    if availability_error:
+        return {"status": "rejected", "reason": availability_error}
+
+    if not calendar_service.reschedule_booking(
+        target,
+        requested_start,
+        requested_end,
+        thread.sms_account_key,
+    ):
+        return {"status": "rejected", "reason": "The calendar did not accept the new time."}
+    try:
+        db.flush()
+    except Exception:
+        # The external event was already patched. Make a single best-effort
+        # compensating move so a local write failure does not silently leave the
+        # shared calendar at a different time from the application record.
+        try:
+            calendar_service.reschedule_booking(
+                target,
+                old_start,
+                old_end,
+                thread.sms_account_key,
+            )
+        except Exception as rollback_exc:
+            print(f"Error rolling back calendar reschedule: {rollback_exc}")
+        target.start_time = old_start.replace(tzinfo=None)
+        target.end_time = old_end.replace(tzinfo=None)
+        raise
+    _add_structured_thread_event(
+        db,
+        thread,
+        "booking_rescheduled",
+        audit,
+        internal_booking_id=target.id,
+        external_booking_id=target.id if getattr(calendar_service, "service", None) else None,
+        previous_slot=_audit_iso(old_start, audit.get("timezone", "Australia/Hobart")),
+        requested_slot=_audit_iso(requested_start, audit.get("timezone", "Australia/Hobart")),
+        duration_minutes=duration,
+        provider_binding=(
+            "secondary-line-provider" if thread.sms_account_key == "secondary"
+            else "primary-line-provider"
+        ),
+        calendar_binding="business-calendar",
+        status_code="rescheduled",
+    )
+    thread.pending_booking = None
+    thread.pending_slots = None
+    return {"status": "rescheduled", "start": requested_start, "booking_id": target.id}
+
+
+def is_pending_service_answer(message: str, services: List[Dict[str, Any]]) -> bool:
+    """Allow a saved requested time only for a direct service-selection answer."""
+    if is_booking_cancellation_or_constraint(message):
+        return False
+    if explicitly_requested_service(message, services):
+        return True
+    normalized = " ".join(re.sub(r"[^a-z0-9]+", " ", (message or "").casefold()).split())
+    return bool(re.fullmatch(r"(?:service\s+)?[123]", normalized))
 
 
 def customer_slot_label(value: datetime) -> str:
@@ -6461,6 +6752,45 @@ def identical_ai_reply_exists_for_customer_turn(
         Message.at >= received_at,
     ).all()
     return any(normalized_reply_fingerprint(item.text) == fingerprint for item in prior_replies)
+
+
+def automated_reply_state_fingerprint(thread: Thread, reply: str) -> str:
+    """Identify an outbound booking decision without retaining customer content."""
+    state = {
+        "reply": normalized_reply_fingerprint(reply),
+        "pending_booking": thread.pending_booking or "",
+        "pending_slots": thread.pending_slots or "",
+    }
+    return hashlib.sha256(
+        json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def identical_ai_reply_exists_for_unchanged_state(
+    db: Session,
+    thread: Thread,
+    reply: str,
+) -> bool:
+    """Suppress the same automated reply until its booking decision state changes."""
+    latest_outbound = db.query(Message).filter(
+        Message.thread_id == thread.id,
+        Message.role.in_(["agent", "system"]),
+    ).order_by(Message.at.desc(), Message.id.desc()).first()
+    if not latest_outbound or latest_outbound.role != "system":
+        return False
+    if normalized_reply_fingerprint(latest_outbound.text) != normalized_reply_fingerprint(reply):
+        return False
+    expected = automated_reply_state_fingerprint(thread, reply)
+    latest_send = db.query(ThreadEvent).filter(
+        ThreadEvent.thread_id == thread.id,
+        ThreadEvent.type == "auto-reply-sent",
+    ).order_by(ThreadEvent.at.desc(), ThreadEvent.id.desc()).first()
+    if not latest_send:
+        return False
+    try:
+        return json.loads(latest_send.meta or "{}").get("decision_state_fingerprint") == expected
+    except (TypeError, json.JSONDecodeError):
+        return False
 
 
 def latest_customer_message(db: Session, thread_id: str) -> Optional[Message]:
@@ -7377,11 +7707,18 @@ def run_sms_reply_logic(
     }
     effective_body = current_customer_burst(history_msgs, body)
     clean_body = effective_body.strip().lower()
+    explicit_reschedule = is_explicit_reschedule_request(effective_body)
+    cancellation_or_constraint = (
+        is_booking_cancellation_or_constraint(effective_body) and not explicit_reschedule
+    )
     chronological_state = name_only_follow_up_preserves_slot(
         history_msgs, thread.sms_account_key, effective_body,
     )
-    if thread.pending_booking and is_explicit_booking_rejection(effective_body):
+    if thread.pending_booking and (
+        is_explicit_booking_rejection(effective_body) or cancellation_or_constraint
+    ):
         thread.pending_booking = None
+        thread.pending_slots = None
     pending_booking_at_turn_start = bool(thread.pending_booking)
     booking_proposal_candidate: Optional[str] = None
     interpreted_slot: Optional[str] = None
@@ -7455,23 +7792,79 @@ def run_sms_reply_logic(
         now_local,
     )
     requested_duration = requested_duration_minutes(history_msgs, effective_body)
-    requested_slot = parse_customer_requested_slot(effective_body, burst_received_at)
+    requested_slot = (
+        parse_reschedule_target_slot(effective_body, burst_received_at)
+        if explicit_reschedule
+        else parse_customer_requested_slot(effective_body, burst_received_at)
+    )
     exact_lookup_results: Dict[tuple[str, str, str, int, str], Dict[str, Any]] = {}
     pending_service_state: Optional[Dict[str, Any]] = None
     try:
         candidate_state = json.loads(thread.pending_booking or "")
         if isinstance(candidate_state, dict) and candidate_state.get("state") == "awaiting_service":
-            pending_service_state = candidate_state
-            requested_slot = parse_business_datetime(candidate_state["requested_slot"])
+            services_for_account = load_line_services(thread.sms_account_key)
+            if is_pending_service_answer(effective_body, services_for_account):
+                pending_service_state = candidate_state
+                requested_slot = parse_business_datetime(candidate_state["requested_slot"])
+            else:
+                # A saved clock time is scoped to the direct service question.
+                # Unrelated, negative or cancellation messages end that state;
+                # they must not revive the same question indefinitely.
+                thread.pending_booking = None
+                requested_slot = parse_customer_requested_slot(effective_body, burst_received_at)
     except (TypeError, ValueError, KeyError, json.JSONDecodeError):
         pass
     precomputed_reply: Optional[str] = None
     has_relative_date = bool(re.search(r"\btomorrow\b", effective_body, re.IGNORECASE))
 
+    if is_explicit_booking_cancellation_request(effective_body):
+        # Cancellation is destructive and has no existing deterministic customer
+        # confirmation path. Never let the model imply that a real appointment
+        # was cancelled; route an owned live booking to a human instead.
+        cancellation_target = validated_reschedule_target(db, thread, now_local)
+        if cancellation_target:
+            precomputed_reply = "[[HANDOFF: existing booking cancellation requires human confirmation]]"
+
+    if precomputed_reply is None and explicit_reschedule and requested_slot:
+        target = validated_reschedule_target(db, thread, now_local)
+        if not target:
+            precomputed_reply = "[[HANDOFF: existing booking could not be identified safely]]"
+        elif TRAINING_MODE_ENABLED or draft_only or is_simulation:
+            precomputed_reply = "[[HANDOFF: rescheduling requires a live confirmed booking update]]"
+        else:
+            requested_slot = align_reschedule_target_with_existing_booking(
+                effective_body,
+                requested_slot,
+                target.start_time.replace(tzinfo=ZoneInfo(BOOKING_LOCAL_TIMEZONE)),
+            )
+            reschedule_result = reschedule_conversational_booking(
+                db, thread, target, requested_slot, audit,
+            )
+            if reschedule_result.get("status") in {"rescheduled", "already_rescheduled"}:
+                interpreted_slot = requested_slot.isoformat()
+                precomputed_reply = (
+                    f"All good, I've moved it to {customer_slot_label(requested_slot)}."
+                )
+            else:
+                reason = str(reschedule_result.get("reason") or "The new time could not be verified.")
+                if "overlaps" in reason:
+                    live_calendar_lookup_succeeded = True
+                    precomputed_reply = (
+                        f"{customer_slot_label(requested_slot)} isn't available. "
+                        "What other time would suit you?"
+                    )
+                else:
+                    precomputed_reply = "[[HANDOFF: the booking could not be rescheduled safely]]"
+
     # Exact relative-time requests are resolved before prompt/model work. This
     # closes the draft-before-lookup race and prevents a capped broad list from
     # deciding an explicit requested clock time.
-    if requested_slot and not delayed_request_time and (has_relative_date or pending_service_state):
+    if (
+        precomputed_reply is None
+        and requested_slot
+        and not delayed_request_time
+        and (has_relative_date or pending_service_state)
+    ):
         service = explicitly_requested_service(effective_body, load_line_services(thread.sms_account_key))
         if not service:
             thread.pending_booking = json.dumps({
@@ -8271,22 +8664,32 @@ def run_sms_reply_logic(
         db.commit()
         return booking_confirmed, False
 
+    duplicate_same_turn = identical_ai_reply_exists_for_customer_turn(
+        db,
+        thread_id,
+        received_at_naive,
+        assistant_reply,
+    )
+    duplicate_unchanged_state = identical_ai_reply_exists_for_unchanged_state(
+        db, thread, assistant_reply,
+    )
     if (
         not TRAINING_MODE_ENABLED
         and not draft_only
-        and identical_ai_reply_exists_for_customer_turn(
-            db,
-            thread_id,
-            received_at_naive,
-            assistant_reply,
-        )
+        and (duplicate_same_turn or duplicate_unchanged_state)
     ):
         db.add(ThreadEvent(
             id=str(uuid.uuid4()),
             thread_id=thread_id,
             type="ai-reply-cancelled",
             agent_id=None,
-            meta=json.dumps({"reason": "duplicate-ai-reply-for-customer-turn"}),
+            meta=json.dumps({
+                "reason": (
+                    "duplicate-ai-reply-for-customer-turn"
+                    if duplicate_same_turn
+                    else "duplicate-ai-reply-unchanged-decision-state"
+                ),
+            }),
             at=datetime.utcnow(),
         ))
         db.commit()
@@ -8380,6 +8783,9 @@ def run_sms_reply_logic(
             at=reply_at_naive
         )
         meta_dict = {"calendar_lookup": "fresh"} if live_calendar_lookup_succeeded else {}
+        meta_dict["decision_state_fingerprint"] = automated_reply_state_fingerprint(
+            thread, assistant_reply,
+        )
         if booking_confirmed:
             meta_dict["bookingConfirmed"] = True
             
