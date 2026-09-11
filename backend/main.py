@@ -141,6 +141,84 @@ def sanitize_outgoing_urls(text: Optional[str]) -> Optional[str]:
     return URL_TRAILING_PUNCTUATION_RE.sub(r"\1", text)
 
 
+def validated_https_information_url(account_key: str) -> str:
+    """Return only the configured HTTPS information URL for one SMS line."""
+    if account_key not in FIRST_CONTACT_ACCOUNT_KEYS:
+        return ""
+    value = get_line_profile(account_key)["informationUrl"].strip()
+    if not value or any(character.isspace() or ord(character) < 32 for character in value):
+        return ""
+    try:
+        parsed = urlparse(value)
+        # Accessing port also rejects malformed authorities such as an invalid
+        # numeric port, while credentials are never appropriate in a customer URL.
+        _ = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return ""
+    return value
+
+
+def customer_requests_photos_or_information(message: str) -> bool:
+    """Identify turns where the account's customer-facing media link answers the request."""
+    return bool(re.search(
+        r"\b(?:photos?|pics?|pictures?|images?|gallery|media|website|web\s*site|link|url)\b"
+        r"|\b(?:more|further)\s+(?:info|information)\b",
+        str(message or ""),
+        re.IGNORECASE,
+    ))
+
+
+def reply_refers_to_photos_or_information_location(reply: str) -> bool:
+    """Recognize a reply that directs a customer to customer-facing media."""
+    return bool(re.search(
+        r"\b(?:view|see|browse|check|find|look\s+at)\b.{0,50}"
+        r"\b(?:photos?|pics?|pictures?|images?|gallery|media|website|web\s*site|link|url|"
+        r"(?:more|further)\s+(?:info|information))\b"
+        r"|\b(?:photos?|pics?|pictures?|images?|gallery|media)\b.{0,40}"
+        r"\b(?:here|online|website|web\s*site|link|url)\b",
+        str(reply or ""),
+        re.IGNORECASE,
+    ))
+
+
+def retain_account_information_url(reply: str, customer_message: str, account_key: str) -> str:
+    """Ensure a relevant reply uses its current account URL without contradictions."""
+    for other_account_key in FIRST_CONTACT_ACCOUNT_KEYS:
+        if other_account_key == account_key:
+            continue
+        other_url = validated_https_information_url(other_account_key)
+        if other_url:
+            reply = reply.replace(other_url, "")
+    reply = re.sub(r"[ \t]+\n", "\n", reply).strip()
+    information_url = validated_https_information_url(account_key)
+    if not information_url or not (
+        customer_requests_photos_or_information(customer_message)
+        or reply_refers_to_photos_or_information_location(reply)
+    ):
+        return reply
+    if re.search(
+        r"\b(?:photos?|pics?|pictures?|images?|gallery|media|information|info|link|url)\b"
+        r".{0,50}\b(?:unavailable|not\s+available|cannot|can't|do\s+not\s+have|don't\s+have|no\s+link)\b"
+        r"|\b(?:cannot|can't|do\s+not|don't)\b.{0,30}\b(?:share|send|show)\b.{0,20}"
+        r"\b(?:photos?|pics?|pictures?|images?|information|info|link|url)\b"
+        r"|\b(?:unavailable|not\s+available|cannot|can't|do\s+not\s+have|don't\s+have|no)\b"
+        r".{0,30}\b(?:photos?|pics?|pictures?|images?|gallery|media|information|info|link|url)\b",
+        reply,
+        re.IGNORECASE,
+    ):
+        return f"You can view photos and more information here: {information_url}"
+    if information_url not in reply:
+        return f"{reply.rstrip()}\n\nPhotos and more information: {information_url}"
+    return reply
+
+
 def _normalise_url_for_comparison(url: str) -> str:
     return URL_TRAILING_PUNCTUATION_RE.sub(r"\1", url).rstrip("/").lower()
 
@@ -2202,7 +2280,7 @@ def resolve_provider_context(account_key: str) -> Dict[str, str]:
         "account_key": account_key,
         "sms_line": account_key,
         "provider_name": provider_name,
-        "information_url": profile["informationUrl"].strip(),
+        "information_url": validated_https_information_url(account_key),
     }
 
 def _line_services_path(account_key: str) -> str:
@@ -2529,7 +2607,7 @@ def get_line_business_variable_values(account_key: str) -> Dict[str, str]:
     # explicitly to that line profile/catalogue.
     values = get_business_variable_values() if account_key == "primary" else {}
     profile = get_line_profile(account_key)
-    information_url = profile["informationUrl"].strip()
+    information_url = validated_https_information_url(account_key)
     if information_url:
         # Historical approved examples use {website}. For an SMS conversation,
         # that token must resolve to the receiving line's saved information link,
@@ -2613,6 +2691,13 @@ def build_business_context(query: str, limit: int = 3, account_key: str = "prima
     services_context = get_live_services_context(account_key)
     if services_context:
         output_parts.append(services_context)
+    information_url = validated_https_information_url(account_key)
+    if information_url:
+        output_parts.append(
+            "[Authoritative current SMS line photo and information link]\n"
+            f"Validated HTTPS URL: {information_url}\n"
+            "Use this URL verbatim when the customer asks where to view photos or further information."
+        )
     return "\n\n".join(output_parts) or "No relevant business records found."
 
 
@@ -2682,6 +2767,7 @@ def generate_information_request_content(
         get_style_examples(customer_message.text, account_key=thread.sms_account_key),
         STYLE_PROFILE_STORE.get_applied(),
     )
+    information_url = validated_https_information_url(thread.sms_account_key)
     instructions += (
         "\n\nThe business owner has supplied the missing information below. Treat it as "
         "authoritative business information, not as a customer message. Produce a natural, concise "
@@ -2692,9 +2778,18 @@ def generate_information_request_content(
         "into permanent business rules. Return only valid JSON with exactly these string fields: "
         '"customer_reply" and "knowledge_summary".'
     )
+    if information_url:
+        instructions += (
+            "\n\nAuthoritative current SMS line photo and information link: "
+            f"{information_url}. Include this exact URL when the reply tells the customer where "
+            "to view photos or further information. Do not say those are unavailable."
+        )
     prompt = (
         f"Customer's unanswered message:\n{customer_message.text}\n\n"
-        f"Information supplied by the business owner:\n{supplied_information}"
+        f"Information supplied by the business owner:\n{supplied_information}\n\n"
+        "Current account evidence:\n"
+        + (f"Validated HTTPS photo and information URL: {information_url}" if information_url
+           else "No validated HTTPS photo or information URL is configured for this SMS line.")
     )
     response = openai_client.responses.create(
         model="gpt-5.6-terra",
@@ -2714,6 +2809,9 @@ def generate_information_request_content(
         raise HTTPException(status_code=502, detail="The AI could not format the supplied information. Nothing was sent.") from exc
 
     customer_reply = sanitize_outgoing_urls(str(result.get("customer_reply", "")).strip())
+    customer_reply = retain_account_information_url(
+        customer_reply or "", customer_message.text, thread.sms_account_key
+    )
     knowledge_summary = str(result.get("knowledge_summary", "")).strip()
     if not customer_reply or not knowledge_summary:
         raise HTTPException(status_code=502, detail="The AI returned an incomplete answer. Nothing was sent.")
@@ -8213,7 +8311,7 @@ def run_sms_reply_logic(
                 examples,
                 None if booking_or_availability_turn else STYLE_PROFILE_STORE.get_applied(),
             )
-            line_information_url = business_variables.get("line_information_url", "").strip()
+            line_information_url = validated_https_information_url(thread.sms_account_key)
             if line_information_url:
                 instructions += (
                     "\n\nCurrent SMS line information link: "
@@ -8765,6 +8863,9 @@ def run_sms_reply_logic(
         assistant_reply or "",
         history_msgs,
         effective_body,
+    )
+    assistant_reply = retain_account_information_url(
+        assistant_reply or "", effective_body, thread.sms_account_key
     )
 
     if not assistant_reply:
@@ -16038,8 +16139,21 @@ def update_line_profiles(payload: LineProfilesInput):
     }
     for key, profile in profiles.items():
         url = profile["informationUrl"]
-        if url and not re.match(r"^https?://", url, flags=re.IGNORECASE):
-            raise HTTPException(status_code=422, detail=f"{key} information URL must start with http:// or https://")
+        if url:
+            try:
+                parsed = urlparse(url)
+                _ = parsed.port
+            except ValueError:
+                parsed = None
+            if (
+                parsed is None
+                or parsed.scheme.lower() != "https"
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or any(character.isspace() or ord(character) < 32 for character in url)
+            ):
+                raise HTTPException(status_code=422, detail=f"{key} information URL must be a valid HTTPS URL")
     try:
         save_line_profiles(profiles)
     except OSError as exc:

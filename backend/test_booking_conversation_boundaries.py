@@ -104,7 +104,7 @@ def test_secondary_account_receives_its_own_services_but_not_primary_knowledge_o
         id="anonymous-message",
         thread_id=thread.id,
         role="customer",
-        text="Hello Anonymous",
+        text="Where can I see your photos?",
         provider_message_id="provider-anonymous",
         at=now,
     )
@@ -118,7 +118,7 @@ def test_secondary_account_receives_its_own_services_but_not_primary_knowledge_o
             calls.append(kwargs)
             return type("Response", (), {
                 "output": [],
-                "output_text": "Hello from Anonymous.",
+                "output_text": "Sorry, photos are unavailable right now.",
             })()
 
     monkeypatch.setattr(
@@ -144,7 +144,11 @@ def test_secondary_account_receives_its_own_services_but_not_primary_knowledge_o
     assert thread.state == "auto-reply"
     assert thread.pending_slots is None
     messages = db.query(Message).filter(Message.thread_id == thread.id).order_by(Message.at).all()
-    assert [message.text for message in messages] == ["Hello Anonymous", "Hello from Anonymous."]
+    assert [message.text for message in messages] == [
+        "Where can I see your photos?",
+        "You can view photos and more information here: https://line-two.example/info",
+    ]
+    assert "unavailable" not in messages[-1].text.lower()
     assert "Tori-only knowledge" not in str(calls[0]["input"])
     assert "Private Line Two Service" in str(calls[0]["input"])
     assert "Scalp Care" not in str(calls[0]["input"])
