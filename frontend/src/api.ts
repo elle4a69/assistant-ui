@@ -880,7 +880,7 @@ export interface KnowledgeCuratorProposal {
 
 export interface KnowledgeCuratorRun {
   id: string;
-  status: 'completed' | 'completed_with_warning';
+  status: 'completed' | 'completed_with_warning' | 'failed';
   error_code?: string | null;
   message: string;
   started_at: string;
@@ -890,11 +890,18 @@ export interface KnowledgeCuratorRun {
   created_proposals: number;
   safe_repairs_completed?: number;
   ai_helper_status?: string | null;
+  trigger?: 'manual' | 'automatic';
 }
 
 export interface KnowledgeCuratorState {
   runs: KnowledgeCuratorRun[];
   proposals: KnowledgeCuratorProposal[];
+  automation: {
+    enabled: boolean;
+    interval_seconds: number | null;
+    last_run_at: string | null;
+    last_status: string | null;
+  };
 }
 
 export interface SmsLearningPreviewItem {

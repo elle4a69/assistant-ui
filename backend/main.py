@@ -3433,6 +3433,23 @@ KNOWLEDGE_CURATOR_MAX_BACKUPS = 10
 # Use the deployment's supported model selection when it is configured.  The
 # fallback preserves the application default for existing installations.
 KNOWLEDGE_CURATOR_MODEL = os.getenv("KNOWLEDGE_CURATOR_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.6-terra"
+
+
+def _knowledge_curator_auto_interval(value: Any) -> Optional[int]:
+    """Return a bounded interval, failing closed for invalid configuration."""
+    try:
+        interval = int(value)
+    except (TypeError, ValueError):
+        return None
+    return interval if 300 <= interval <= 2_592_000 else None
+
+
+KNOWLEDGE_CURATOR_AUTO_ENABLED = str(os.getenv("KNOWLEDGE_CURATOR_AUTO_ENABLED") or "").strip().casefold() in {
+    "1", "true", "yes", "on",
+}
+KNOWLEDGE_CURATOR_AUTO_INTERVAL_SECONDS = _knowledge_curator_auto_interval(
+    os.getenv("KNOWLEDGE_CURATOR_AUTO_INTERVAL_SECONDS") or 86_400
+)
 KNOWLEDGE_CURATOR_FINDING_TYPES = {
     "exact_duplicate",
     "incompatible_active_records",
@@ -3505,13 +3522,19 @@ def _bound_curator_proposals(proposals: List[Dict[str, Any]]) -> List[Dict[str, 
     return resolved[-(KNOWLEDGE_CURATOR_MAX_PROPOSALS - len(unresolved)):] + unresolved
 
 
-def _load_curator_state() -> Dict[str, Any]:
+def _load_curator_state(*, fail_on_invalid: bool = False) -> Dict[str, Any]:
     try:
         with open(KNOWLEDGE_CURATOR_STATE_PATH, "r", encoding="utf-8") as handle:
             state = json.load(handle)
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+    except FileNotFoundError:
+        return _curator_empty_state()
+    except (OSError, json.JSONDecodeError) as exc:
+        if fail_on_invalid:
+            raise ValueError("Knowledge curator state is unavailable.") from exc
         return _curator_empty_state()
     if not isinstance(state, dict):
+        if fail_on_invalid:
+            raise ValueError("Knowledge curator state is invalid.")
         return _curator_empty_state()
     # Version 1 had the same safe proposal identity but no response-only
     # previews.  Read it losslessly enough for audit history, while dropping
@@ -3549,6 +3572,7 @@ def _curator_safe_state_run(run: Dict[str, Any]) -> Dict[str, Any]:
         "created_proposals": bounded_count(run.get("created_proposals")),
         "safe_repairs_completed": bounded_count(run.get("safe_repairs_completed")),
         "ai_helper_status": str(run.get("ai_helper_status") or "")[:80] or None,
+        "trigger": str(run.get("trigger") or "manual")[:40] if str(run.get("trigger") or "manual") in {"manual", "automatic"} else "manual",
     }
 
 
@@ -3571,6 +3595,7 @@ def _curator_safe_maintenance_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
         "id": str(entry.get("id") or "")[:160],
         "timestamp": str(entry.get("timestamp") or "")[:64],
         "result": str(entry.get("result") or "")[:80],
+        "trigger": str(entry.get("trigger") or "manual")[:40] if str(entry.get("trigger") or "manual") in {"manual", "automatic"} else "manual",
         "repaired_count": repaired_count,
         "repairs": safe_repairs,
     }
@@ -3749,7 +3774,18 @@ def _present_curator_state(state: Dict[str, Any], *, unresolved_only: bool = Fal
     proposals = state.get("proposals", [])
     if unresolved_only:
         proposals = [item for item in proposals if item.get("status") in KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES]
-    return {"runs": list(reversed(state.get("runs", []))), "proposals": [_present_curator_proposal(item, current) for item in reversed(proposals)]}
+    automatic_runs = [item for item in state.get("runs", []) if item.get("trigger") == "automatic"]
+    latest_automatic = automatic_runs[-1] if automatic_runs else None
+    return {
+        "runs": list(reversed(state.get("runs", []))),
+        "proposals": [_present_curator_proposal(item, current) for item in reversed(proposals)],
+        "automation": {
+            "enabled": bool(KNOWLEDGE_CURATOR_AUTO_ENABLED and KNOWLEDGE_CURATOR_AUTO_INTERVAL_SECONDS),
+            "interval_seconds": KNOWLEDGE_CURATOR_AUTO_INTERVAL_SECONDS,
+            "last_run_at": latest_automatic.get("completed_at") if latest_automatic else None,
+            "last_status": latest_automatic.get("status") if latest_automatic else None,
+        },
+    }
 
 
 def _curator_records() -> List[Dict[str, Any]]:
@@ -4310,71 +4346,152 @@ def _curator_enrich_proposals(findings: List[Dict[str, Any]]) -> tuple[Dict[str,
     return enriched, None
 
 
+def _run_knowledge_curator_locked(*, trigger: str, audit_time: Optional[datetime] = None) -> Dict[str, Any]:
+    """Run one bounded proposal-only audit while the curator lock is held."""
+    if trigger not in {"manual", "automatic"}:
+        raise ValueError("Unknown knowledge curator trigger.")
+    started_at = audit_time or datetime.utcnow()
+    started = started_at.isoformat() + "Z"
+    # Curator runs are proposal-only inspections. They must never rewrite,
+    # merge, scope, supersede or activate production knowledge merely because
+    # a manual or configured automatic audit requested a preview.
+    maintenance = {
+        "id": f"kcm-{uuid.uuid4()}", "timestamp": started,
+        "result": "proposal_only", "trigger": trigger, "repaired_count": 0, "repairs": [],
+    }
+    findings = inspect_knowledge_integrity()
+    enrichments, error_code = _curator_enrich_proposals(findings)
+    state = _load_curator_state()
+    now_text = (audit_time or datetime.utcnow()).isoformat() + "Z"
+    by_fingerprint = {item.get("fingerprint"): item for item in state["proposals"]}
+    observed_fingerprints = {item["fingerprint"] for item in findings}
+    for prior in state["proposals"]:
+        if prior.get("status") in KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES and prior.get("fingerprint") not in observed_fingerprints:
+            # Reconciliation closes only the curator card. It never edits
+            # an existing record or any quarantined draft.
+            prior["status"] = "resolved_no_longer_detected"
+            prior["resolution"] = "dismiss_for_now"
+            prior["updated_at"] = now_text
+    created = 0
+    for finding in findings:
+        existing = by_fingerprint.get(finding["fingerprint"])
+        if existing:
+            existing["updated_at"] = now_text
+            existing["last_seen_at"] = now_text
+            continue
+        proposal = {
+            **finding,
+            **enrichments.get(finding["fingerprint"], {}),
+            "id": f"kcp-{finding['fingerprint'][:24]}",
+            "status": "proposed",
+            "created_at": now_text,
+            "updated_at": now_text,
+            "last_seen_at": now_text,
+            "draft_entry_id": None,
+        }
+        state["proposals"].append(proposal)
+        created += 1
+    counts = dict(Counter(item["finding_type"] for item in findings))
+    run = {
+        "id": f"kcr-{uuid.uuid4()}",
+        "status": "completed_with_warning" if error_code else "completed",
+        "error_code": error_code,
+        "message": _curator_owner_model_message(error_code),
+        "started_at": started,
+        "completed_at": now_text,
+        "finding_counts": counts,
+        "finding_count": len(findings),
+        "created_proposals": created,
+        "safe_repairs_completed": maintenance["repaired_count"],
+        "ai_helper_status": "ready" if not error_code else error_code,
+        "trigger": trigger,
+    }
+    state["runs"].append(run)
+    state.setdefault("maintenance_history", []).append(maintenance)
+    _save_curator_state(state)
+    return {"run": run, "proposals": _present_curator_state(state, unresolved_only=True)["proposals"]}
+
+
 def run_knowledge_curator() -> Dict[str, Any]:
-    """Run one bounded, idempotent, manual audit."""
+    """Run one bounded, idempotent, manually requested audit."""
     if not KNOWLEDGE_CURATOR_LOCK.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A knowledge audit is already running.")
     try:
-        started = datetime.utcnow().isoformat() + "Z"
-        # A curator run is a manually initiated, proposal-only inspection.
-        # It must never rewrite, merge, scope, supersede or activate production
-        # knowledge merely because an operator requested a preview.
-        maintenance = {
-            "id": f"kcm-{uuid.uuid4()}", "timestamp": started,
-            "result": "proposal_only", "repaired_count": 0, "repairs": [],
-        }
-        findings = inspect_knowledge_integrity()
-        enrichments, error_code = _curator_enrich_proposals(findings)
-        state = _load_curator_state()
-        now_text = datetime.utcnow().isoformat() + "Z"
-        by_fingerprint = {item.get("fingerprint"): item for item in state["proposals"]}
-        observed_fingerprints = {item["fingerprint"] for item in findings}
-        for prior in state["proposals"]:
-            if prior.get("status") in KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES and prior.get("fingerprint") not in observed_fingerprints:
-                # Reconciliation closes only the curator card. It never edits
-                # an existing record or any quarantined draft.
-                prior["status"] = "resolved_no_longer_detected"
-                prior["resolution"] = "dismiss_for_now"
-                prior["updated_at"] = now_text
-        created = 0
-        for finding in findings:
-            existing = by_fingerprint.get(finding["fingerprint"])
-            if existing:
-                existing["updated_at"] = now_text
-                existing["last_seen_at"] = now_text
-                continue
-            proposal = {
-                **finding,
-                **enrichments.get(finding["fingerprint"], {}),
-                "id": f"kcp-{finding['fingerprint'][:24]}",
-                "status": "proposed",
-                "created_at": now_text,
-                "updated_at": now_text,
-                "last_seen_at": now_text,
-                "draft_entry_id": None,
-            }
-            state["proposals"].append(proposal)
-            created += 1
-        counts = dict(Counter(item["finding_type"] for item in findings))
-        run = {
-            "id": f"kcr-{uuid.uuid4()}",
-            "status": "completed_with_warning" if error_code else "completed",
-            "error_code": error_code,
-            "message": _curator_owner_model_message(error_code),
-            "started_at": started,
-            "completed_at": now_text,
-            "finding_counts": counts,
-            "finding_count": len(findings),
-            "created_proposals": created,
-            "safe_repairs_completed": maintenance["repaired_count"],
-            "ai_helper_status": "ready" if not error_code else error_code,
-        }
-        state["runs"].append(run)
-        state.setdefault("maintenance_history", []).append(maintenance)
-        _save_curator_state(state)
-        return {"run": run, "proposals": _present_curator_state(state, unresolved_only=True)["proposals"]}
+        return _run_knowledge_curator_locked(trigger="manual")
     finally:
         KNOWLEDGE_CURATOR_LOCK.release()
+
+
+def _curator_parse_timestamp(value: Any) -> Optional[datetime]:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except (TypeError, ValueError):
+        return None
+
+
+def run_due_knowledge_curator(*, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Run configured automatic curation once when due, otherwise fail closed."""
+    interval = KNOWLEDGE_CURATOR_AUTO_INTERVAL_SECONDS
+    if not KNOWLEDGE_CURATOR_AUTO_ENABLED or interval is None:
+        return {"status": "disabled"}
+    if not KNOWLEDGE_CURATOR_LOCK.acquire(blocking=False):
+        return {"status": "busy"}
+    try:
+        try:
+            state = _load_curator_state(fail_on_invalid=True)
+        except ValueError:
+            logger.error("Automatic knowledge audit skipped because curator state is unavailable")
+            return {"status": "state_unavailable"}
+        current_time = now or datetime.utcnow()
+        automatic_runs = [item for item in state.get("runs", []) if item.get("trigger") == "automatic"]
+        if automatic_runs:
+            last_started = _curator_parse_timestamp(automatic_runs[-1].get("started_at"))
+            if last_started is None:
+                logger.error("Automatic knowledge audit skipped because schedule state is invalid")
+                return {"status": "state_unavailable"}
+            if current_time < last_started + timedelta(seconds=interval):
+                return {"status": "not_due"}
+        try:
+            result = _run_knowledge_curator_locked(trigger="automatic", audit_time=current_time)
+            return {"status": "completed", **result}
+        except Exception as exc:
+            # Record a content-free attempt so a persistent fault cannot create
+            # a tight retry loop. Automatic failures never invoke resolution or
+            # any knowledge mutation path.
+            completed = datetime.utcnow().isoformat() + "Z"
+            failed_run = {
+                "id": f"kcr-{uuid.uuid4()}", "status": "failed",
+                "error_code": "curator_automatic_run_failed",
+                "message": "The automatic knowledge audit failed safely and made no changes.",
+                "started_at": current_time.isoformat() + "Z", "completed_at": completed,
+                "finding_counts": {}, "finding_count": 0, "created_proposals": 0,
+                "safe_repairs_completed": 0, "ai_helper_status": None, "trigger": "automatic",
+            }
+            try:
+                failure_state = _load_curator_state(fail_on_invalid=True)
+                failure_state["runs"].append(failed_run)
+                _save_curator_state(failure_state)
+            except Exception:
+                logger.exception("Automatic knowledge audit failure could not be recorded")
+                return {"status": "state_unavailable"}
+            logger.error("Automatic knowledge audit failed safely: %s", type(exc).__name__)
+            return {"status": "failed", "run": _curator_safe_state_run(failed_run)}
+    finally:
+        KNOWLEDGE_CURATOR_LOCK.release()
+
+
+async def knowledge_curator_worker() -> None:
+    """Poll durable schedule state; all due/run decisions remain synchronous."""
+    while True:
+        try:
+            await asyncio.to_thread(run_due_knowledge_curator)
+        except Exception as exc:
+            # Keep the scheduler alive without exposing provider or record data.
+            logger.error("Automatic knowledge audit worker recovered from %s", type(exc).__name__)
+        await asyncio.sleep(60)
 
 
 def get_knowledge_curator_state() -> Dict[str, Any]:
@@ -5587,6 +5704,12 @@ class PushSubscriptionInput(BaseModel):
 
 # FastAPI app setup
 app = FastAPI(title="Assistant UI Backend")
+
+
+@app.on_event("startup")
+async def start_knowledge_curator_worker() -> None:
+    if KNOWLEDGE_CURATOR_AUTO_ENABLED and KNOWLEDGE_CURATOR_AUTO_INTERVAL_SECONDS is not None:
+        asyncio.create_task(knowledge_curator_worker())
 app.include_router(anon_content_router)
 
 # CORS setup

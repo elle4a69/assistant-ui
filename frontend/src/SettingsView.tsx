@@ -186,7 +186,10 @@ export default function SettingsView() {
   const [generatingSmsLearningPreview, setGeneratingSmsLearningPreview] = useState(false);
   const [importingSmsLearningCandidates, setImportingSmsLearningCandidates] = useState(false);
   const [smsLearningPreview, setSmsLearningPreview] = useState<SmsLearningPreview | null>(null);
-  const [knowledgeCurator, setKnowledgeCurator] = useState<KnowledgeCuratorState>({ runs: [], proposals: [] });
+  const [knowledgeCurator, setKnowledgeCurator] = useState<KnowledgeCuratorState>({
+    runs: [], proposals: [],
+    automation: { enabled: false, interval_seconds: null, last_run_at: null, last_status: null },
+  });
   const [runningKnowledgeAudit, setRunningKnowledgeAudit] = useState(false);
   const [updatingCuratorProposalId, setUpdatingCuratorProposalId] = useState<string | null>(null);
 
@@ -1951,6 +1954,7 @@ export default function SettingsView() {
                         <div>
                           <h3 id="knowledge-curator-heading" className="text-sm font-bold text-violet-950">Knowledge health: {needsAttention ? 'Needs attention' : 'Good'}</h3>
                           <p className="mt-1 max-w-2xl text-[11px] leading-relaxed text-violet-800">Check and organise knowledge keeps customer replies safe. It can tidy proven technical labels, but it never turns on, replaces, or removes an answer.</p>
+                          <p className="mt-1 text-[11px] text-violet-700">Automatic checks: {knowledgeCurator.automation.enabled ? 'Configured' : 'Off'}. Automatic checks create review proposals only.</p>
                         </div>
                         <button type="button" onClick={handleRunKnowledgeAudit} disabled={runningKnowledgeAudit} className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-violet-700 px-3 py-2 text-[11px] font-bold text-white hover:bg-violet-800 disabled:opacity-50">
                           <RefreshCw className={`h-3.5 w-3.5 ${runningKnowledgeAudit ? 'animate-spin' : ''}`} />
@@ -1963,7 +1967,7 @@ export default function SettingsView() {
                         <div className="rounded-lg border border-violet-100 bg-white p-2"><strong>Decisions</strong><br />{decisions.length ? `We need your answer to ${decisions.length} business question${decisions.length === 1 ? '' : 's'}.` : 'No business decisions needed.'}</div>
                         <div className="rounded-lg border border-violet-100 bg-white p-2"><strong>Private information</strong><br />{privateItems.length ? `${privateItems.length} item${privateItems.length === 1 ? '' : 's'} kept out of customer replies.` : 'Nothing is waiting privately.'}</div>
                         <div className="rounded-lg border border-violet-100 bg-white p-2"><strong>Last checked</strong><br />{new Date(latest.completed_at).toLocaleString()}<br /><span className={latest.error_code ? 'text-amber-700' : 'text-emerald-700'}>AI helper: {latest.error_code ? latest.message : 'Ready'}</span></div>
-                      </div> : <p className="mt-3 text-[11px] text-violet-700">No check has been run yet. Checks run only when you choose the button.</p>}
+                      </div> : <p className="mt-3 text-[11px] text-violet-700">No check has been run yet. {knowledgeCurator.automation.enabled ? 'The configured automatic check will run when due.' : 'Use the button to run one manually.'}</p>}
 
                       {latest?.safe_repairs_completed ? <p className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-[11px] text-emerald-900">{latest.safe_repairs_completed} older record{latest.safe_repairs_completed === 1 ? ' was' : 's were'} missing technical labels. They were repaired without changing what the agent knows or when it uses it.</p> : null}
 

@@ -113,6 +113,17 @@ BOOKING_TIMEZONE=Australia/Hobart
 
 The FastAPI adapter currently covers discovery only. Final booking creation still uses the legacy calendar adapter until client identification, provider selection, idempotency, and confirmed booking creation are connected to FastAPI Bookings.
 
+### Automatic knowledge checks
+
+Knowledge curation is manual by default. Deployments may opt into the existing proposal-only audit on a bounded interval:
+
+```env
+KNOWLEDGE_CURATOR_AUTO_ENABLED=true
+KNOWLEDGE_CURATOR_AUTO_INTERVAL_SECONDS=86400
+```
+
+The interval must be between 300 and 2592000 seconds. Invalid configuration disables automatic checks. Automatic checks only create review proposals; they never approve, activate, merge, supersede, or otherwise modify knowledge records.
+
 ### 3. Verify on UI
 - Open http://localhost:5190 in your browser.
 - Switch to the **Customer SMS Sim** tab to view the customer chat bubbles and use the quick-action chips to test booking.

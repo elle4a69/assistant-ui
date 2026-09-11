@@ -8,6 +8,7 @@ const apiSource = readFileSync(new URL('../src/api.ts', import.meta.url), 'utf8'
 test('Settings exposes a compact, proposal-only owner knowledge workflow', () => {
   assert.match(settingsSource, /Knowledge health:/);
   assert.match(settingsSource, /Check and organise knowledge/);
+  assert.match(settingsSource, /Automatic checks create review proposals only/);
   assert.match(settingsSource, /Safe repairs/);
   assert.match(settingsSource, /Business decision/);
   assert.match(settingsSource, /Potentially outdated prices or times/);
@@ -27,4 +28,6 @@ test('curator client uses the protected settings API and explicit state transiti
   assert.match(apiSource, /\/api\/settings\/knowledge-curator\/proposals\/\$\{encodeURIComponent\(id\)\}\/resolve/);
   assert.match(apiSource, /KnowledgeCuratorResolution/);
   assert.match(apiSource, /safe_repairs_completed/);
+  assert.match(apiSource, /interval_seconds/);
+  assert.match(apiSource, /'manual' \| 'automatic'/);
 });

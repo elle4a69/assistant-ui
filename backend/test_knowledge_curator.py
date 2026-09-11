@@ -519,7 +519,13 @@ def test_curator_settings_api_is_admin_protected(tmp_path, monkeypatch):
     client.cookies.set(main.AUTH_COOKIE_NAME, main._admin_session_token(expires))
     response = client.get("/api/settings/knowledge-curator")
     assert response.status_code == 200
-    assert response.json() == {"runs": [], "proposals": []}
+    assert response.json() == {
+        "runs": [], "proposals": [],
+        "automation": {
+            "enabled": False, "interval_seconds": 86400,
+            "last_run_at": None, "last_status": None,
+        },
+    }
 
 
 def test_curator_previews_are_returned_only_to_authenticated_settings_client(tmp_path, monkeypatch):
@@ -597,6 +603,81 @@ def test_ambiguous_or_invalid_legacy_metadata_is_not_repaired(tmp_path, monkeypa
     assert result["run"]["safe_repairs_completed"] == 0
     assert (knowledge / main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8") == before
     assert "invalid_metadata" in result["run"]["finding_counts"]
+
+
+def test_configured_automatic_curator_is_due_once_and_remains_proposal_only(tmp_path, monkeypatch):
+    knowledge, data = curator_paths(tmp_path, monkeypatch, [
+        record("primary-price", text="The service costs $100."),
+        record("secondary-price", text="The service costs $200.", scope="secondary", sms_account_key="secondary"),
+    ])
+    monkeypatch.setattr(main, "KNOWLEDGE_CURATOR_AUTO_ENABLED", True)
+    monkeypatch.setattr(main, "KNOWLEDGE_CURATOR_AUTO_INTERVAL_SECONDS", 3600)
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", True)
+    before = (knowledge / main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8")
+
+    first = main.run_due_knowledge_curator(now=NOW)
+    second = main.run_due_knowledge_curator(now=NOW)
+
+    assert first["status"] == "completed"
+    assert first["run"]["trigger"] == "automatic"
+    assert first["run"]["created_proposals"] >= 2
+    assert second == {"status": "not_due"}
+    assert (knowledge / main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8") == before
+    saved = json.loads((data / "curator.json").read_text(encoding="utf-8"))
+    assert saved["runs"][-1]["trigger"] == "automatic"
+    assert saved["maintenance_history"][-1]["trigger"] == "automatic"
+    assert all(item["status"] == "proposed" for item in saved["proposals"])
+    incompatible = [item for item in saved["proposals"] if item["finding_type"] == "incompatible_active_records"]
+    assert incompatible == []
+    automation = main.get_knowledge_curator_state()["automation"]
+    assert automation == {
+        "enabled": True, "interval_seconds": 3600,
+        "last_run_at": "2030-01-15T12:00:00Z", "last_status": "completed_with_warning",
+    }
+
+
+def test_automatic_curator_is_disabled_and_invalid_configuration_fails_closed(monkeypatch):
+    calls = []
+    monkeypatch.setattr(main, "inspect_knowledge_integrity", lambda: calls.append(True))
+    monkeypatch.setattr(main, "KNOWLEDGE_CURATOR_AUTO_ENABLED", False)
+    monkeypatch.setattr(main, "KNOWLEDGE_CURATOR_AUTO_INTERVAL_SECONDS", 3600)
+    assert main.run_due_knowledge_curator(now=NOW) == {"status": "disabled"}
+    monkeypatch.setattr(main, "KNOWLEDGE_CURATOR_AUTO_ENABLED", True)
+    monkeypatch.setattr(main, "KNOWLEDGE_CURATOR_AUTO_INTERVAL_SECONDS", None)
+    assert main.run_due_knowledge_curator(now=NOW) == {"status": "disabled"}
+    assert calls == []
+    assert main._knowledge_curator_auto_interval("not-a-number") is None
+    assert main._knowledge_curator_auto_interval(299) is None
+
+
+def test_automatic_curator_failure_is_audited_and_not_retried_early(tmp_path, monkeypatch):
+    knowledge, data = curator_paths(tmp_path, monkeypatch, [record("safe")])
+    monkeypatch.setattr(main, "KNOWLEDGE_CURATOR_AUTO_ENABLED", True)
+    monkeypatch.setattr(main, "KNOWLEDGE_CURATOR_AUTO_INTERVAL_SECONDS", 3600)
+    monkeypatch.setattr(main, "inspect_knowledge_integrity", lambda: (_ for _ in ()).throw(RuntimeError("synthetic")))
+    before = (knowledge / main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8")
+
+    failed = main.run_due_knowledge_curator(now=NOW)
+    retry = main.run_due_knowledge_curator(now=NOW)
+
+    assert failed["status"] == "failed"
+    assert failed["run"]["error_code"] == "curator_automatic_run_failed"
+    assert retry == {"status": "not_due"}
+    assert (knowledge / main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8") == before
+    saved = json.loads((data / "curator.json").read_text(encoding="utf-8"))
+    assert saved["runs"][-1]["status"] == "failed"
+    assert "synthetic" not in json.dumps(saved)
+
+
+def test_automatic_curator_does_not_overwrite_invalid_state(tmp_path, monkeypatch):
+    _, data = curator_paths(tmp_path, monkeypatch, [record("safe")])
+    monkeypatch.setattr(main, "KNOWLEDGE_CURATOR_AUTO_ENABLED", True)
+    monkeypatch.setattr(main, "KNOWLEDGE_CURATOR_AUTO_INTERVAL_SECONDS", 3600)
+    state_path = data / "curator.json"
+    state_path.write_text("{invalid", encoding="utf-8")
+
+    assert main.run_due_knowledge_curator(now=NOW) == {"status": "state_unavailable"}
+    assert state_path.read_text(encoding="utf-8") == "{invalid"
 
 
 def test_failed_metadata_bulk_repair_rolls_back_the_original_file(tmp_path, monkeypatch):
