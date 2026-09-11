@@ -105,6 +105,8 @@ import {
   unlockIncomingAlarmAudio
 } from './incomingMessageAlarm';
 import OperationsAIChat from './OperationsAIChat';
+import { applyVariableTokenAtSelection } from './templateVariableInsertion';
+import type { VariableInsertTarget } from './templateVariableInsertion';
 
 const BUILT_IN_TEMPLATE_VARIABLES = [
   { key: 'current_time', token: '{current_time}', label: 'Current business time', scope: 'AI prompts', description: 'Current business time', required: false, required_status: 'optional' },
@@ -512,10 +514,7 @@ export default function SettingsView() {
     setBusinessVariables((current) => current.filter((_, itemIndex) => itemIndex !== index));
   };
 
-  const [variableInsertTarget, setVariableInsertTarget] = useState<{
-    element: HTMLInputElement | HTMLTextAreaElement;
-    apply: (value: string) => void;
-  } | null>(null);
+  const [variableInsertTarget, setVariableInsertTarget] = useState<VariableInsertTarget | null>(null);
 
   const rememberVariableTarget = (apply: (value: string) => void) => (
     event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>
@@ -526,16 +525,13 @@ export default function SettingsView() {
       triggerBanner('error', 'Tap in a prompt or text field first, then tap the variable.');
       return;
     }
-    const { element, apply } = variableInsertTarget;
-    const start = element.selectionStart ?? element.value.length;
-    const end = element.selectionEnd ?? start;
-    const inserted = `{${token}}`;
-    apply(`${element.value.slice(0, start)}${inserted}${element.value.slice(end)}`);
+    const { element } = variableInsertTarget;
+    const nextCaret = applyVariableTokenAtSelection(variableInsertTarget, token);
     setCopiedVariableToken(token);
     window.setTimeout(() => setCopiedVariableToken(null), 1800);
     window.requestAnimationFrame(() => {
       element.focus();
-      element.setSelectionRange(start + inserted.length, start + inserted.length);
+      element.setSelectionRange(nextCaret, nextCaret);
     });
   };
 
@@ -2219,7 +2215,9 @@ export default function SettingsView() {
                   </div>
                   <div className="flex gap-2">
                     <textarea
+                      aria-label="Booking SMS confirmation template"
                       value={smsTemplate}
+                      onFocus={rememberVariableTarget(setSmsTemplate)}
                       onChange={(e) => setSmsTemplate(e.target.value)}
                       rows={2}
                       className="flex-1 font-mono text-[11px] p-2.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500"
@@ -2253,7 +2251,14 @@ export default function SettingsView() {
                       minutes before
                     </label>
                   </div>
-                  <textarea value={bookingReminder.template} onChange={event => setBookingReminder(current => ({ ...current, template: event.target.value }))} rows={3} className="w-full font-mono text-[11px] p-2.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                  <textarea
+                    aria-label="Booking reminder template"
+                    value={bookingReminder.template}
+                    onFocus={rememberVariableTarget((value) => setBookingReminder(current => ({ ...current, template: value })))}
+                    onChange={event => setBookingReminder(current => ({ ...current, template: event.target.value }))}
+                    rows={3}
+                    className="w-full font-mono text-[11px] p-2.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
                   <button onClick={handleSaveBookingReminder} disabled={savingBookingReminder || !bookingReminder.template.trim()} className="self-end rounded-lg bg-amber-500 px-4 py-2 text-xs font-bold text-slate-950 hover:bg-amber-400 disabled:opacity-50">
                     {savingBookingReminder ? 'Saving...' : 'Save Reminder'}
                   </button>
