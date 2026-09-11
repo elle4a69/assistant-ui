@@ -1057,6 +1057,12 @@ export async function runKnowledgeCurator(): Promise<{ run: KnowledgeCuratorRun;
   return response.json();
 }
 
+export async function clearKnowledgeCuratorQuestions(): Promise<{ cleared_proposals: number; state: KnowledgeCuratorState }> {
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator/clear-questions`, { method: 'POST' });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Curator questions could not be cleared.');
+  return response.json();
+}
+
 export async function acceptKnowledgeCuratorProposal(id: string): Promise<KnowledgeCuratorProposal> {
   const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator/proposals/${encodeURIComponent(id)}/accept`, { method: 'POST' });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Proposal could not be added to review.');

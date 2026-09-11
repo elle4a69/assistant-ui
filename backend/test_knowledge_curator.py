@@ -528,6 +528,73 @@ def test_curator_settings_api_is_admin_protected(tmp_path, monkeypatch):
     }
 
 
+def test_curator_reset_clears_only_unresolved_presentation_and_fresh_run_recreates_findings(tmp_path, monkeypatch):
+    knowledge, data = curator_paths(tmp_path, monkeypatch, [record("price", text="The service costs $100.")])
+    first = main.run_knowledge_curator()
+    original = main._load_curator_state()
+    retained = dict(original["proposals"][0])
+    retained.update({"id": "resolved-history", "fingerprint": "resolved-history", "status": "resolved", "resolution": "dismiss_for_now"})
+    original["proposals"].append(retained)
+    main._save_curator_state(original)
+    knowledge_before = (knowledge / main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8")
+    unrelated = data / "service-settings.json"
+    unrelated.write_text('{"unchanged": true}', encoding="utf-8")
+
+    reset = main.clear_knowledge_curator_questions()
+
+    assert reset["cleared_proposals"] == len(first["proposals"])
+    assert reset["state"]["runs"] == []
+    assert reset["state"]["proposals"] == [main._present_curator_proposal(retained, {"price": main._curator_records()[0]})]
+    assert (knowledge / main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8") == knowledge_before
+    assert unrelated.read_text(encoding="utf-8") == '{"unchanged": true}'
+    saved = json.loads((data / "curator.json").read_text(encoding="utf-8"))
+    audit = saved["maintenance_history"][-1]
+    assert audit["result"] == "questions_cleared"
+    assert audit["cleared_proposals"] == len(first["proposals"])
+    assert "price" not in json.dumps(audit)
+
+    fresh = main.run_knowledge_curator()
+    assert fresh["run"]["created_proposals"] == len(first["proposals"])
+    assert all(item["status"] == "proposed" for item in fresh["proposals"])
+
+
+def test_curator_reset_is_idempotent_and_preserves_an_accepted_draft(tmp_path, monkeypatch):
+    knowledge, _ = curator_paths(tmp_path, monkeypatch, [record("price", text="The service costs $100.")])
+    proposal = next(item for item in main.run_knowledge_curator()["proposals"] if item["finding_type"] == "literal_dynamic_authority")
+    accepted = main.accept_knowledge_curator_proposal(proposal["id"])
+    assert accepted["status"] == "accepted"
+    knowledge_before = (knowledge / main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8")
+
+    first = main.clear_knowledge_curator_questions()
+    second = main.clear_knowledge_curator_questions()
+
+    assert first["cleared_proposals"] >= 1
+    assert second["cleared_proposals"] == 0
+    assert second["state"]["runs"] == [] and second["state"]["proposals"] == []
+    assert (knowledge / main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8") == knowledge_before
+    assert any(item["id"] == accepted["draft_entry_id"] for item in main.list_learned_information())
+
+
+def test_curator_reset_endpoint_is_authenticated_and_invalid_state_fails_closed(tmp_path, monkeypatch):
+    _, data = curator_paths(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(main, "AUTH_PASSWORD", "curator-admin-password")
+    client = TestClient(main.app)
+    assert client.post("/api/settings/knowledge-curator/clear-questions").status_code == 401
+    expires = int(datetime.now().timestamp()) + 300
+    client.cookies.set(main.AUTH_COOKIE_NAME, main._admin_session_token(expires))
+    empty = client.post("/api/settings/knowledge-curator/clear-questions")
+    assert empty.status_code == 200
+    assert empty.json()["cleared_proposals"] == 0
+    assert empty.json()["state"]["runs"] == []
+
+    path = data / "curator.json"
+    path.write_text("{invalid", encoding="utf-8")
+    failed = client.post("/api/settings/knowledge-curator/clear-questions")
+    assert failed.status_code == 409
+    assert failed.json()["detail"] == "Knowledge curator state is unavailable; nothing was cleared."
+    assert path.read_text(encoding="utf-8") == "{invalid"
+
+
 def test_curator_previews_are_returned_only_to_authenticated_settings_client(tmp_path, monkeypatch):
     curator_paths(tmp_path, monkeypatch, [record("preview", text="Private approved reply costs $100.")])
     main.run_knowledge_curator()

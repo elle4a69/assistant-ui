@@ -77,10 +77,23 @@ test('Settings keeps the proposal-only workflow and refreshes safely', () => {
   assert.match(settingsSource, /resolveKnowledgeCuratorProposal\(proposal\.id, resolution, selectedRecordIds\)/);
   assert.match(settingsSource, /will not be used in customer replies unless separately approved/);
   assert.match(settingsSource, /could not be saved because the guidance may have changed/);
+  assert.match(settingsSource, /window\.confirm\('Clear all curator questions and start again\?/);
+  assert.match(settingsSource, /Approved guidance, learnings, settings, customer conversations, and bookings will not be changed/);
+  assert.match(settingsSource, /clearKnowledgeCuratorQuestions\(\)/);
+  assert.match(settingsSource, /setKnowledgeCurator\(result\.state\)/);
+});
+
+test('curator reset control is explicit, confirmed, and handles an empty reset', () => {
+  assert.match(panelSource, /Clear curator questions and start again/);
+  assert.match(panelSource, /onClick=\{onClear\}/);
+  assert.match(panelSource, /disabled=\{running \|\| clearing \|\| loadStatus !== 'ready'\}/);
+  assert.match(settingsSource, /There were no curator questions to clear\. You can run a fresh check now/);
+  assert.match(settingsSource, /Curator questions could not be cleared\. Nothing changed/);
 });
 
 test('curator client uses the protected settings API and explicit state transitions', () => {
   assert.match(apiSource, /\/api\/settings\/knowledge-curator\/run/);
+  assert.match(apiSource, /\/api\/settings\/knowledge-curator\/clear-questions/);
   assert.match(apiSource, /\/api\/settings\/knowledge-curator\/proposals\/\$\{encodeURIComponent\(id\)\}\/resolve/);
   assert.match(apiSource, /KnowledgeCuratorResolution/);
   assert.match(apiSource, /safe_repairs_completed/);

@@ -30,6 +30,7 @@ import {
   SmsLearningPreview,
   getKnowledgeCuratorState,
   runKnowledgeCurator,
+  clearKnowledgeCuratorQuestions,
   resolveKnowledgeCuratorProposal,
   KnowledgeCuratorResolution,
   getKnowledgeFile,
@@ -192,6 +193,7 @@ export default function SettingsView() {
     automation: { enabled: false, interval_seconds: null, last_run_at: null, last_status: null },
   });
   const [runningKnowledgeAudit, setRunningKnowledgeAudit] = useState(false);
+  const [clearingKnowledgeCurator, setClearingKnowledgeCurator] = useState(false);
   const [updatingCuratorProposalId, setUpdatingCuratorProposalId] = useState<string | null>(null);
   const [knowledgeCuratorLoadStatus, setKnowledgeCuratorLoadStatus] = useState<'loading' | 'ready' | 'error'>('loading');
 
@@ -796,6 +798,24 @@ export default function SettingsView() {
       triggerBanner('error', 'The guidance check could not run. Nothing changed. Please try again.');
     } finally {
       setRunningKnowledgeAudit(false);
+    }
+  };
+
+  const handleClearKnowledgeCurator = async () => {
+    if (!window.confirm('Clear all curator questions and start again? This clears only unanswered curator questions and the displayed check history. Approved guidance, learnings, settings, customer conversations, and bookings will not be changed.')) return;
+    setClearingKnowledgeCurator(true);
+    try {
+      const result = await clearKnowledgeCuratorQuestions();
+      setKnowledgeCurator(result.state);
+      setKnowledgeCuratorLoadStatus('ready');
+      triggerBanner('success', result.cleared_proposals
+        ? `${result.cleared_proposals} curator question${result.cleared_proposals === 1 ? '' : 's'} cleared. You can run a fresh check now.`
+        : 'There were no curator questions to clear. You can run a fresh check now.');
+    } catch (err) {
+      console.error(err);
+      triggerBanner('error', 'Curator questions could not be cleared. Nothing changed. Please try again.');
+    } finally {
+      setClearingKnowledgeCurator(false);
     }
   };
 
@@ -1950,9 +1970,11 @@ export default function SettingsView() {
                   state={knowledgeCurator}
                   loadStatus={knowledgeCuratorLoadStatus}
                   running={runningKnowledgeAudit}
+                  clearing={clearingKnowledgeCurator}
                   updatingId={updatingCuratorProposalId}
                   lineLabels={{ primary: lineProfiles.primary.displayName || 'Line 1', secondary: lineProfiles.secondary.displayName || 'Line 2' }}
                   onRun={handleRunKnowledgeAudit}
+                  onClear={handleClearKnowledgeCurator}
                   onResolve={handleCuratorProposal}
                 />
 

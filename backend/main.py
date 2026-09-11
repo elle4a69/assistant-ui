@@ -3591,12 +3591,17 @@ def _curator_safe_maintenance_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
         repaired_count = min(100000, max(0, int(entry.get("repaired_count") or 0)))
     except (TypeError, ValueError):
         repaired_count = 0
+    try:
+        cleared_proposals = min(100000, max(0, int(entry.get("cleared_proposals") or 0)))
+    except (TypeError, ValueError):
+        cleared_proposals = 0
     return {
         "id": str(entry.get("id") or "")[:160],
         "timestamp": str(entry.get("timestamp") or "")[:64],
         "result": str(entry.get("result") or "")[:80],
         "trigger": str(entry.get("trigger") or "manual")[:40] if str(entry.get("trigger") or "manual") in {"manual", "automatic"} else "manual",
         "repaired_count": repaired_count,
+        "cleared_proposals": cleared_proposals,
         "repairs": safe_repairs,
     }
 
@@ -4498,6 +4503,39 @@ def get_knowledge_curator_state() -> Dict[str, Any]:
     with KNOWLEDGE_CURATOR_LOCK:
         state = _load_curator_state()
     return _present_curator_state(state)
+
+
+def clear_knowledge_curator_questions() -> Dict[str, Any]:
+    """Clear only unresolved curator presentation state and retain a safe audit."""
+    if not KNOWLEDGE_CURATOR_LOCK.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A knowledge audit is already running.")
+    try:
+        # A reset must never replace corrupt or unreadable state with an empty
+        # file.  No knowledge or application data store is opened for writing.
+        state = _load_curator_state(fail_on_invalid=True)
+        unresolved = [
+            item for item in state["proposals"]
+            if item.get("status") in KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES
+        ]
+        state["proposals"] = [
+            item for item in state["proposals"]
+            if item.get("status") not in KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES
+        ]
+        state["runs"] = []
+        now_text = datetime.utcnow().isoformat() + "Z"
+        state.setdefault("maintenance_history", []).append({
+            "id": f"kcm-{uuid.uuid4()}",
+            "timestamp": now_text,
+            "result": "questions_cleared" if unresolved else "no_questions_to_clear",
+            "trigger": "manual",
+            "repaired_count": 0,
+            "cleared_proposals": len(unresolved),
+            "repairs": [],
+        })
+        _save_curator_state(state)
+        return {"cleared_proposals": len(unresolved), "state": _present_curator_state(state)}
+    finally:
+        KNOWLEDGE_CURATOR_LOCK.release()
 
 
 def _curator_proposal_is_current(proposal: Dict[str, Any]) -> bool:
@@ -16679,6 +16717,15 @@ def list_knowledge_curator_state():
 @app.post("/api/settings/knowledge-curator/run")
 def run_knowledge_curator_endpoint():
     return run_knowledge_curator()
+
+
+@app.post("/api/settings/knowledge-curator/clear-questions")
+def clear_knowledge_curator_questions_endpoint():
+    try:
+        result = clear_knowledge_curator_questions()
+        return {"status": "success", **result}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="Knowledge curator state is unavailable; nothing was cleared.") from exc
 
 
 @app.post("/api/settings/knowledge-curator/proposals/{proposal_id}/accept")

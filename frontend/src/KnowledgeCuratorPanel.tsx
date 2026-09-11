@@ -182,13 +182,15 @@ type Props = {
   state: KnowledgeCuratorState;
   loadStatus: 'loading' | 'ready' | 'error';
   running: boolean;
+  clearing: boolean;
   updatingId: string | null;
   lineLabels: Record<'primary' | 'secondary', string>;
   onRun: () => void;
+  onClear: () => void;
   onResolve: (proposal: KnowledgeCuratorProposal, resolution: KnowledgeCuratorResolution, selectedRecordIds?: string[]) => void;
 };
 
-export default function KnowledgeCuratorPanel({ state, loadStatus, running, updatingId, lineLabels, onRun, onResolve }: Props) {
+export default function KnowledgeCuratorPanel({ state, loadStatus, running, clearing, updatingId, lineLabels, onRun, onClear, onResolve }: Props) {
   const latest = state.runs[0];
   const findings = state.proposals.filter(item => item.status === 'proposed' || item.status === 'accepted');
 
@@ -198,9 +200,14 @@ export default function KnowledgeCuratorPanel({ state, loadStatus, running, upda
         <h3 id="knowledge-curator-heading" className="text-sm font-bold text-violet-950">Review customer guidance</h3>
         <p className="mt-1 max-w-2xl text-[11px] leading-relaxed text-violet-800">The curator checks for guidance that may be unclear, duplicated, outdated, or in the wrong place. It only raises questions: it never turns on, replaces, or removes customer guidance.</p>
       </div>
-      <button type="button" onClick={onRun} disabled={running || loadStatus === 'loading'} aria-label={running ? 'Checking customer guidance' : 'Check customer guidance now'} className="inline-flex min-h-9 shrink-0 items-center justify-center rounded-lg bg-violet-700 px-3 py-2 text-[11px] font-bold text-white hover:bg-violet-800 disabled:opacity-50">
-        {running ? 'Checking…' : 'Check guidance now'}
-      </button>
+      <div className="flex shrink-0 flex-col gap-2">
+        <button type="button" onClick={onRun} disabled={running || clearing || loadStatus === 'loading'} aria-label={running ? 'Checking customer guidance' : 'Check customer guidance now'} className="inline-flex min-h-9 items-center justify-center rounded-lg bg-violet-700 px-3 py-2 text-[11px] font-bold text-white hover:bg-violet-800 disabled:opacity-50">
+          {running ? 'Checking…' : 'Check guidance now'}
+        </button>
+        <button type="button" onClick={onClear} disabled={running || clearing || loadStatus !== 'ready'} className="min-h-9 rounded-lg border border-violet-300 bg-white px-3 py-2 text-[11px] font-bold text-violet-900 hover:bg-violet-50 disabled:opacity-50">
+          {clearing ? 'Clearing curator questions…' : 'Clear curator questions and start again'}
+        </button>
+      </div>
     </div>
 
     {loadStatus === 'loading' && <div role="status" className="mt-3 rounded-lg border border-violet-100 bg-white p-3 text-[11px] text-slate-700">Loading the latest review. No guidance is being changed.</div>}
