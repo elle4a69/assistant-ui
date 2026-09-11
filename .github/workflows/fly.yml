@@ -44,24 +44,9 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
-      - name: Ensure the existing Fly machine is running
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        run: |
-          machine_id="$(flyctl machine list --app assistant-ui-hub --json | jq -r '.[0].id // empty')"
-          machine_state="$(flyctl machine list --app assistant-ui-hub --json | jq -r '.[0].state // empty')"
-          if [ -z "$machine_id" ]; then
-            echo "No existing Fly machine was found; refusing to create one."
-            exit 1
-          fi
-          if [ "$machine_state" != "started" ]; then
-            flyctl machine start "$machine_id" --app assistant-ui-hub
-          fi
-
       - name: Verify deployed application
         run: |
           curl --fail --silent --show-error \
-            --connect-timeout 10 --max-time 30 \
             --retry 12 --retry-delay 5 --retry-all-errors \
             https://assistant-ui-hub.fly.dev/api/health
 
