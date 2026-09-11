@@ -173,8 +173,12 @@ function curatorWarningNextStep(errorCode?: string | null): string {
   return curatorWarningAction[errorCode || ''] || 'Run the check again. If it keeps failing, ask an administrator to check the AI connection.';
 }
 
-function guidanceText(record: KnowledgeCuratorRecordPreview): string {
-  return record.instruction || record.approved_reply || record.knowledge_text || record.example_reply || 'The saved wording is not available. Run a new check before deciding.';
+function approvedInformation(record: KnowledgeCuratorRecordPreview): string {
+  return record.example_reply || record.approved_reply || record.knowledge_text || record.instruction || 'The saved wording is not available. Run a new check before deciding.';
+}
+
+function approvedInformationLabel(record: KnowledgeCuratorRecordPreview): string {
+  return record.example_reply || record.approved_reply ? 'Approved reply' : 'Approved information';
 }
 
 function affectedArea(proposal: KnowledgeCuratorProposal, lineLabels: Record<'primary' | 'secondary', string>): string {
@@ -244,10 +248,14 @@ export default function KnowledgeCuratorPanel({ state, loadStatus, running, upda
 
             {records.length > 0 && <div className="mt-3 grid gap-2 md:grid-cols-2">
               {records.map((record, recordIndex) => <div key={`${record.id}-${record.revision}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
-                <p className="font-bold text-slate-900">Saved guidance {records.length > 1 ? recordIndex + 1 : ''}</p>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="font-bold text-slate-900">Saved guidance {records.length > 1 ? recordIndex + 1 : ''}</p>
+                  {record.review_status === 'approved' && <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-emerald-800">Already approved</span>}
+                </div>
                 {record.applies_when && <p className="mt-1"><strong>Use when:</strong> {record.applies_when}</p>}
                 {record.customer_message && <p className="mt-1"><strong>Customer asks:</strong> {record.customer_message}</p>}
-                <p className="mt-1 whitespace-pre-wrap"><strong>Guidance:</strong> {guidanceText(record)}</p>
+                <p className="mt-1 whitespace-pre-wrap"><strong>{approvedInformationLabel(record)}:</strong> {approvedInformation(record)}</p>
+                {record.instruction && record.instruction !== approvedInformation(record) && <p className="mt-1 whitespace-pre-wrap text-slate-600"><strong>Supporting rule:</strong> {record.instruction}</p>}
                 {editableRecordIds.has(record.id) && <button type="button" onClick={() => onEditRecord(record.id)} disabled={busy} className="mt-3 min-h-11 w-full rounded border border-indigo-300 bg-indigo-50 px-2 py-2 font-bold text-indigo-900 hover:bg-indigo-100 disabled:opacity-50">Edit wording, situation or service line</button>}
                 {proposal.finding_type === 'incompatible_active_records' && !changed && !alreadyPrepared && <>
                   <button type="button" onClick={() => onResolve(proposal, 'select_current_rule', [record.id])} disabled={busy} aria-label={`Record saved guidance ${recordIndex + 1} as the preferred answer. This does not change customer guidance.`} className="mt-3 min-h-11 w-full rounded border border-violet-300 bg-white px-2 py-2 font-bold text-violet-900 hover:bg-violet-50 disabled:opacity-50">Record as preferred answer</button>
@@ -257,6 +265,7 @@ export default function KnowledgeCuratorPanel({ state, loadStatus, running, upda
             </div>}
 
             <p className="mt-3 text-xs leading-relaxed text-slate-700"><strong>Why this needs you:</strong> {copy.why}</p>
+            {records.some(record => record.review_status === 'approved') && <p className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs leading-relaxed text-emerald-950"><strong>This information is already approved.</strong> You are not being asked to approve it again. The question below is only about the separate issue described above.</p>}
             <p className="mt-2 text-sm font-bold text-slate-900">{copy.question}</p>
 
             {changed ? <div role="alert" className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-[11px] text-amber-900"><strong>This guidance changed after the check.</strong><br />For safety, these choices are unavailable. Run a new check to review the latest wording.</div>

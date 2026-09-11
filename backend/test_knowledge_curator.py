@@ -242,6 +242,20 @@ def test_authenticated_response_has_previews_but_state_and_llm_do_not(tmp_path, 
     assert "Sensitive reply" not in saved and "record_previews" not in saved
 
 
+def test_curator_preview_prefers_the_actual_approved_example_over_generic_instruction():
+    preview = main._curator_record_preview({
+        "id": "approved-example",
+        "revision": 1,
+        "_raw": {
+            "instruction": "Use the approved response only when its facts are durable and relevant.",
+            "example_reply": "Yes, I can send you a picture first.",
+            "review_status": "approved",
+        },
+    })
+    assert preview["approved_reply"] == "Yes, I can send you a picture first."
+    assert preview["instruction"] == "Use the approved response only when its facts are durable and relevant."
+
+
 def test_preview_fails_closed_for_stale_revision_and_every_action_is_rejected(tmp_path, monkeypatch):
     curator_paths(tmp_path, monkeypatch, [record("price", text="The service costs $100.")])
     proposal = next(item for item in main.run_knowledge_curator()["proposals"] if item["finding_type"] == "literal_dynamic_authority")
