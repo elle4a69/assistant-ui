@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import KnowledgeCuratorPanel from './KnowledgeCuratorPanel';
 import {
   getSettings,
   downloadMessagesCsv,
@@ -192,6 +193,7 @@ export default function SettingsView() {
   });
   const [runningKnowledgeAudit, setRunningKnowledgeAudit] = useState(false);
   const [updatingCuratorProposalId, setUpdatingCuratorProposalId] = useState<string | null>(null);
+  const [knowledgeCuratorLoadStatus, setKnowledgeCuratorLoadStatus] = useState<'loading' | 'ready' | 'error'>('loading');
 
   // Modal states for File Editor & Moderation
   const [activeEditFile, setActiveEditFile] = useState<string | null>(null);
@@ -315,7 +317,13 @@ export default function SettingsView() {
     try { setFirstContactConfig(await retryOnce(getFirstContactAutoresponder)); } catch (e) { console.error('first-contact auto-responder fetch failed:', e); }
     try { setLineProfiles(await retryOnce(getSmsLineProfiles)); } catch (e) { console.error('line profile fetch failed:', e); }
     try { setLearnedEntries(await retryOnce(listLearnedInformation)); } catch (e) { console.error('learned rules fetch failed:', e); }
-    try { setKnowledgeCurator(await retryOnce(getKnowledgeCuratorState)); } catch (e) { console.error('knowledge curator fetch failed:', e); }
+    try {
+      setKnowledgeCurator(await retryOnce(getKnowledgeCuratorState));
+      setKnowledgeCuratorLoadStatus('ready');
+    } catch (e) {
+      console.error('knowledge curator fetch failed:', e);
+      setKnowledgeCuratorLoadStatus('error');
+    }
     try { setBlockedContacts(await retryOnce(listBlockedContacts)); } catch (e) { console.error('blocked contacts fetch failed:', e); }
   }, []);
 
@@ -770,40 +778,41 @@ export default function SettingsView() {
 
   const refreshKnowledgeCurator = async () => {
     setKnowledgeCurator(await getKnowledgeCuratorState());
+    setKnowledgeCuratorLoadStatus('ready');
   };
 
   const handleRunKnowledgeAudit = async () => {
-    if (!window.confirm('Run a manual audit of durable knowledge records? It may use AI credits, creates proposals only, and cannot activate or delete knowledge.')) return;
+    if (!window.confirm('Check saved customer guidance now? This may use AI credits. It only creates review questions and cannot turn on, replace, or remove guidance.')) return;
     setRunningKnowledgeAudit(true);
     try {
       const result = await runKnowledgeCurator();
       await refreshKnowledgeCurator();
       triggerBanner(
         result.run.error_code ? 'error' : 'success',
-        `${result.run.message} ${result.run.finding_count} finding${result.run.finding_count === 1 ? '' : 's'}; ${result.run.created_proposals} new proposal${result.run.created_proposals === 1 ? '' : 's'}.`,
+        `${result.run.message} ${result.run.finding_count} review item${result.run.finding_count === 1 ? '' : 's'} found; ${result.run.created_proposals} new question${result.run.created_proposals === 1 ? '' : 's'} added.`,
       );
     } catch (err) {
       console.error(err);
-      triggerBanner('error', err instanceof Error ? err.message : 'Knowledge audit could not run.');
+      triggerBanner('error', 'The guidance check could not run. Nothing changed. Please try again.');
     } finally {
       setRunningKnowledgeAudit(false);
     }
   };
 
-  const handleCuratorProposal = async (proposal: KnowledgeCuratorProposal, resolution: KnowledgeCuratorResolution) => {
+  const handleCuratorProposal = async (proposal: KnowledgeCuratorProposal, resolution: KnowledgeCuratorResolution, selectedRecordIds: string[] = []) => {
     setUpdatingCuratorProposalId(proposal.id);
     try {
-      await resolveKnowledgeCuratorProposal(proposal.id, resolution, []);
+      await resolveKnowledgeCuratorProposal(proposal.id, resolution, selectedRecordIds);
       if (['create_merged_draft', 'create_consolidation_draft', 'create_metadata_repair_draft', 'add_safe_replacement_draft'].includes(resolution)) {
         setLearnedEntries(await listLearnedInformation());
-        triggerBanner('success', 'A quarantined draft was added to the review queue. It is not active knowledge.');
+        triggerBanner('success', 'New wording was added to the review queue. It will not be used in customer replies unless separately approved.');
       } else {
-        triggerBanner('success', 'Resolution recorded. Knowledge was not changed.');
+        triggerBanner('success', 'Your choice was saved. Customer guidance was not changed.');
       }
       await refreshKnowledgeCurator();
     } catch (err) {
       console.error(err);
-      triggerBanner('error', err instanceof Error ? err.message : 'Proposal could not be updated.');
+      triggerBanner('error', 'Your choice could not be saved because the guidance may have changed. Nothing changed. Run a new check and try again.');
     } finally {
       setUpdatingCuratorProposalId(null);
     }
@@ -1937,65 +1946,15 @@ export default function SettingsView() {
                   )}
                 </form>
 
-                <section className="rounded-xl border border-violet-200 bg-violet-50/40 p-4" aria-labelledby="knowledge-curator-heading">
-                  {(() => {
-                    const latest = knowledgeCurator.runs[0];
-                    const unresolved = knowledgeCurator.proposals.filter(item => item.status === 'proposed' || item.status === 'accepted');
-                    const decisions = unresolved.filter(item => ['owner_answer_required', 'incompatible_active_records', 'apparently_superseded', 'branched_supersession'].includes(item.finding_type));
-                    const decision = decisions.find(item => item.status === 'proposed');
-                    const dynamicClaims = unresolved.filter(item => item.finding_type === 'literal_dynamic_authority');
-                    const duplicates = unresolved.filter(item => item.finding_type === 'exact_duplicate');
-                    const privateItems = unresolved.filter(item => item.finding_type === 'owner_answer_required');
-                    const manualItems = unresolved.filter(item => !['owner_answer_required', 'incompatible_active_records', 'apparently_superseded', 'branched_supersession', 'literal_dynamic_authority', 'exact_duplicate', 'invalid_metadata'].includes(item.finding_type));
-                    const needsAttention = unresolved.length > 0;
-                    const busy = decision && updatingCuratorProposalId === decision.id;
-                    return <>
-                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                        <div>
-                          <h3 id="knowledge-curator-heading" className="text-sm font-bold text-violet-950">Knowledge health: {needsAttention ? 'Needs attention' : 'Good'}</h3>
-                          <p className="mt-1 max-w-2xl text-[11px] leading-relaxed text-violet-800">Check and organise knowledge keeps customer replies safe. It can tidy proven technical labels, but it never turns on, replaces, or removes an answer.</p>
-                          <p className="mt-1 text-[11px] text-violet-700">Automatic checks: {knowledgeCurator.automation.enabled ? 'Configured' : 'Off'}. Automatic checks create review proposals only.</p>
-                        </div>
-                        <button type="button" onClick={handleRunKnowledgeAudit} disabled={runningKnowledgeAudit} className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-violet-700 px-3 py-2 text-[11px] font-bold text-white hover:bg-violet-800 disabled:opacity-50">
-                          <RefreshCw className={`h-3.5 w-3.5 ${runningKnowledgeAudit ? 'animate-spin' : ''}`} />
-                          {runningKnowledgeAudit ? 'Checking…' : 'Check and organise knowledge'}
-                        </button>
-                      </div>
-
-                      {latest ? <div className="mt-3 grid gap-2 text-[11px] sm:grid-cols-2 lg:grid-cols-4">
-                        <div className="rounded-lg border border-violet-100 bg-white p-2"><strong>Safe repairs</strong><br />{latest.safe_repairs_completed ? `We safely repaired ${latest.safe_repairs_completed} older record${latest.safe_repairs_completed === 1 ? '' : 's'}.` : 'Nothing needed repair.'}</div>
-                        <div className="rounded-lg border border-violet-100 bg-white p-2"><strong>Decisions</strong><br />{decisions.length ? `We need your answer to ${decisions.length} business question${decisions.length === 1 ? '' : 's'}.` : 'No business decisions needed.'}</div>
-                        <div className="rounded-lg border border-violet-100 bg-white p-2"><strong>Private information</strong><br />{privateItems.length ? `${privateItems.length} item${privateItems.length === 1 ? '' : 's'} kept out of customer replies.` : 'Nothing is waiting privately.'}</div>
-                        <div className="rounded-lg border border-violet-100 bg-white p-2"><strong>Last checked</strong><br />{new Date(latest.completed_at).toLocaleString()}<br /><span className={latest.error_code ? 'text-amber-700' : 'text-emerald-700'}>AI helper: {latest.error_code ? latest.message : 'Ready'}</span></div>
-                      </div> : <p className="mt-3 text-[11px] text-violet-700">No check has been run yet. {knowledgeCurator.automation.enabled ? 'The configured automatic check will run when due.' : 'Use the button to run one manually.'}</p>}
-
-                      {latest?.safe_repairs_completed ? <p className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-[11px] text-emerald-900">{latest.safe_repairs_completed} older record{latest.safe_repairs_completed === 1 ? ' was' : 's were'} missing technical labels. They were repaired without changing what the agent knows or when it uses it.</p> : null}
-
-                      {decision ? <article className="mt-3 rounded-lg border border-violet-200 bg-white p-3 text-[11px]">
-                        <p className="font-bold text-violet-950">Business decision {decisions.indexOf(decision) + 1} of {decisions.length}</p>
-                        <p className="mt-2 font-semibold text-slate-800">{decision.owner_questions[0] || 'We need a business decision before changing any customer guidance.'}</p>
-                        <p className="mt-2 text-slate-650">{decision.finding_type === 'owner_answer_required' ? 'This information is private today. Clarification is needed because only you can decide whether customers should receive it.' : 'The customer could receive different answers. Clarification is needed because the system cannot safely choose a business rule.'}</p>
-                        <p className="mt-2 text-slate-650">This affects the relevant customer service line only. Any answer you choose becomes a pending review suggestion, never a live change.</p>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {decision.finding_type === 'incompatible_active_records' && <button type="button" onClick={() => handleCuratorProposal(decision, 'create_merged_draft')} disabled={busy || decision.actionable === false} className="rounded border border-violet-300 bg-violet-50 px-2 py-1 font-bold text-violet-900 disabled:opacity-50">Use this answer</button>}
-                          {decision.finding_type === 'incompatible_active_records' && <button type="button" onClick={() => handleCuratorProposal(decision, 'keep_all_examples')} disabled={busy || decision.actionable === false} className="rounded border border-slate-300 px-2 py-1 font-bold text-slate-700 disabled:opacity-50">Keep both because they apply differently</button>}
-                          {decision.finding_type === 'owner_answer_required' && <button type="button" onClick={() => handleCuratorProposal(decision, 'needs_manual_investigation')} disabled={busy || decision.actionable === false} className="rounded border border-slate-300 px-2 py-1 font-bold text-slate-700 disabled:opacity-50">Keep private</button>}
-                          <button type="button" onClick={() => handleCuratorProposal(decision, 'needs_manual_investigation')} disabled={busy || decision.actionable === false} className="rounded border border-amber-300 px-2 py-1 font-bold text-amber-800 disabled:opacity-50">Edit the answer</button>
-                          <button type="button" onClick={() => handleCuratorProposal(decision, 'dismiss_for_now')} disabled={busy || decision.actionable === false} className="rounded border border-slate-300 px-2 py-1 font-bold text-slate-700 disabled:opacity-50">Ask me later</button>
-                        </div>
-                      </article> : needsAttention ? <p className="mt-3 rounded-lg border border-dashed border-violet-200 bg-white/70 p-3 text-[11px] text-slate-600">There are no business questions waiting. Review the short summaries below when you are ready.</p> : null}
-
-                      <div className="mt-3 grid gap-2 text-[11px] sm:grid-cols-2">
-                        <div className="rounded-lg border border-amber-200 bg-white p-3"><strong>Potentially outdated prices or times</strong><br />{dynamicClaims.length ? `${dynamicClaims.length} item${dynamicClaims.length === 1 ? '' : 's'} should use Settings or the live calendar instead.` : 'None found.'}{dynamicClaims.map(item => <p key={item.id} className="mt-2 text-slate-650"><strong>Saved guidance:</strong> {item.evidence.trigger_excerpt ? `“${item.evidence.trigger_excerpt}”` : 'A specific price, duration, date, time, or available slot.'} It should be replaced by the current source before a customer reply.</p>)}</div>
-                        <div className="rounded-lg border border-slate-200 bg-white p-3"><strong>Duplicates</strong><br />{duplicates.length ? `${duplicates.length} possible duplicate${duplicates.length === 1 ? '' : 's'} will stay unchanged until reviewed.` : 'None found.'}</div>
-                        <div className="rounded-lg border border-slate-200 bg-white p-3"><strong>Private or uncertain information</strong><br />{privateItems.length ? `${privateItems.length} item${privateItems.length === 1 ? '' : 's'} kept private.` : 'None found.'}</div>
-                        <div className="rounded-lg border border-slate-200 bg-white p-3"><strong>Manual investigation</strong><br />{manualItems.length ? `${manualItems.length} item${manualItems.length === 1 ? '' : 's'} need support review.` : 'None needed.'}</div>
-                      </div>
-
-                      <details className="mt-3 rounded-lg border border-slate-200 bg-white p-3 text-[10px] text-slate-600"><summary className="cursor-pointer font-bold text-slate-800">Technical details for support</summary><p className="mt-2">The owner view intentionally hides internal identifiers and validation data. Current check: {latest?.finding_count ?? 0} findings, {latest?.created_proposals ?? 0} new review proposals, AI status {latest?.ai_helper_status || 'not checked'}.</p>{unresolved.map(item => <p key={item.id} className="mt-1 break-all">{item.id} · {item.finding_type} · {item.records.map(record => `${record.id} r${record.revision}`).join(', ')} · {item.reason_codes.join(', ')}</p>)}</details>
-                    </>;
-                  })()}
-                </section>
+                <KnowledgeCuratorPanel
+                  state={knowledgeCurator}
+                  loadStatus={knowledgeCuratorLoadStatus}
+                  running={runningKnowledgeAudit}
+                  updatingId={updatingCuratorProposalId}
+                  lineLabels={{ primary: lineProfiles.primary.displayName || 'Line 1', secondary: lineProfiles.secondary.displayName || 'Line 2' }}
+                  onRun={handleRunKnowledgeAudit}
+                  onResolve={handleCuratorProposal}
+                />
 
                 <div className="rounded-xl border border-slate-200 bg-white">
                   <div className="border-b border-slate-200 px-3 py-2.5">
