@@ -4376,6 +4376,12 @@ def _run_knowledge_curator_locked(*, trigger: str, audit_time: Optional[datetime
     for finding in findings:
         existing = by_fingerprint.get(finding["fingerprint"])
         if existing:
+            # Deferral must mean "ask me again", not permanently hide a
+            # still-present problem. Re-open it on the next curator check.
+            if existing.get("resolution") in {"dismiss_for_now", "needs_manual_investigation"}:
+                existing["status"] = "proposed"
+                existing["resolution"] = None
+                existing["selected_record_ids"] = []
             existing["updated_at"] = now_text
             existing["last_seen_at"] = now_text
             continue
@@ -5615,12 +5621,14 @@ class ManualLearningInput(BaseModel):
 
 class LearnedInformationUpdateInput(BaseModel):
     topic: str = Field(default="", max_length=500)
+    applies_when: str = Field(default="", max_length=1000)
     text: str = Field(min_length=1, max_length=6000)
     scope: Literal["shared", "primary", "secondary", "internal"]
 
     @model_validator(mode="after")
     def clean_entry(self):
         self.topic = self.topic.strip()
+        self.applies_when = self.applies_when.strip()
         self.text = self.text.strip()
         if not self.text:
             raise ValueError("Learning text is required.")

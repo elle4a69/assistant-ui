@@ -818,7 +818,7 @@ export interface LearnedInformationEntry extends Omit<ManualLearningEntry, 'scop
   retrieval_enabled?: boolean;
   category?: string;
   review_note?: string;
-  review_source?: 'ai-drafted' | 'ai-redrafted' | 'staff-edited-reply' | 'sms-pair-template';
+  review_source?: 'ai-drafted' | 'ai-redrafted' | 'staff-edited-reply' | 'sms-pair-template' | 'knowledge-curator';
 }
 
 export interface KnowledgeCuratorRecordRef {
@@ -1081,7 +1081,7 @@ export async function resolveKnowledgeCuratorProposal(id: string, resolution: Kn
 export async function updateLearnedInformation(entry: LearnedInformationEntry): Promise<LearnedInformationEntry> {
   const response = await apiFetch(`${API_BASE}/api/settings/learnings/${encodeURIComponent(entry.id)}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic: entry.topic || '', text: entry.text, scope: entry.scope }),
+    body: JSON.stringify({ topic: entry.topic || '', applies_when: entry.applies_when || '', text: entry.text, scope: entry.scope }),
   });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to save learned rule.');
   return (await response.json()).entry;

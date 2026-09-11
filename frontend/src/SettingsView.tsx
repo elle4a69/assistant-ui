@@ -805,17 +805,28 @@ export default function SettingsView() {
       await resolveKnowledgeCuratorProposal(proposal.id, resolution, selectedRecordIds);
       if (['create_merged_draft', 'create_consolidation_draft', 'create_metadata_repair_draft', 'add_safe_replacement_draft'].includes(resolution)) {
         setLearnedEntries(await listLearnedInformation());
-        triggerBanner('success', 'New wording was added to the review queue. It will not be used in customer replies unless separately approved.');
+        triggerBanner('success', 'An editable Curator item was added to the Learning review queue. It will not be used in customer replies unless you approve it.');
+      } else if (resolution === 'dismiss_for_now' || resolution === 'needs_manual_investigation') {
+        triggerBanner('success', 'Nothing changed. The question will return the next time the Curator checks the guidance.');
+      } else if (resolution === 'not_an_issue' || resolution === 'keep_all_examples' || resolution === 'keep_both_distinct') {
+        triggerBanner('success', 'Marked as intentional. The saved guidance remains unchanged.');
       } else {
-        triggerBanner('success', 'Your choice was saved. Customer guidance was not changed.');
+        triggerBanner('success', 'Your preference was recorded. The saved guidance remains unchanged.');
       }
       await refreshKnowledgeCurator();
     } catch (err) {
       console.error(err);
-      triggerBanner('error', 'Your choice could not be saved because the guidance may have changed. Nothing changed. Run a new check and try again.');
+      triggerBanner('error', err instanceof Error ? `${err.message} Nothing changed.` : 'Your choice could not be saved. Nothing changed.');
     } finally {
       setUpdatingCuratorProposalId(null);
     }
+  };
+
+  const handleEditCuratorRecord = (recordId: string) => {
+    setEditingLearnedId(recordId);
+    window.requestAnimationFrame(() => {
+      document.getElementById(`learned-entry-${recordId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
   };
 
   const handleCreateLearning = async (e: React.FormEvent) => {
@@ -1952,11 +1963,13 @@ export default function SettingsView() {
                   running={runningKnowledgeAudit}
                   updatingId={updatingCuratorProposalId}
                   lineLabels={{ primary: lineProfiles.primary.displayName || 'Line 1', secondary: lineProfiles.secondary.displayName || 'Line 2' }}
+                  editableRecordIds={new Set(learnedEntries.map(entry => entry.id))}
                   onRun={handleRunKnowledgeAudit}
                   onResolve={handleCuratorProposal}
+                  onEditRecord={handleEditCuratorRecord}
                 />
 
-                <div className="rounded-xl border border-slate-200 bg-white">
+                <div id="learning-review-queue" className="rounded-xl border border-slate-200 bg-white">
                   <div className="border-b border-slate-200 px-3 py-2.5">
                     <div className="flex items-start justify-between gap-3">
                       <div>
@@ -1973,9 +1986,10 @@ export default function SettingsView() {
                   </div>
                   <div className="max-h-[420px] divide-y divide-slate-100 overflow-y-auto">
                     {learnedEntries.length === 0 ? <p className="p-3 text-xs text-slate-500">No learned rules saved yet.</p> : learnedEntries.map(entry => (
-                      <div key={entry.id} className="p-3">
+                      <div id={`learned-entry-${entry.id}`} key={entry.id} className="p-3 scroll-m-4">
                         {editingLearnedId === entry.id ? <div className="space-y-2">
                           <input value={entry.topic || ''} onChange={event => setLearnedEntries(current => current.map(item => item.id === entry.id ? { ...item, topic: event.target.value } : item))} placeholder="Topic" className="w-full rounded border border-slate-300 p-2 text-xs" />
+                          <input value={entry.applies_when || ''} onChange={event => setLearnedEntries(current => current.map(item => item.id === entry.id ? { ...item, applies_when: event.target.value } : item))} placeholder="Use this guidance when…" className="w-full rounded border border-slate-300 p-2 text-xs" />
                           <textarea value={entry.text} onChange={event => setLearnedEntries(current => current.map(item => item.id === entry.id ? { ...item, text: event.target.value } : item))} rows={4} className="w-full rounded border border-slate-300 p-2 text-xs" />
                           <div className="flex items-center justify-between gap-2">
                             <select value={entry.scope} onChange={event => setLearnedEntries(current => current.map(item => item.id === entry.id ? { ...item, scope: event.target.value as LearnedInformationEntry['scope'] } : item))} className="rounded border border-slate-300 p-2 text-xs">
@@ -1987,7 +2001,7 @@ export default function SettingsView() {
                           <label className="mt-0.5 flex shrink-0 items-center" title={`Select ${entry.topic || entry.type}`}>
                             <input type="checkbox" checked={selectedLearnedIds.has(entry.id)} onChange={() => toggleLearnedSelection(entry.id)} className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
                           </label>
-                          <div className="min-w-0"><p className="text-xs font-bold text-slate-800">{entry.topic || entry.type}</p><p className="mt-1 whitespace-pre-wrap text-[11px] text-slate-600">{entry.text}</p><p className="mt-1 flex flex-wrap gap-1.5 text-[10px] font-semibold"><span className="text-indigo-700">{entry.scope === 'primary' ? 'Line 1' : entry.scope === 'secondary' ? 'Line 2' : entry.scope === 'shared' ? 'Shared' : 'Internal'}</span><span className={entry.review_status === 'approved' ? 'text-emerald-700' : 'text-amber-700'}>{entry.review_status === 'approved' ? (entry.retrieval_enabled ? 'Approved and active' : 'Approved, not injected') : 'Needs review'}</span>{entry.review_source && <span className="text-slate-500">{entry.review_source === 'ai-redrafted' ? 'AI redrafted' : entry.review_source === 'ai-drafted' ? 'AI drafted' : 'Staff-edited reply'}</span>}</p>{entry.review_note && <p className="mt-1 text-[10px] text-amber-700">{entry.review_note}</p>}</div>
+                          <div className="min-w-0"><p className="text-xs font-bold text-slate-800">{entry.topic || entry.type}</p><p className="mt-1 whitespace-pre-wrap text-[11px] text-slate-600">{entry.text}</p><p className="mt-1 flex flex-wrap gap-1.5 text-[10px] font-semibold"><span className="text-indigo-700">{entry.scope === 'primary' ? 'Line 1' : entry.scope === 'secondary' ? 'Line 2' : entry.scope === 'shared' ? 'Shared' : 'Internal'}</span><span className={entry.review_status === 'approved' ? 'text-emerald-700' : 'text-amber-700'}>{entry.review_status === 'approved' ? (entry.retrieval_enabled ? 'Approved and active' : 'Approved, not injected') : 'Needs review'}</span>{entry.review_source && <span className="text-slate-500">{entry.review_source === 'knowledge-curator' ? 'Knowledge Curator' : entry.review_source === 'ai-redrafted' ? 'AI redrafted' : entry.review_source === 'ai-drafted' ? 'AI drafted' : entry.review_source === 'sms-pair-template' ? 'SMS example' : 'Staff-edited reply'}</span>}</p>{entry.review_note && <p className="mt-1 text-[10px] text-amber-700">{entry.review_note}</p>}</div>
                           <div className="flex shrink-0 gap-1"><button onClick={() => setEditingLearnedId(entry.id)} className="rounded p-1.5 text-indigo-600 hover:bg-indigo-50" title="Edit learned rule"><Edit className="h-3.5 w-3.5" /></button>{entry.review_status !== 'approved' && <><button onClick={() => handleRedraftLearnedEntry(entry.id)} className="rounded border border-indigo-200 px-2 py-1 text-[10px] font-bold text-indigo-700 hover:bg-indigo-50" title="Ask AI to improve this draft">Redraft</button><button onClick={() => handleApproveLearnedEntry(entry.id)} className="rounded border border-emerald-200 px-2 py-1 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50" title="Approve learned rule">Approve</button></>}<button onClick={() => handleDeleteLearnedEntry(entry.id)} className="rounded p-1.5 text-rose-600 hover:bg-rose-50" title="Delete learned rule"><Trash2 className="h-3.5 w-3.5" /></button></div>
                         </div>}
                       </div>

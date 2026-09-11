@@ -31,26 +31,29 @@ test('every curator finding has owner-facing explanatory copy and outcome labels
   assert.match(panelSource, /Customers may receive different answers/);
   assert.match(panelSource, /A saved price, time, or availability may become outdated/);
   assert.match(panelSource, /Important organising details are missing/);
-  assert.match(panelSource, /Prepare safer guidance for review/);
-  assert.match(panelSource, /Keep it out of customer replies/);
-  assert.match(panelSource, /Both are correct in different situations/);
-  assert.match(panelSource, /Leave unchanged and ask staff to review/);
-  assert.match(panelSource, /Decide later/);
+  assert.match(panelSource, /Create a safer editable draft/);
+  assert.match(panelSource, /Keep it private/);
+  assert.match(panelSource, /Keep both answers/);
+  assert.match(panelSource, /Review this next time/);
+  assert.match(panelSource, /Result: \{choice\.effect\}/);
+  assert.match(panelSource, /Recommended/);
+  assert.match(panelSource, /Edit wording, situation or service line/);
+  assert.match(panelSource, /editableRecordIds\.has\(record\.id\)/);
+  assert.doesNotMatch(panelSource, /ask staff to review/i);
 });
 
 test('representative guided decision shows context, saved answers, safety, and accessible outcomes', () => {
-  assert.match(panelSource, /What the curator found:/);
-  assert.match(panelSource, /Affected guidance:/);
+  assert.match(panelSource, /What was found:/);
+  assert.match(panelSource, /Applies to:/);
   assert.match(panelSource, /Use when:/);
   assert.match(panelSource, /Customer asks:/);
-  assert.match(panelSource, /Why your input matters:/);
-  assert.match(panelSource, /Choose this answer for staff review/);
+  assert.match(panelSource, /Why this needs you:/);
+  assert.match(panelSource, /Record as preferred answer/);
   assert.match(panelSource, /select_current_rule', \[record\.id\]/);
-  assert.match(panelSource, /aria-label=\{`Choose saved guidance/);
-  assert.match(panelSource, /Records your choice only\. Customer guidance is not changed/);
+  assert.match(panelSource, /aria-label=\{`Record saved guidance/);
+  assert.match(panelSource, /Records your preference only\. It does not deactivate the other answer/);
   assert.match(panelSource, /This guidance changed after the check/);
-  assert.match(panelSource, /separate review step|separate approval step/);
-  assert.match(panelSource, /stays out of customer replies until someone approves it/);
+  assert.match(panelSource, /until you approve it/);
   assert.doesNotMatch(panelSource, /\{proposal\.finding_type\}/);
   assert.doesNotMatch(panelSource, /proposal\.owner_questions/);
   assert.doesNotMatch(panelSource, /proposal\.proposed_action/);
@@ -75,8 +78,13 @@ test('Settings keeps the proposal-only workflow and refreshes safely', () => {
   assert.match(settingsSource, /knowledgeCuratorLoadStatus/);
   assert.match(settingsSource, /cannot turn on, replace, or remove guidance/);
   assert.match(settingsSource, /resolveKnowledgeCuratorProposal\(proposal\.id, resolution, selectedRecordIds\)/);
-  assert.match(settingsSource, /will not be used in customer replies unless separately approved/);
-  assert.match(settingsSource, /could not be saved because the guidance may have changed/);
+  assert.match(settingsSource, /will not be used in customer replies unless you approve it/);
+  assert.match(settingsSource, /question will return the next time the Curator checks/);
+  assert.match(settingsSource, /err instanceof Error \? `\$\{err\.message\} Nothing changed\.`/);
+  assert.match(settingsSource, /knowledge-curator' \? 'Knowledge Curator'/);
+  assert.match(settingsSource, /handleEditCuratorRecord/);
+  assert.match(settingsSource, /Use this guidance when…/);
+  assert.match(apiSource, /applies_when: entry\.applies_when/);
 });
 
 test('curator client uses the protected settings API and explicit state transitions', () => {

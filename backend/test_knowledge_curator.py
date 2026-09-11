@@ -500,6 +500,29 @@ def test_not_an_issue_stays_suppressed_until_material_change(tmp_path, monkeypat
     assert main.run_knowledge_curator()["run"]["created_proposals"] == 1
 
 
+@pytest.mark.parametrize(
+    ("resolution", "records", "finding_type"),
+    [
+        ("dismiss_for_now", [record("price", text="The service costs $100.")], "literal_dynamic_authority"),
+        (
+            "needs_manual_investigation",
+            [record("one", text="Use A."), record("two", text="Use B.")],
+            "incompatible_active_records",
+        ),
+    ],
+)
+def test_deferred_questions_return_on_the_next_check(tmp_path, monkeypatch, resolution, records, finding_type):
+    curator_paths(tmp_path, monkeypatch, records)
+    proposal = next(item for item in main.run_knowledge_curator()["proposals"] if item["finding_type"] == finding_type)
+    resolved = main.resolve_knowledge_curator_proposal(proposal["id"], resolution)
+    assert resolved["status"] == "resolved"
+
+    rerun = main.run_knowledge_curator()
+    reopened = next(item for item in rerun["proposals"] if item["id"] == proposal["id"])
+    assert reopened["status"] == "proposed"
+    assert reopened.get("resolution") is None
+
+
 def test_curator_lock_rejects_concurrent_run(monkeypatch):
     assert main.KNOWLEDGE_CURATOR_LOCK.acquire(blocking=False)
     try:
