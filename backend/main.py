@@ -8741,6 +8741,7 @@ def run_sms_reply_logic(
             agent_id=None,
             meta=json.dumps({
                 "message_id": draft_message.id,
+                "customer_message_id": source_message.id if source_message else None,
                 **({"source": "catch-up"} if draft_only else {}),
             }),
             at=reply_at_naive,
@@ -8783,6 +8784,7 @@ def run_sms_reply_logic(
             at=reply_at_naive
         )
         meta_dict = {"calendar_lookup": "fresh"} if live_calendar_lookup_succeeded else {}
+        meta_dict["source_message_id"] = source_message.id if source_message else None
         meta_dict["decision_state_fingerprint"] = automated_reply_state_fingerprint(
             thread, assistant_reply,
         )
@@ -8801,8 +8803,6 @@ def run_sms_reply_logic(
                 account_key=thread.sms_account_key,
             )
             delivery_failure = mobilemessage_service.delivery_error(dispatch_result)
-        if dispatch_result.get("status") == "skipped" or (delivery_failure and ("skipped" in str(delivery_failure).lower() or "not configured" in str(delivery_failure).lower())):
-            delivery_failure = None
 
         if delivery_failure:
             system_message.role = "draft"
@@ -8814,6 +8814,7 @@ def run_sms_reply_logic(
                 agent_id=None,
                 meta=json.dumps({
                     "message_id": system_message.id,
+                    "customer_message_id": source_message.id if source_message else None,
                     "source": "sms-delivery-failed",
                     "reason": delivery_failure[:500],
                 }),
@@ -9941,6 +9942,180 @@ async def process_first_contact_auto_reply_delayed(
 SMS_REPLY_THREAD_LOCKS: Dict[str, threading.Lock] = defaultdict(threading.Lock)
 
 
+def automatic_customer_turn_already_handled(
+    db: Session,
+    customer_message: Message,
+) -> bool:
+    """Keep duplicate queued jobs from retrying a turn that reached a terminal path."""
+    later_reply = db.query(Message.id).filter(
+        Message.thread_id == customer_message.thread_id,
+        Message.role.in_(["agent", "system", "draft"]),
+        Message.at > customer_message.at,
+    ).first()
+    if later_reply:
+        return True
+
+    terminal_events = db.query(ThreadEvent).filter(
+        ThreadEvent.thread_id == customer_message.thread_id,
+        ThreadEvent.type.in_([
+            "ai-reply-failed", "information-request", "draft-created", "auto-reply-sent",
+            "booking_decision",
+        ]),
+    ).all()
+    for event_item in terminal_events:
+        try:
+            meta = json.loads(event_item.meta or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if customer_message.id in {
+            meta.get("message_id"), meta.get("customer_message_id"), meta.get("source_message_id"),
+        }:
+            return True
+    return False
+
+
+def newest_eligible_customer_turn(
+    db: Session,
+    thread_id: str,
+) -> Optional[Message]:
+    """Return the current unresolved turn only while automatic handling is still safe."""
+    db.expire_all()
+    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+    customer_message = latest_customer_message(db, thread_id)
+    if not thread or not customer_message:
+        return None
+    if (
+        not AUTO_REPLY_GLOBAL_ENABLED
+        or not thread.auto_reply_enabled
+        or is_contact_blocked(db, thread.sms_account_key, thread.customer_phone)
+        or not account_allows_conversational_ai(thread.sms_account_key)
+        or (thread.state == "taken-over" and has_active_explicit_takeover(db, thread_id))
+        or human_replied_after(db, thread_id, customer_message.at)
+        or automatic_customer_turn_already_handled(db, customer_message)
+    ):
+        return None
+    return customer_message
+
+
+def mark_automatic_turn_needs_review(
+    db: Session,
+    thread_id: str,
+    customer_message_id: str,
+    reason: str,
+) -> None:
+    """Fail closed with a customer-content-free, turn-specific audit event."""
+    db.rollback()
+    customer_message = db.query(Message).filter(
+        Message.id == customer_message_id,
+        Message.thread_id == thread_id,
+        Message.role == "customer",
+    ).first()
+    if not customer_message:
+        return
+    eligible = newest_eligible_customer_turn(db, thread_id)
+    if not eligible or eligible.id != customer_message.id:
+        return
+    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+    if not thread:
+        return
+    thread.state = "needs-review"
+    thread.pending_slots = None
+    db.add(ThreadEvent(
+        id=str(uuid.uuid4()),
+        thread_id=thread_id,
+        type="ai-reply-failed",
+        agent_id=None,
+        meta=json.dumps({"reason": reason, "message_id": customer_message.id}),
+        at=datetime.utcnow(),
+    ))
+    db.commit()
+
+
+def run_sms_reply_with_catch_up(
+    db: Session,
+    thread_id: str,
+    body: str,
+    provider_message_id: str,
+    received_at_naive: datetime,
+    catch_exceptions: bool = True,
+    **reply_options: Any,
+) -> tuple[bool, bool]:
+    """Follow superseded work to the newest safe turn once, under the thread lock."""
+    current_body = body
+    current_provider_id = provider_message_id
+    current_received_at = received_at_naive
+    attempted_message_ids: set[str] = set()
+    result = (False, False)
+
+    while True:
+        current_source = db.query(Message).filter(
+            Message.thread_id == thread_id,
+            Message.role == "customer",
+            or_(
+                and_(
+                    Message.provider_message_id == current_provider_id,
+                    bool(current_provider_id),
+                ),
+                and_(Message.at == current_received_at, Message.text == current_body),
+            ),
+        ).order_by(Message.at.desc(), Message.id.desc()).first()
+        if current_source and current_source.id in attempted_message_ids:
+            return result
+
+        eligible_before = newest_eligible_customer_turn(db, thread_id)
+        if current_source and eligible_before and current_source.id == eligible_before.id:
+            if automatic_customer_turn_already_handled(db, current_source):
+                return result
+        elif not eligible_before:
+            return result
+
+        if current_source:
+            attempted_message_ids.add(current_source.id)
+        try:
+            result = run_sms_reply_logic(
+                db,
+                thread_id,
+                current_body,
+                current_provider_id,
+                current_received_at,
+                **reply_options,
+            )
+        except Exception as exc:
+            failed_message_id = current_source.id if current_source else None
+            db.rollback()
+            newest_after_error = newest_eligible_customer_turn(db, thread_id)
+            if newest_after_error and newest_after_error.id != failed_message_id:
+                current_body = newest_after_error.text
+                current_provider_id = newest_after_error.provider_message_id or "catch-up"
+                current_received_at = newest_after_error.at
+                continue
+            if not catch_exceptions:
+                raise
+            if failed_message_id:
+                mark_automatic_turn_needs_review(
+                    db,
+                    thread_id,
+                    failed_message_id,
+                    f"Automatic reply failed safely: {type(exc).__name__}",
+                )
+            return result
+
+        newest_after = newest_eligible_customer_turn(db, thread_id)
+        if newest_after and current_source and newest_after.id == current_source.id:
+            mark_automatic_turn_needs_review(
+                db,
+                thread_id,
+                current_source.id,
+                "Automatic reply ended without creating or sending a safe response",
+            )
+            return result
+        if not newest_after or newest_after.id in attempted_message_ids:
+            return result
+        current_body = newest_after.text
+        current_provider_id = newest_after.provider_message_id or "catch-up"
+        current_received_at = newest_after.at
+
+
 def _process_sms_reply_unlocked(
     thread_id: str,
     body: str,
@@ -9977,7 +10152,9 @@ def _process_sms_reply_unlocked(
             )
             return
 
-        run_sms_reply_logic(db, thread_id, body, provider_message_id, received_at_naive)
+        run_sms_reply_with_catch_up(
+            db, thread_id, body, provider_message_id, received_at_naive
+        )
     except Exception as e:
         print(f"[Conversational AI Delay Error] {e}")
         db.rollback()
@@ -10288,15 +10465,16 @@ def process_inbound_sms(
         # Training mode is an interactive approval workflow, so do not impose the
         # production typing delay before showing a draft.
         if AUTO_REPLY_GLOBAL_ENABLED and thread.auto_reply_enabled and thread.state != "taken-over":
-            booking_confirmed, slots_presented = run_sms_reply_logic(
-                db,
-                thread.id,
-                payload.body,
-                provider_message_id,
-                received_at_naive,
-                dispatch_sms=not (is_testing or payload.isSimulation),
-                is_simulation=payload.isSimulation,
-            )
+            with SMS_REPLY_THREAD_LOCKS[thread.id]:
+                booking_confirmed, slots_presented = run_sms_reply_with_catch_up(
+                    db,
+                    thread.id,
+                    payload.body,
+                    provider_message_id,
+                    received_at_naive,
+                    dispatch_sms=not (is_testing or payload.isSimulation),
+                    is_simulation=payload.isSimulation,
+                )
             res = {"status": "success", "thread_id": thread.id}
             if booking_confirmed:
                 res["booking_confirmed"] = True
@@ -10531,15 +10709,17 @@ def catch_up_missed_messages(db: Session = Depends(get_db)):
     thread, customer_message = candidate
     thread_id = thread.id
     try:
-        run_sms_reply_logic(
-            db,
-            thread_id,
-            customer_message.text,
-            customer_message.provider_message_id or "catch-up",
-            customer_message.at,
-            dispatch_sms=True,
-            draft_only=False,
-        )
+        with SMS_REPLY_THREAD_LOCKS[thread_id]:
+            run_sms_reply_with_catch_up(
+                db,
+                thread_id,
+                customer_message.text,
+                customer_message.provider_message_id or "catch-up",
+                customer_message.at,
+                catch_exceptions=False,
+                dispatch_sms=True,
+                draft_only=False,
+            )
     except Exception as exc:
         db.rollback()
         thread = db.query(Thread).filter(Thread.id == thread_id).first()

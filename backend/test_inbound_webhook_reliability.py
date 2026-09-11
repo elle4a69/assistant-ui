@@ -677,3 +677,166 @@ def test_reply_pipeline_uses_chronological_thread_and_excludes_other_sms_account
         for item in model_input
     )
     db.close()
+
+
+def test_superseded_reply_catches_up_newest_combined_turn_once(monkeypatch):
+    db = make_db()
+    now = datetime.utcnow()
+    thread = main.Thread(
+        id="catch-up-race-thread",
+        customer_phone="+61412345001",
+        sms_account_key="primary",
+        state="auto-reply",
+        priority="medium",
+        sla_due_at=now,
+        unread_count=1,
+    )
+    old_message = Message(
+        id="old-turn",
+        thread_id=thread.id,
+        role="customer",
+        text="Tell me more",
+        provider_message_id="old-provider",
+        at=now,
+    )
+    db.add_all([thread, old_message])
+    db.commit()
+
+    class RacingResponses:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                db.add_all([
+                    Message(
+                        id="new-fragment-one",
+                        thread_id=thread.id,
+                        role="customer",
+                        text="One more thing",
+                        provider_message_id="new-provider-one",
+                        at=now + main.timedelta(seconds=1),
+                    ),
+                    Message(
+                        id="new-fragment-two",
+                        thread_id=thread.id,
+                        role="customer",
+                        text="What should I bring?",
+                        provider_message_id="new-provider-two",
+                        at=now + main.timedelta(seconds=2),
+                    ),
+                ])
+                db.commit()
+                return type("Response", (), {"output": [], "output_text": "Stale reply"})()
+            return type("Response", (), {"output": [], "output_text": "Newest reply"})()
+
+    responses = RacingResponses()
+    monkeypatch.setattr(main, "openai_client", type("Client", (), {"responses": responses})())
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
+    monkeypatch.setattr(main, "match_qa_rule", lambda _body: None)
+    monkeypatch.setattr(main, "build_authority_context", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(main, "get_style_examples", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(main.calendar_service, "get_customer_bookings", lambda *_args, **_kwargs: [])
+
+    main.run_sms_reply_with_catch_up(
+        db, thread.id, old_message.text, old_message.provider_message_id, old_message.at,
+        dispatch_sms=False,
+    )
+    # Simulate the independently queued job for the newest fragment arriving later.
+    main.run_sms_reply_with_catch_up(
+        db, thread.id, "What should I bring?", "new-provider-two",
+        now + main.timedelta(seconds=2), dispatch_sms=False,
+    )
+
+    assert len(responses.calls) == 2
+    newest_input = responses.calls[1]["input"][-1]["content"]
+    assert "One more thing" in newest_input
+    assert "What should I bring?" in newest_input
+    replies = db.query(Message).filter(
+        Message.thread_id == thread.id,
+        Message.role == "system",
+    ).all()
+    assert [reply.text for reply in replies] == ["Newest reply"]
+    cancelled = db.query(main.ThreadEvent).filter_by(
+        thread_id=thread.id, type="ai-reply-cancelled",
+    ).one()
+    assert "newer-customer-message-during-generation" in cancelled.meta
+    db.close()
+
+
+def test_superseded_reply_does_not_override_human_answer_to_newest_turn(monkeypatch):
+    db = make_db()
+    now = datetime.utcnow()
+    thread = main.Thread(
+        id="human-wins-race-thread",
+        customer_phone="+61412345002",
+        sms_account_key="primary",
+        state="auto-reply",
+        priority="medium",
+        sla_due_at=now,
+        unread_count=1,
+    )
+    old_message = Message(
+        id="human-race-old-turn",
+        thread_id=thread.id,
+        role="customer",
+        text="Old question",
+        provider_message_id="human-race-old-provider",
+        at=now,
+    )
+    db.add_all([thread, old_message])
+    db.commit()
+
+    class HumanReplyRaceResponses:
+        calls = 0
+
+        def create(self, **_kwargs):
+            self.calls += 1
+            db.add_all([
+                Message(
+                    id="human-race-new-turn",
+                    thread_id=thread.id,
+                    role="customer",
+                    text="Newest question",
+                    provider_message_id="human-race-new-provider",
+                    at=now + main.timedelta(seconds=1),
+                ),
+                Message(
+                    id="human-race-agent-answer",
+                    thread_id=thread.id,
+                    role="agent",
+                    text="Human answer",
+                    provider_message_id="manual-reply:human-race",
+                    at=now + main.timedelta(seconds=2),
+                ),
+            ])
+            db.commit()
+            return type("Response", (), {"output": [], "output_text": "Stale AI answer"})()
+
+    responses = HumanReplyRaceResponses()
+    monkeypatch.setattr(main, "openai_client", type("Client", (), {"responses": responses})())
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
+    monkeypatch.setattr(main, "match_qa_rule", lambda _body: None)
+    monkeypatch.setattr(main, "build_authority_context", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(main, "get_style_examples", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(main.calendar_service, "get_customer_bookings", lambda *_args, **_kwargs: [])
+
+    main.run_sms_reply_with_catch_up(
+        db, thread.id, old_message.text, old_message.provider_message_id, old_message.at,
+        dispatch_sms=False,
+    )
+    main.run_sms_reply_with_catch_up(
+        db, thread.id, "Newest question", "human-race-new-provider",
+        now + main.timedelta(seconds=1), dispatch_sms=False,
+    )
+
+    assert responses.calls == 1
+    assert db.query(Message).filter(
+        Message.thread_id == thread.id,
+        Message.role == "system",
+    ).count() == 0
+    assert db.query(Message).filter_by(
+        thread_id=thread.id, role="agent", text="Human answer",
+    ).count() == 1
+    db.close()

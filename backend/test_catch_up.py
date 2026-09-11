@@ -283,3 +283,150 @@ def test_catch_up_endpoint_converts_ai_name_error_to_information_request(monkeyp
     }
     db.close()
 
+
+def test_unsafe_catch_up_reply_fails_closed_into_needs_review(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.utcnow()
+    make_thread(db, "unsafe", "+3003")
+    add_message(db, "unsafe-customer", "unsafe", "customer", now)
+    db.add(ThreadEvent(
+        id="unsafe-missed-event",
+        thread_id="unsafe",
+        type="ai-reply-missed",
+        agent_id=None,
+        meta='{"message_id":"unsafe-customer","reason":"global-ai-off"}',
+        at=now,
+    ))
+    db.commit()
+
+    class UnsafeResponses:
+        def create(self, **_kwargs):
+            return type("Response", (), {"output": [], "output_text": "Unsafe reply"})()
+
+    monkeypatch.setattr(main, "openai_client", type("Client", (), {"responses": UnsafeResponses()})())
+    monkeypatch.setattr(main, "match_qa_rule", lambda _body: None)
+    monkeypatch.setattr(main, "build_authority_context", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(main, "get_style_examples", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(main.calendar_service, "get_customer_bookings", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        main,
+        "unsafe_ai_reply_reason",
+        lambda reply, **_kwargs: "synthetic safety rejection" if reply == "Unsafe reply" else None,
+    )
+    monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
+
+    result = catch_up_missed_messages(db)
+
+    assert result == {
+        "processed": True,
+        "threadId": "unsafe",
+        "outcome": "information-request",
+        "remaining": 0,
+    }
+    assert db.get(Thread, "unsafe").state == "needs-review"
+    assert db.query(Message).filter(
+        Message.thread_id == "unsafe",
+        Message.role.in_(["system", "draft"]),
+    ).count() == 0
+    failed = db.query(ThreadEvent).filter_by(
+        thread_id="unsafe", type="ai-reply-failed",
+    ).one()
+    assert json.loads(failed.meta) == {
+        "reason": "synthetic safety rejection",
+        "message_id": "unsafe-customer",
+    }
+    db.close()
+
+
+def test_background_generation_exception_marks_current_turn_needs_review(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.utcnow()
+    make_thread(db, "generation-failed", "+3004")
+    add_message(db, "generation-failed-customer", "generation-failed", "customer", now)
+    db.commit()
+
+    monkeypatch.setattr(
+        main,
+        "run_sms_reply_logic",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("sensitive detail")),
+    )
+    monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
+
+    main.run_sms_reply_with_catch_up(
+        db,
+        "generation-failed",
+        "generation-failed-customer",
+        "catch-up",
+        now,
+        dispatch_sms=False,
+    )
+
+    assert db.get(Thread, "generation-failed").state == "needs-review"
+    failed = db.query(ThreadEvent).filter_by(
+        thread_id="generation-failed", type="ai-reply-failed",
+    ).one()
+    assert json.loads(failed.meta) == {
+        "reason": "Automatic reply failed safely: RuntimeError",
+        "message_id": "generation-failed-customer",
+    }
+    assert "sensitive detail" not in failed.meta
+    db.close()
+
+
+def test_catch_up_delivery_not_accepted_stays_as_review_draft(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.utcnow()
+    make_thread(db, "delivery-failed", "+3005")
+    add_message(db, "delivery-failed-customer", "delivery-failed", "customer", now)
+    db.add(ThreadEvent(
+        id="delivery-missed-event",
+        thread_id="delivery-failed",
+        type="ai-reply-missed",
+        agent_id=None,
+        meta='{"message_id":"delivery-failed-customer","reason":"global-ai-off"}',
+        at=now,
+    ))
+    db.commit()
+
+    class SafeResponses:
+        def create(self, **_kwargs):
+            return type("Response", (), {"output": [], "output_text": "Safe generated reply"})()
+
+    monkeypatch.setattr(main, "openai_client", type("Client", (), {"responses": SafeResponses()})())
+    monkeypatch.setattr(main, "match_qa_rule", lambda _body: None)
+    monkeypatch.setattr(main, "build_authority_context", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(main, "get_style_examples", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(main.calendar_service, "get_customer_bookings", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "send_sms",
+        lambda *_args, **_kwargs: {"status": "skipped", "reason": "Not configured"},
+    )
+    monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
+
+    result = catch_up_missed_messages(db)
+
+    assert result["outcome"] == "information-request"
+    assert db.get(Thread, "delivery-failed").state == "needs-review"
+    draft = db.query(Message).filter_by(
+        thread_id="delivery-failed", role="draft", text="Safe generated reply",
+    ).one()
+    delivery_event = db.query(ThreadEvent).filter_by(
+        thread_id="delivery-failed", type="draft-created",
+    ).one()
+    assert json.loads(delivery_event.meta) == {
+        "message_id": draft.id,
+        "customer_message_id": "delivery-failed-customer",
+        "source": "sms-delivery-failed",
+        "reason": "MobileMessage: Not configured",
+    }
+    db.close()
+
