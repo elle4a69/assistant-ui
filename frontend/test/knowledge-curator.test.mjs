@@ -47,6 +47,11 @@ test('representative guided decision shows context, saved answers, safety, and a
   assert.match(panelSource, /Applies to:/);
   assert.match(panelSource, /Use when:/);
   assert.match(panelSource, /Customer asks:/);
+  assert.match(panelSource, /Approved reply/);
+  assert.match(panelSource, /Already approved/);
+  assert.match(panelSource, /You are not being asked to approve it again/);
+  assert.match(panelSource, /Supporting rule:/);
+  assert.match(panelSource, /record\.example_reply \|\| record\.approved_reply/);
   assert.match(panelSource, /Why this needs you:/);
   assert.match(panelSource, /Record as preferred answer/);
   assert.match(panelSource, /select_current_rule', \[record\.id\]/);
