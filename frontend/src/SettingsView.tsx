@@ -31,6 +31,7 @@ import {
   getKnowledgeCuratorState,
   runKnowledgeCurator,
   resolveKnowledgeCuratorProposal,
+  closeKnowledgeCuratorAfterApprovedEdit,
   KnowledgeCuratorResolution,
   getKnowledgeFile,
   saveKnowledgeFile,
@@ -182,6 +183,9 @@ export default function SettingsView() {
   const [lastSavedLearning, setLastSavedLearning] = useState<ManualLearningEntry | null>(null);
   const [learnedEntries, setLearnedEntries] = useState<LearnedInformationEntry[]>([]);
   const [editingLearnedId, setEditingLearnedId] = useState<string | null>(null);
+  const [editingLearnedOriginal, setEditingLearnedOriginal] = useState<LearnedInformationEntry | null>(null);
+  const [editingCuratorContext, setEditingCuratorContext] = useState<{ proposalId: string; recordId: string } | null>(null);
+  const [savingLearnedId, setSavingLearnedId] = useState<string | null>(null);
   const [selectedLearnedIds, setSelectedLearnedIds] = useState<Set<string>>(new Set());
   const [approvingPendingLearnings, setApprovingPendingLearnings] = useState(false);
   const [generatingSmsLearningPreview, setGeneratingSmsLearningPreview] = useState(false);
@@ -611,14 +615,65 @@ export default function SettingsView() {
   };
 
   const handleSaveLearnedEntry = async (entry: LearnedInformationEntry) => {
+    setSavingLearnedId(entry.id);
     try {
       const saved = await updateLearnedInformation(entry);
       setLearnedEntries(current => current.map(item => item.id === saved.id ? saved : item));
       setEditingLearnedId(null);
-      triggerBanner('success', 'Learned rule updated.');
+      setEditingLearnedOriginal(null);
+      setEditingCuratorContext(null);
+      triggerBanner('success', 'Correction saved for review. It is not used in replies until you approve it.');
     } catch (err) {
       console.error(err); triggerBanner('error', err instanceof Error ? err.message : 'Failed to save learned rule.');
+    } finally {
+      setSavingLearnedId(null);
     }
+  };
+
+  const handleSaveAndApproveCuratorEdit = async (entry: LearnedInformationEntry) => {
+    if (!editingCuratorContext || editingCuratorContext.recordId !== entry.id) return;
+    setSavingLearnedId(entry.id);
+    let approved: LearnedInformationEntry | null = null;
+    try {
+      const saved = await updateLearnedInformation(entry);
+      approved = await approveLearnedInformation(saved.id);
+      await closeKnowledgeCuratorAfterApprovedEdit(editingCuratorContext.proposalId, saved.id);
+      setLearnedEntries(current => current.map(item => item.id === approved!.id ? approved! : item));
+      setEditingLearnedId(null);
+      setEditingLearnedOriginal(null);
+      setEditingCuratorContext(null);
+      await refreshKnowledgeCurator();
+      triggerBanner('success', approved.retrieval_enabled ? 'Your correction is approved and the Curator question is closed.' : 'Your correction is approved for the record and the Curator question is closed. The safety check kept it out of automated replies.');
+    } catch (err) {
+      console.error(err);
+      if (approved) {
+        setLearnedEntries(current => current.map(item => item.id === approved!.id ? approved! : item));
+        setEditingLearnedId(null);
+        setEditingLearnedOriginal(null);
+        setEditingCuratorContext(null);
+        await refreshKnowledgeCurator().catch(() => undefined);
+        triggerBanner('error', `The correction was saved and approved, but the Curator question could not close: ${err instanceof Error ? err.message : 'please refresh and try again.'}`);
+      } else {
+        triggerBanner('error', err instanceof Error ? err.message : 'The correction could not be saved and approved.');
+      }
+    } finally {
+      setSavingLearnedId(null);
+    }
+  };
+
+  const beginLearnedEdit = (entry: LearnedInformationEntry, curatorContext: { proposalId: string; recordId: string } | null = null) => {
+    setEditingLearnedOriginal({ ...entry });
+    setEditingCuratorContext(curatorContext);
+    setEditingLearnedId(entry.id);
+  };
+
+  const cancelLearnedEdit = () => {
+    if (editingLearnedOriginal) {
+      setLearnedEntries(current => current.map(item => item.id === editingLearnedOriginal.id ? editingLearnedOriginal : item));
+    }
+    setEditingLearnedId(null);
+    setEditingLearnedOriginal(null);
+    setEditingCuratorContext(null);
   };
 
   const updateLineProfile = (key: 'primary' | 'secondary', field: keyof SmsLineProfile, value: string) => {
@@ -822,8 +877,13 @@ export default function SettingsView() {
     }
   };
 
-  const handleEditCuratorRecord = (recordId: string) => {
-    setEditingLearnedId(recordId);
+  const handleEditCuratorRecord = (proposalId: string, recordId: string) => {
+    const entry = learnedEntries.find(item => item.id === recordId);
+    if (!entry) {
+      triggerBanner('error', 'That saved item is no longer available. Run the Curator check again.');
+      return;
+    }
+    beginLearnedEdit(entry, { proposalId, recordId });
     window.requestAnimationFrame(() => {
       document.getElementById(`learned-entry-${recordId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     });
@@ -1987,22 +2047,24 @@ export default function SettingsView() {
                   <div className="max-h-[420px] divide-y divide-slate-100 overflow-y-auto">
                     {learnedEntries.length === 0 ? <p className="p-3 text-xs text-slate-500">No learned rules saved yet.</p> : learnedEntries.map(entry => (
                       <div id={`learned-entry-${entry.id}`} key={entry.id} className="p-3 scroll-m-4">
-                        {editingLearnedId === entry.id ? <div className="space-y-2">
-                          <input value={entry.topic || ''} onChange={event => setLearnedEntries(current => current.map(item => item.id === entry.id ? { ...item, topic: event.target.value } : item))} placeholder="Topic" className="w-full rounded border border-slate-300 p-2 text-xs" />
-                          <input value={entry.applies_when || ''} onChange={event => setLearnedEntries(current => current.map(item => item.id === entry.id ? { ...item, applies_when: event.target.value } : item))} placeholder="Use this guidance when…" className="w-full rounded border border-slate-300 p-2 text-xs" />
-                          <textarea value={entry.text} onChange={event => setLearnedEntries(current => current.map(item => item.id === entry.id ? { ...item, text: event.target.value } : item))} rows={4} className="w-full rounded border border-slate-300 p-2 text-xs" />
+                        {editingLearnedId === entry.id ? <div className={`space-y-3 rounded-lg p-3 ${editingCuratorContext?.recordId === entry.id ? 'border-2 border-violet-300 bg-violet-50' : 'bg-slate-50'}`}>
+                          {editingCuratorContext?.recordId === entry.id && <div><p className="text-sm font-bold text-violet-950">Resolve this Curator question</p><p className="mt-1 text-xs leading-relaxed text-violet-800">Clarify the situation and the approved response below. “Save and approve” applies your correction and closes the question in one step.</p></div>}
+                          <label className="block text-[11px] font-bold text-slate-700">Topic<input value={entry.topic || ''} onChange={event => setLearnedEntries(current => current.map(item => item.id === entry.id ? { ...item, topic: event.target.value } : item))} placeholder="What is this about?" className="mt-1 w-full rounded border border-slate-300 p-2 text-xs font-normal" /></label>
+                          <label className="block text-[11px] font-bold text-slate-700">Use this information when<input value={entry.applies_when || ''} onChange={event => setLearnedEntries(current => current.map(item => item.id === entry.id ? { ...item, applies_when: event.target.value } : item))} placeholder="For example: when a customer asks to see a photo" className="mt-1 w-full rounded border border-slate-300 p-2 text-xs font-normal" /></label>
+                          <label className="block text-[11px] font-bold text-slate-700">Instruction or rule<textarea value={entry.instruction || entry.text} onChange={event => setLearnedEntries(current => current.map(item => item.id === entry.id ? { ...item, instruction: event.target.value, text: event.target.value } : item))} rows={3} className="mt-1 w-full rounded border border-slate-300 p-2 text-xs font-normal" /></label>
+                          <label className="block text-[11px] font-bold text-slate-700">Approved example reply <span className="font-normal text-slate-500">(optional)</span><textarea value={entry.example_reply || ''} onChange={event => setLearnedEntries(current => current.map(item => item.id === entry.id ? { ...item, example_reply: event.target.value } : item))} placeholder="The exact kind of response the assistant may send" rows={3} className="mt-1 w-full rounded border border-slate-300 p-2 text-xs font-normal" /></label>
                           <div className="flex items-center justify-between gap-2">
                             <select value={entry.scope} onChange={event => setLearnedEntries(current => current.map(item => item.id === entry.id ? { ...item, scope: event.target.value as LearnedInformationEntry['scope'] } : item))} className="rounded border border-slate-300 p-2 text-xs">
                               <option value="shared">Shared</option><option value="primary">Line 1</option><option value="secondary">Line 2</option><option value="internal">Internal, not used in replies</option>
                             </select>
-                            <div className="flex gap-2"><button onClick={() => setEditingLearnedId(null)} className="rounded border border-slate-300 px-3 py-1.5 text-xs">Cancel</button><button onClick={() => handleSaveLearnedEntry(entry)} className="rounded bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white">Save</button></div>
+                            <div className="flex flex-wrap justify-end gap-2"><button type="button" onClick={cancelLearnedEdit} disabled={savingLearnedId === entry.id} className="rounded border border-slate-300 px-3 py-2 text-xs disabled:opacity-50">Cancel</button>{editingCuratorContext?.recordId === entry.id && <button type="button" onClick={() => handleSaveLearnedEntry(entry)} disabled={savingLearnedId === entry.id} className="rounded border border-indigo-300 bg-white px-3 py-2 text-xs font-bold text-indigo-800 disabled:opacity-50">Save only</button>}<button type="button" onClick={() => editingCuratorContext?.recordId === entry.id ? handleSaveAndApproveCuratorEdit(entry) : handleSaveLearnedEntry(entry)} disabled={savingLearnedId === entry.id || !(entry.instruction || entry.text).trim()} className="rounded bg-emerald-700 px-3 py-2 text-xs font-bold text-white disabled:opacity-50">{savingLearnedId === entry.id ? 'Saving…' : editingCuratorContext?.recordId === entry.id ? 'Save and approve' : 'Save for review'}</button></div>
                           </div>
                         </div> : <div className="flex items-start justify-between gap-3">
                           <label className="mt-0.5 flex shrink-0 items-center" title={`Select ${entry.topic || entry.type}`}>
                             <input type="checkbox" checked={selectedLearnedIds.has(entry.id)} onChange={() => toggleLearnedSelection(entry.id)} className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
                           </label>
                           <div className="min-w-0"><p className="text-xs font-bold text-slate-800">{entry.topic || entry.type}</p><p className="mt-1 whitespace-pre-wrap text-[11px] text-slate-600">{entry.text}</p><p className="mt-1 flex flex-wrap gap-1.5 text-[10px] font-semibold"><span className="text-indigo-700">{entry.scope === 'primary' ? 'Line 1' : entry.scope === 'secondary' ? 'Line 2' : entry.scope === 'shared' ? 'Shared' : 'Internal'}</span><span className={entry.review_status === 'approved' ? 'text-emerald-700' : 'text-amber-700'}>{entry.review_status === 'approved' ? (entry.retrieval_enabled ? 'Approved and active' : 'Approved, not injected') : 'Needs review'}</span>{entry.review_source && <span className="text-slate-500">{entry.review_source === 'knowledge-curator' ? 'Knowledge Curator' : entry.review_source === 'ai-redrafted' ? 'AI redrafted' : entry.review_source === 'ai-drafted' ? 'AI drafted' : entry.review_source === 'sms-pair-template' ? 'SMS example' : 'Staff-edited reply'}</span>}</p>{entry.review_note && <p className="mt-1 text-[10px] text-amber-700">{entry.review_note}</p>}</div>
-                          <div className="flex shrink-0 gap-1"><button onClick={() => setEditingLearnedId(entry.id)} className="rounded p-1.5 text-indigo-600 hover:bg-indigo-50" title="Edit learned rule"><Edit className="h-3.5 w-3.5" /></button>{entry.review_status !== 'approved' && <><button onClick={() => handleRedraftLearnedEntry(entry.id)} className="rounded border border-indigo-200 px-2 py-1 text-[10px] font-bold text-indigo-700 hover:bg-indigo-50" title="Ask AI to improve this draft">Redraft</button><button onClick={() => handleApproveLearnedEntry(entry.id)} className="rounded border border-emerald-200 px-2 py-1 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50" title="Approve learned rule">Approve</button></>}<button onClick={() => handleDeleteLearnedEntry(entry.id)} className="rounded p-1.5 text-rose-600 hover:bg-rose-50" title="Delete learned rule"><Trash2 className="h-3.5 w-3.5" /></button></div>
+                          <div className="flex shrink-0 gap-1"><button onClick={() => beginLearnedEdit(entry)} className="rounded p-1.5 text-indigo-600 hover:bg-indigo-50" title="Edit learned rule"><Edit className="h-3.5 w-3.5" /></button>{entry.review_status !== 'approved' && <><button onClick={() => handleRedraftLearnedEntry(entry.id)} className="rounded border border-indigo-200 px-2 py-1 text-[10px] font-bold text-indigo-700 hover:bg-indigo-50" title="Ask AI to improve this draft">Redraft</button><button onClick={() => handleApproveLearnedEntry(entry.id)} className="rounded border border-emerald-200 px-2 py-1 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50" title="Approve learned rule">Approve</button></>}<button onClick={() => handleDeleteLearnedEntry(entry.id)} className="rounded p-1.5 text-rose-600 hover:bg-rose-50" title="Delete learned rule"><Trash2 className="h-3.5 w-3.5" /></button></div>
                         </div>}
                       </div>
                     ))}

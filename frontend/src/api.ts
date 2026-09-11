@@ -854,7 +854,7 @@ export interface KnowledgeCuratorRecordPreview extends KnowledgeCuratorRecordRef
 export type KnowledgeCuratorResolution =
   | 'keep_all_examples' | 'select_current_rule' | 'create_merged_draft' | 'needs_manual_investigation'
   | 'keep_both_distinct' | 'create_consolidation_draft' | 'create_metadata_repair_draft'
-  | 'add_safe_replacement_draft' | 'not_an_issue' | 'dismiss_for_now';
+  | 'add_safe_replacement_draft' | 'not_an_issue' | 'dismiss_for_now' | 'owner_clarified';
 
 export interface KnowledgeCuratorProposal {
   id: string;
@@ -1078,10 +1078,18 @@ export async function resolveKnowledgeCuratorProposal(id: string, resolution: Kn
   return (await response.json()).proposal;
 }
 
+export async function closeKnowledgeCuratorAfterApprovedEdit(id: string, recordId: string): Promise<KnowledgeCuratorProposal> {
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator/proposals/${encodeURIComponent(id)}/approved-edit`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ record_id: recordId }),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'The Curator question could not be closed.');
+  return (await response.json()).proposal;
+}
+
 export async function updateLearnedInformation(entry: LearnedInformationEntry): Promise<LearnedInformationEntry> {
   const response = await apiFetch(`${API_BASE}/api/settings/learnings/${encodeURIComponent(entry.id)}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic: entry.topic || '', applies_when: entry.applies_when || '', text: entry.text, scope: entry.scope }),
+    body: JSON.stringify({ topic: entry.topic || '', applies_when: entry.applies_when || '', instruction: entry.instruction || '', example_reply: entry.example_reply || '', text: entry.text, scope: entry.scope }),
   });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to save learned rule.');
   return (await response.json()).entry;

@@ -3478,7 +3478,7 @@ KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES = {"proposed", "accepted"}
 KNOWLEDGE_CURATOR_RESOLUTIONS = {
     "keep_all_examples", "select_current_rule", "create_merged_draft", "needs_manual_investigation",
     "keep_both_distinct", "create_consolidation_draft", "create_metadata_repair_draft",
-    "add_safe_replacement_draft", "not_an_issue", "dismiss_for_now",
+    "add_safe_replacement_draft", "not_an_issue", "dismiss_for_now", "owner_clarified",
 }
 KNOWLEDGE_CURATOR_CONTEXTUAL_SOURCE_MARKERS = ("sms", "pair", "staff-edited", "staff_edited")
 
@@ -4524,6 +4524,41 @@ def transition_knowledge_curator_proposal(proposal_id: str, status_value: str) -
         if not _curator_proposal_is_current(proposal):
             raise ValueError("The involved record revisions changed or are unavailable; run a fresh audit.")
         proposal["status"] = status_value
+        proposal["updated_at"] = datetime.utcnow().isoformat() + "Z"
+        _save_curator_state(state)
+        return dict(proposal)
+
+
+def close_knowledge_curator_after_approved_edit(proposal_id: str, record_id: str) -> Dict[str, Any]:
+    """Close a Curator question only after its referenced record was edited and approved."""
+    with KNOWLEDGE_CURATOR_LOCK:
+        state = _load_curator_state()
+        proposal = next((item for item in state["proposals"] if item.get("id") == proposal_id), None)
+        if not proposal:
+            raise KeyError(proposal_id)
+        if proposal.get("status") != "proposed":
+            raise ValueError("Only an unresolved Curator question can be closed by an approved edit.")
+        reference = next(
+            (item for item in proposal.get("records", []) if isinstance(item, dict) and str(item.get("id")) == record_id),
+            None,
+        )
+        if not reference:
+            raise ValueError("That saved item is not part of this Curator question.")
+        current = {str(item.get("id")): item for item in _curator_records()}.get(record_id)
+        if not current:
+            raise ValueError("The edited saved item no longer exists.")
+        try:
+            old_revision = int(reference.get("revision") or 1)
+            new_revision = int(current.get("revision") or current.get("version") or 1)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("The edited saved item has an invalid revision.") from exc
+        if new_revision <= old_revision:
+            raise ValueError("Edit and approve the saved item before closing this question.")
+        if current.get("review_status") != "approved":
+            raise ValueError("The edited saved item must be approved before this question can close.")
+        proposal["status"] = "resolved"
+        proposal["resolution"] = "owner_clarified"
+        proposal["selected_record_ids"] = [record_id]
         proposal["updated_at"] = datetime.utcnow().isoformat() + "Z"
         _save_curator_state(state)
         return dict(proposal)
@@ -5622,6 +5657,8 @@ class ManualLearningInput(BaseModel):
 class LearnedInformationUpdateInput(BaseModel):
     topic: str = Field(default="", max_length=500)
     applies_when: str = Field(default="", max_length=1000)
+    instruction: str = Field(default="", max_length=6000)
+    example_reply: str = Field(default="", max_length=6000)
     text: str = Field(min_length=1, max_length=6000)
     scope: Literal["shared", "primary", "secondary", "internal"]
 
@@ -5629,6 +5666,8 @@ class LearnedInformationUpdateInput(BaseModel):
     def clean_entry(self):
         self.topic = self.topic.strip()
         self.applies_when = self.applies_when.strip()
+        self.instruction = self.instruction.strip()
+        self.example_reply = self.example_reply.strip()
         self.text = self.text.strip()
         if not self.text:
             raise ValueError("Learning text is required.")
@@ -16597,8 +16636,20 @@ def update_learned_information(entry_id: str, payload: LearnedInformationUpdateI
     try:
         # An edit changes the meaning of a learning, so it must be reviewed
         # again before it can affect a customer reply.
+        updates = payload.model_dump()
+        if payload.instruction:
+            text_parts = [
+                f"Topic: {payload.topic}",
+                f"Applies when: {payload.applies_when}",
+                f"Instruction: {payload.instruction}",
+            ]
+            if payload.example_reply:
+                text_parts.append(f"Example reply: {payload.example_reply}")
+            updates["text"] = "\n".join(text_parts)
+        updates["canonical_key"] = _canonical_knowledge_key(payload.topic or payload.instruction or payload.text)
+        updates["sms_account_key"] = payload.scope
         entry = replace_learned_information_entry(entry_id, {
-            **payload.model_dump(),
+            **updates,
             "review_status": "pending",
             "retrieval_enabled": False,
         })
@@ -16707,6 +16758,19 @@ def resolve_knowledge_curator_proposal_endpoint(proposal_id: str, payload: Dict[
         if selected is not None and not isinstance(selected, list):
             raise ValueError("selected_record_ids must be a list.")
         return {"status": "success", "proposal": resolve_knowledge_curator_proposal(proposal_id, resolution, selected)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Knowledge curator proposal not found.")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/settings/knowledge-curator/proposals/{proposal_id}/approved-edit")
+def close_knowledge_curator_after_approved_edit_endpoint(proposal_id: str, payload: Dict[str, Any]):
+    try:
+        record_id = str(payload.get("record_id") or "").strip()
+        if not record_id:
+            raise ValueError("record_id is required.")
+        return {"status": "success", "proposal": close_knowledge_curator_after_approved_edit(proposal_id, record_id)}
     except KeyError:
         raise HTTPException(status_code=404, detail="Knowledge curator proposal not found.")
     except ValueError as exc:

@@ -37,7 +37,8 @@ test('every curator finding has owner-facing explanatory copy and outcome labels
   assert.match(panelSource, /Review this next time/);
   assert.match(panelSource, /Result: \{choice\.effect\}/);
   assert.match(panelSource, /Recommended/);
-  assert.match(panelSource, /Edit wording, situation or service line/);
+  assert.match(panelSource, /Clarify or correct this information/);
+  assert.match(panelSource, /approve your correction to close this question/);
   assert.match(panelSource, /editableRecordIds\.has\(record\.id\)/);
   assert.doesNotMatch(panelSource, /ask staff to review/i);
 });
@@ -95,13 +96,19 @@ test('Settings keeps the proposal-only workflow and refreshes safely', () => {
   assert.match(settingsSource, /err instanceof Error \? `\$\{err\.message\} Nothing changed\.`/);
   assert.match(settingsSource, /knowledge-curator' \? 'Knowledge Curator'/);
   assert.match(settingsSource, /handleEditCuratorRecord/);
-  assert.match(settingsSource, /Use this guidance when…/);
+  assert.match(settingsSource, /Use this information when/);
+  assert.match(settingsSource, /Resolve this Curator question/);
+  assert.match(settingsSource, /Save and approve/);
+  assert.match(settingsSource, /closeKnowledgeCuratorAfterApprovedEdit/);
+  assert.match(settingsSource, /Approved example reply/);
   assert.match(apiSource, /applies_when: entry\.applies_when/);
+  assert.match(apiSource, /example_reply: entry\.example_reply/);
 });
 
 test('curator client uses the protected settings API and explicit state transitions', () => {
   assert.match(apiSource, /\/api\/settings\/knowledge-curator\/run/);
   assert.match(apiSource, /\/api\/settings\/knowledge-curator\/proposals\/\$\{encodeURIComponent\(id\)\}\/resolve/);
+  assert.match(apiSource, /\/approved-edit/);
   assert.match(apiSource, /KnowledgeCuratorResolution/);
   assert.match(apiSource, /safe_repairs_completed/);
   assert.match(apiSource, /interval_seconds/);

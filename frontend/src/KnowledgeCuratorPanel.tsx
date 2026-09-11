@@ -197,7 +197,7 @@ type Props = {
   editableRecordIds: Set<string>;
   onRun: () => void;
   onResolve: (proposal: KnowledgeCuratorProposal, resolution: KnowledgeCuratorResolution, selectedRecordIds?: string[]) => void;
-  onEditRecord: (recordId: string) => void;
+  onEditRecord: (proposalId: string, recordId: string) => void;
 };
 
 export default function KnowledgeCuratorPanel({ state, loadStatus, running, updatingId, lineLabels, editableRecordIds, onRun, onResolve, onEditRecord }: Props) {
@@ -256,7 +256,7 @@ export default function KnowledgeCuratorPanel({ state, loadStatus, running, upda
                 {record.customer_message && <p className="mt-1"><strong>Customer asks:</strong> {record.customer_message}</p>}
                 <p className="mt-1 whitespace-pre-wrap"><strong>{approvedInformationLabel(record)}:</strong> {approvedInformation(record)}</p>
                 {record.instruction && record.instruction !== approvedInformation(record) && <p className="mt-1 whitespace-pre-wrap text-slate-600"><strong>Supporting rule:</strong> {record.instruction}</p>}
-                {editableRecordIds.has(record.id) && <button type="button" onClick={() => onEditRecord(record.id)} disabled={busy} className="mt-3 min-h-11 w-full rounded border border-indigo-300 bg-indigo-50 px-2 py-2 font-bold text-indigo-900 hover:bg-indigo-100 disabled:opacity-50">Edit wording, situation or service line</button>}
+                {editableRecordIds.has(record.id) && <><button type="button" onClick={() => onEditRecord(proposal.id, record.id)} disabled={busy} className="mt-3 min-h-11 w-full rounded border border-indigo-300 bg-indigo-50 px-2 py-2 font-bold text-indigo-900 hover:bg-indigo-100 disabled:opacity-50">Clarify or correct this information</button><p className="mt-1 text-[11px] text-slate-600">Edit the exact saved item, then approve your correction to close this question.</p></>}
                 {proposal.finding_type === 'incompatible_active_records' && !changed && !alreadyPrepared && <>
                   <button type="button" onClick={() => onResolve(proposal, 'select_current_rule', [record.id])} disabled={busy} aria-label={`Record saved guidance ${recordIndex + 1} as the preferred answer. This does not change customer guidance.`} className="mt-3 min-h-11 w-full rounded border border-violet-300 bg-white px-2 py-2 font-bold text-violet-900 hover:bg-violet-50 disabled:opacity-50">Record as preferred answer</button>
                   <p className="mt-1 text-[11px] text-slate-600">Records your preference only. It does not deactivate the other answer.</p>

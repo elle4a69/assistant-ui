@@ -500,6 +500,34 @@ def test_not_an_issue_stays_suppressed_until_material_change(tmp_path, monkeypat
     assert main.run_knowledge_curator()["run"]["created_proposals"] == 1
 
 
+def test_approved_owner_edit_closes_the_exact_curator_question(tmp_path, monkeypatch):
+    curator_paths(tmp_path, monkeypatch, [record("price", text="The service costs $100.")])
+    proposal = next(item for item in main.run_knowledge_curator()["proposals"] if item["finding_type"] == "literal_dynamic_authority")
+
+    main.replace_learned_information_entry("price", {"text": "Check the current service list for pricing."})
+    with pytest.raises(ValueError, match="must be approved"):
+        main.close_knowledge_curator_after_approved_edit(proposal["id"], "price")
+
+    main.approve_learned_information_entry("price")
+    closed = main.close_knowledge_curator_after_approved_edit(proposal["id"], "price")
+    assert closed["status"] == "resolved"
+    assert closed["resolution"] == "owner_clarified"
+    assert closed["selected_record_ids"] == ["price"]
+    assert main.get_knowledge_curator_state()["proposals"][0]["status"] == "resolved"
+
+
+def test_approved_owner_edit_cannot_close_an_unrelated_curator_question(tmp_path, monkeypatch):
+    curator_paths(tmp_path, monkeypatch, [
+        record("price", text="The service costs $100."),
+        record("other", key="other", text="Use the durable policy."),
+    ])
+    proposal = next(item for item in main.run_knowledge_curator()["proposals"] if item["finding_type"] == "literal_dynamic_authority")
+    main.replace_learned_information_entry("other", {"text": "Use the corrected durable policy."})
+    main.approve_learned_information_entry("other")
+    with pytest.raises(ValueError, match="not part"):
+        main.close_knowledge_curator_after_approved_edit(proposal["id"], "other")
+
+
 @pytest.mark.parametrize(
     ("resolution", "records", "finding_type"),
     [
