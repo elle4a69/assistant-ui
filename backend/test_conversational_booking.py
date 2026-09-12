@@ -1239,3 +1239,120 @@ def test_calendar_only_validator_requires_a_fresh_lookup():
         "I have an opening at 3pm.", live_lookup_succeeded=True,
     ) is None
 
+
+def availability_evidence(now, **overrides):
+    slot = now.replace(hour=15, minute=0, second=0, microsecond=0)
+    value = {
+        "account_key": "primary",
+        "tool": "check_exact_time",
+        "status": "ok",
+        "requested_slot": slot.isoformat(),
+        "date": slot.date().isoformat(),
+        "available": True,
+        "slots": [{
+            "service_id": "service",
+            "start": slot.isoformat(),
+            "end": (slot + timedelta(minutes=30)).isoformat(),
+        }],
+        "completed_at": main.datetime.utcnow(),
+    }
+    value.update(overrides)
+    return value
+
+
+def test_live_availability_validator_binds_evidence_to_account_time_and_freshness():
+    now = main.parse_business_datetime("2026-09-14T10:00:00+10:00")
+    turn_started = main.datetime.utcnow() - timedelta(seconds=1)
+    evidence = availability_evidence(now)
+
+    assert main.validate_live_availability_reply(
+        "3pm today is available.", [evidence], account_key="primary",
+        request_text="Can I come at 3pm today?", now_local=now,
+        turn_started_at=turn_started,
+    ) is None
+    assert "this account" in main.validate_live_availability_reply(
+        "3pm today is available.", [evidence], account_key="secondary",
+        request_text="Can I come at 3pm today?", now_local=now,
+        turn_started_at=turn_started,
+    )
+    assert "fresh live" in main.validate_live_availability_reply(
+        "3pm today is available.", [availability_evidence(
+            now, completed_at=turn_started - timedelta(seconds=1),
+        )], account_key="primary", request_text="Can I come at 3pm today?",
+        now_local=now, turn_started_at=turn_started,
+    )
+    assert "fresh live" in main.validate_live_availability_reply(
+        "3pm today is available.", [availability_evidence(now, status="unavailable")],
+        account_key="primary", request_text="Can I come at 3pm today?",
+        now_local=now, turn_started_at=turn_started,
+    )
+
+
+def test_live_availability_validator_allows_matching_exact_unavailability_only():
+    now = main.parse_business_datetime("2026-09-14T10:00:00+10:00")
+    turn_started = main.datetime.utcnow() - timedelta(seconds=1)
+    unavailable = availability_evidence(now, available=False, slots=[])
+
+    assert main.validate_live_availability_reply(
+        "3pm today isn't available.", [unavailable], account_key="primary",
+        request_text="Can I come at 3pm today?", now_local=now,
+        turn_started_at=turn_started,
+    ) is None
+    assert "exact-time lookup" in main.validate_live_availability_reply(
+        "4pm today isn't available.", [unavailable], account_key="primary",
+        request_text="Can I come at 4pm today?", now_local=now,
+        turn_started_at=turn_started,
+    )
+
+
+def test_successful_capped_lookup_cannot_support_scarcity_and_routes_to_review(monkeypatch):
+    now = main.parse_business_datetime("2026-09-14T10:00:00+10:00")
+    tomorrow = now + timedelta(days=1)
+
+    class TomorrowSuite:
+        timezone_name = "Australia/Hobart"
+
+        def execute(self, tool_name, arguments):
+            assert tool_name == "get_times_tomorrow"
+            return {
+                "status": "ok", "service_id": "service",
+                "date": tomorrow.date().isoformat(),
+                "slots": [{
+                    "service_id": "service",
+                    "start_time": tomorrow.replace(hour=15).isoformat(),
+                    "end_time": tomorrow.replace(hour=15, minute=30).isoformat(),
+                }],
+            }
+
+    monkeypatch.setattr(main, "current_business_time", lambda: now)
+    monkeypatch.setattr(main, "get_booking_tool_suite", lambda *_args: TomorrowSuite())
+    monkeypatch.setattr(main, "build_authority_context", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(main.calendar_service, "get_customer_bookings", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
+    db = make_db()
+    thread = add_thread(db)
+    customer = Message(
+        id="unsupported-scarcity-message", thread_id=thread.id, role="customer",
+        text="What availability do you have tomorrow?",
+        provider_message_id="unsupported-scarcity-provider", at=main.datetime.utcnow(),
+    )
+    db.add(customer)
+    db.commit()
+    monkeypatch.setattr(main, "openai_client", SequenceClient([
+        FakeResponse(output=[FakeFunctionCall(
+            "get_times_tomorrow", {"service_id": "service"}, "tomorrow-lookup",
+        )]),
+        FakeResponse(output_text="I only have one opening tomorrow."),
+    ]))
+
+    assert run_sms_reply_logic(
+        db, thread.id, customer.text, customer.provider_message_id, customer.at,
+        dispatch_sms=False,
+    ) == (False, False)
+    db.refresh(thread)
+    assert thread.state == "needs-review"
+    assert db.query(Message).filter(Message.role.in_(["system", "draft"])).count() == 0
+    failure = db.query(main.ThreadEvent).filter(main.ThreadEvent.type == "ai-reply-failed").one()
+    assert "unsupported availability scarcity" in json.loads(failure.meta)["reason"]
+    db.close()
+

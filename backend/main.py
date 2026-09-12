@@ -7632,9 +7632,19 @@ AVAILABILITY_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 AVAILABILITY_CLAIM_RE = re.compile(
-    r"\b(?:available|availability|free|opening|openings|slot|slots|"
-    r"fully\s+booked|booked\s+out|can\s+(?:do|book)|"
-    r"can(?:not|'t)\s+(?:do|book))\b",
+    r"\b(?:available|availability|unavailable|free|opening|openings|slot|slots|"
+    r"fully\s+booked|booked\s+out|no\s+(?:times?|appointments?|openings?|slots?)|"
+    r"all\s+booked|no\s+room|nothing\s+(?:available|free|open)|limited|scarce|wide\s+open|closed|"
+    r"earliest|soonest|(?:we(?:'re|\s+are)|i(?:'m|\s+am))\s+(?:too\s+)?busy|"
+    r"only\s+(?:have|got|one|two|a\s+few)|can\s+(?:do|book)|"
+    r"can(?:not|'t)\s+(?:do|book|fit|see|take)|(?:i|we)\s+can\s+(?:fit|see|take)|"
+    r"(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+(?:works|is\s+open))\b",
+    re.IGNORECASE,
+)
+
+AVAILABILITY_SCARCITY_RE = re.compile(
+    r"\b(?:limited|scarce|(?:only|just)\s+(?:have|got|one|two|a\s+few|a\s+single)|"
+    r"last\s+(?:opening|appointment|slot)|(?:a\s+single|few|one|two|\d+)\s+(?:opening|openings|slots?)\s+left)\b",
     re.IGNORECASE,
 )
 
@@ -7646,7 +7656,7 @@ def is_booking_or_availability_turn(message: str) -> bool:
 
 def has_availability_claim(reply: str) -> bool:
     """Return whether customer-facing wording makes an availability assertion."""
-    return bool(AVAILABILITY_CLAIM_RE.search(reply or ""))
+    return bool(AVAILABILITY_CLAIM_RE.search((reply or "").replace("’", "'")))
 
 
 def validate_calendar_only_reply(reply: str, *, live_lookup_succeeded: bool) -> Optional[str]:
@@ -7674,6 +7684,124 @@ def requested_duration_minutes(messages: List[Any], current_body: str) -> Option
         if re.search(r"\bhalf\s*(?:an\s*)?(?:hour|hr)\b", normalized):
             return 30
     return None
+
+
+def _availability_dates(text: str, now_local: datetime) -> set[str]:
+    """Resolve only explicit customer-facing day references."""
+    normalized = (text or "").casefold()
+    dates: set[str] = set(re.findall(r"\b\d{4}-\d{2}-\d{2}\b", normalized))
+    if re.search(r"\btoday\b|\btonight\b", normalized):
+        dates.add(now_local.date().isoformat())
+    if re.search(r"\btomorrow\b", normalized):
+        dates.add((now_local.date() + timedelta(days=1)).isoformat())
+    for weekday, name in enumerate(day.casefold() for day in DAY_NAMES):
+        if re.search(rf"\b{name}\b", normalized):
+            dates.add((now_local.date() + timedelta(days=(weekday - now_local.weekday()) % 7)).isoformat())
+    return dates
+
+
+def _evidence_dates(evidence: Dict[str, Any]) -> set[str]:
+    dates = {str(evidence.get("date") or "")}
+    for field in ("requested_slot", "after"):
+        try:
+            dates.add(parse_business_datetime(str(evidence.get(field) or "")).date().isoformat())
+        except (TypeError, ValueError):
+            pass
+    for slot in evidence.get("slots") or []:
+        try:
+            dates.add(parse_business_datetime(str(slot["start"])).date().isoformat())
+        except (KeyError, TypeError, ValueError):
+            pass
+    return {item for item in dates if item}
+
+
+def validate_live_availability_reply(
+    reply: str,
+    evidence: List[Dict[str, Any]],
+    *,
+    account_key: str,
+    request_text: str,
+    now_local: datetime,
+    turn_started_at: datetime,
+) -> Optional[str]:
+    """Require fresh, account- and window-bound evidence for availability wording."""
+    if not has_availability_claim(reply):
+        return None
+    usable = [
+        item for item in evidence
+        if item.get("status") == "ok"
+        and item.get("account_key") == account_key
+        and isinstance(item.get("completed_at"), datetime)
+        and item["completed_at"] >= turn_started_at
+    ]
+    if not usable:
+        return "AI stated availability without a fresh live calendar lookup for this account"
+
+    claimed_dates = _availability_dates(reply, now_local)
+    requested_dates = _availability_dates(request_text, now_local)
+    relevant_dates = claimed_dates or requested_dates
+    if relevant_dates and not relevant_dates.issubset(set().union(*(_evidence_dates(item) for item in usable))):
+        return "AI stated availability outside the fresh live calendar lookup window"
+
+    # Discovery lists are intentionally capped and therefore cannot establish
+    # comparative scarcity ("only one", "last slot", "limited availability").
+    if AVAILABILITY_SCARCITY_RE.search(reply or ""):
+        return "AI stated unsupported availability scarcity"
+
+    normalized = " ".join((reply or "").casefold().replace("’", "'").split())
+    negative = bool(re.search(
+        r"\b(?:unavailable|fully booked|booked out|no (?:times?|appointments?|openings?|slots?)|"
+        r"no room|nothing (?:available|free|open)|closed|can\W*t|cannot|can not|not available|not free|"
+        r"isn\W*t available|don\W*t have|do not have|"
+        r"(?:slot|time|opening|appointment).{0,15}(?:taken|gone|filled|booked))\b",
+        normalized,
+    ))
+    claimed_time = requested_time_at_receipt(reply, now_local)
+    request_time = requested_time_at_receipt(request_text, now_local)
+    effective_time = claimed_time or request_time
+    if negative and effective_time:
+        exact_support = any(
+            item.get("tool") == "check_exact_time"
+            and item.get("available") is False
+            and _same_availability_minute(item.get("requested_slot"), effective_time)
+            for item in usable
+        )
+        if not exact_support:
+            return "AI stated an exact time was unavailable without a matching live exact-time lookup"
+    elif negative and relevant_dates:
+        # A successful full-day query with no returned appointments supports a
+        # day-level unavailability statement. A non-empty/capped list does not.
+        for date in relevant_dates:
+            if not any(
+                item.get("tool") in {"get_times_today", "get_times_tomorrow"}
+                and item.get("date") == date
+                and not item.get("slots")
+                for item in usable
+            ):
+                return "AI stated day-level unavailability without a matching empty live calendar result"
+    elif negative:
+        return "AI stated ambiguous unavailability without a covered live calendar window"
+    elif effective_time:
+        if not any(
+            any(_same_availability_minute(slot.get("start"), effective_time) for slot in item.get("slots") or [])
+            for item in usable
+        ):
+            return "AI stated an exact time was available without a matching live calendar slot"
+    elif relevant_dates:
+        for date in relevant_dates:
+            if not any(date in _evidence_dates(item) and item.get("slots") for item in usable):
+                return "AI stated day-level availability without a matching live calendar slot"
+    elif not any(item.get("slots") for item in usable):
+        return "AI stated availability without a matching live calendar slot"
+    return None
+
+
+def _same_availability_minute(value: Any, expected: datetime) -> bool:
+    try:
+        parsed = parse_business_datetime(str(value)).astimezone(expected.tzinfo)
+    except (TypeError, ValueError):
+        return False
+    return parsed.replace(second=0, microsecond=0) == expected.replace(second=0, microsecond=0)
 
 
 def chronological_pending_booking_state(messages: List[Any], account_key: str) -> Optional[Dict[str, str]]:
@@ -7905,6 +8033,8 @@ def run_sms_reply_logic(
         or bool(chronological_state)
     )
     availability_tool_slots: List[Dict[str, Any]] = []
+    availability_lookup_evidence: List[Dict[str, Any]] = []
+    availability_evidence_started_at = datetime.utcnow()
     live_calendar_lookup_succeeded = False
     # Historic offered times are not evidence for a later customer message.
     thread.pending_slots = None
@@ -8019,6 +8149,15 @@ def run_sms_reply_logic(
                 reason = str(reschedule_result.get("reason") or "The new time could not be verified.")
                 if "overlaps" in reason:
                     live_calendar_lookup_succeeded = True
+                    availability_lookup_evidence.append({
+                        "account_key": thread.sms_account_key,
+                        "tool": "check_exact_time",
+                        "status": "ok",
+                        "requested_slot": requested_slot.isoformat(),
+                        "available": False,
+                        "slots": [],
+                        "completed_at": datetime.utcnow(),
+                    })
                     precomputed_reply = (
                         f"{customer_slot_label(requested_slot)} isn't available. "
                         "What other time would suit you?"
@@ -8079,6 +8218,17 @@ def run_sms_reply_logic(
                 live_calendar_lookup_succeeded = True
                 if isinstance(exact_slot, dict):
                     availability_tool_slots.extend(booking_slots_from_tool_result({"service_id": service_id, "slots": [exact_slot]}))
+                availability_lookup_evidence.append({
+                    "account_key": thread.sms_account_key,
+                    "tool": "check_exact_time",
+                    "status": "ok",
+                    "service_id": service_id,
+                    "requested_slot": requested_slot.isoformat(),
+                    "date": requested_slot.date().isoformat(),
+                    "available": bool(exact_slot),
+                    "slots": booking_slots_from_tool_result({"service_id": service_id, "slots": [exact_slot]}) if isinstance(exact_slot, dict) else [],
+                    "completed_at": datetime.utcnow(),
+                })
                 _add_structured_thread_event(db, thread, "availability_lookup_completed", audit, **lookup_fields,
                     result={"available": bool(exact_slot), "slot_count": 1 if exact_slot else 0,
                             "candidate_range": {"first_start": requested_slot.isoformat() if exact_slot else None,
@@ -8560,6 +8710,22 @@ def run_sms_reply_logic(
                         ):
                             live_calendar_lookup_succeeded = True
                         verified_slots = booking_slots_from_tool_result(tool_result)
+                        if records_availability and tool_result.get("status") == "ok":
+                            availability_lookup_evidence.append({
+                                "account_key": thread.sms_account_key,
+                                "tool": tool_call.name,
+                                "status": "ok",
+                                "service_id": str(args.get("service_id") or tool_result.get("service_id") or ""),
+                                "requested_slot": str(args.get("start_time") or tool_result.get("requested_slot") or ""),
+                                "after": str(args.get("after") or ""),
+                                "date": str(tool_result.get("date") or ""),
+                                "available": (
+                                    bool(tool_result.get("exact_slot"))
+                                    if tool_call.name == "check_exact_time" else None
+                                ),
+                                "slots": verified_slots,
+                                "completed_at": datetime.utcnow(),
+                            })
                         if verified_slots:
                             availability_tool_slots.extend(verified_slots)
                             slots_presented = True
@@ -8710,10 +8876,17 @@ def run_sms_reply_logic(
             assistant_reply,
             requested_booking_confirmed=requested_booking_confirmed or booking_confirmed,
             internal_instructions=outbound_instruction_reference,
-        ) or validate_calendar_only_reply(
-            assistant_reply,
-            live_lookup_succeeded=live_calendar_lookup_succeeded,
         )
+        live_evidence_error = None if availability_error else validate_live_availability_reply(
+            assistant_reply,
+            availability_lookup_evidence,
+            account_key=thread.sms_account_key,
+            request_text=effective_body,
+            now_local=now_local,
+            turn_started_at=availability_evidence_started_at,
+        )
+        if live_evidence_error and "fresh live calendar lookup" in live_evidence_error:
+            availability_error = live_evidence_error
         if not availability_error and not requested_booking_confirmed:
             availability_error = validate_availability_claim(
                 assistant_reply,
@@ -8722,6 +8895,8 @@ def run_sms_reply_logic(
                 now_local,
                 live_calendar_lookup_succeeded,
             )
+        if not availability_error:
+            availability_error = live_evidence_error
         if availability_error:
             print(f"[AI Availability Rejected] {availability_error} on thread {thread_id}.")
             assistant_reply = None
