@@ -23,6 +23,10 @@ from main import (
     "I'm at the front door",
     "Waiting outside",
     "I've pulled up out front",
+    "here",
+    "arrived - where do I go?",
+    "outside",
+    "at the door",
 ])
 def test_clear_arrival_phrases_are_detected(message):
     assert is_clear_customer_arrival(message) is True
@@ -35,6 +39,9 @@ def test_clear_arrival_phrases_are_detected(message):
     "I'll be there in five minutes",
     "When I arrive, where should I park?",
     "Have you arrived?",
+    "Have we arrived?",
+    "Is parking outside?",
+    "Do you offer that service here?",
     "Can you send the address?",
 ])
 def test_future_negative_and_question_phrases_do_not_trigger(message):

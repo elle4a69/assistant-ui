@@ -6406,6 +6406,13 @@ def confirm_conversational_booking(
     proposal["arrival_link"] = _arrival_public_link(arrival_token)
     proposal["arrival_session_id"] = arrival_session.id
 
+    if send_confirmation and suppress_arrival_customer_turn(db, thread):
+        # The booking write may already be complete, but arrival silence still
+        # wins over its confirmation/fallback and records why no SMS followed.
+        proposal["booking_confirmation_handled"] = True
+        proposal["booking_confirmation_sent"] = False
+        send_confirmation = False
+
     if send_confirmation:
         template_path = os.path.join(PROMPTS_DIR, "sms_confirmation_template.txt")
         template = (
@@ -7087,9 +7094,16 @@ ARRIVAL_NEGATIVE_PATTERNS = (
     r"\b(?:i|we)(?:'m| are| am)? (?:on (?:my|our|the) way|almost there)\b",
     r"\b(?:minutes?|mins?|hours?) away\b",
     r"\b(?:will|should|might|may) (?:be there|arrive)\b",
+    r"\b(?:have|has|did|are) (?:i|we|you|they|he|she) (?:arrived|here|there)\b",
 )
 ARRIVAL_POSITIVE_PATTERNS = (
+    # Customers commonly send these as terse status updates. Anchoring them at
+    # the start permits a follow-up question ("outside, which door?") without
+    # treating incidental uses such as "is parking outside available?" as an
+    # arrival.
+    r"(?:^|[.!?]\s+)(?:hi[,.!]?\s+)?(?:here|arrived|outside|at (?:the )?(?:front )?door|out front|in (?:the )?(?:lobby|reception|waiting room))(?:\b|$)",
     r"\b(?:i(?:'m| am)|we(?:'re| are)) here\b",
+    r"\b(?:i(?:'m| am)|we(?:'re| are)) (?:outside|out front|downstairs)\b",
     r"\b(?:i|we)(?:'ve| have)? (?:just )?arrived\b",
     r"\bjust (?:got|made it) here\b",
     r"\b(?:i(?:'m| am)|we(?:'re| are)) (?:at|outside) (?:the )?(?:front )?door\b",
@@ -7100,10 +7114,87 @@ ARRIVAL_POSITIVE_PATTERNS = (
 
 
 def is_clear_customer_arrival(message: str) -> bool:
-    normalized = " ".join((message or "").casefold().replace("’", "'").split())
+    raw = (message or "").casefold().replace("’", "'")
+    # Preserve fragment boundaries as sentence boundaries so a terse second
+    # fragment ("hello" then "outside") is still classified as one turn.
+    normalized = " ".join(re.sub(r"[\r\n]+", ". ", raw).split())
     if not normalized or any(re.search(pattern, normalized) for pattern in ARRIVAL_NEGATIVE_PATTERNS):
         return False
     return any(re.search(pattern, normalized) for pattern in ARRIVAL_POSITIVE_PATTERNS)
+
+
+ARRIVAL_SUPPRESSION_EVENT_TYPE = "arrival-message-suppressed"
+ARRIVAL_CLASSIFIER_VERSION = "deterministic-v1"
+
+
+def newest_customer_turn(db: Session, thread_id: str) -> tuple[Optional[Message], List[Message]]:
+    """Return only the newest combined inbound turn, never older arrival context."""
+    messages = (
+        db.query(Message)
+        .filter(Message.thread_id == thread_id)
+        .order_by(Message.at.asc(), Message.id.asc())
+        .all()
+    )
+    newest_index = next(
+        (index for index in range(len(messages) - 1, -1, -1) if messages[index].role == "customer"),
+        None,
+    )
+    if newest_index is None:
+        return None, []
+    fragments: List[Message] = []
+    for message in reversed(messages[:newest_index + 1]):
+        if message.role != "customer":
+            break
+        fragments.append(message)
+    fragments.reverse()
+    return messages[newest_index], fragments
+
+
+def suppress_arrival_customer_turn(db: Session, thread: Thread) -> bool:
+    """Persist and enforce the highest-precedence, turn-scoped silence decision.
+
+    This gate must run before every draft/fixed/AI choice and immediately before
+    every customer-facing dispatch. It deliberately classifies only consecutive
+    fragments in the newest inbound turn. The newest message ID is the durable
+    idempotency key, so late jobs and retries produce one auditable outcome.
+    """
+    newest, fragments = newest_customer_turn(db, thread.id)
+    if not newest or not fragments:
+        return False
+    combined_text = "\n".join(fragment.text.strip() for fragment in fragments if fragment.text.strip())
+    if not is_clear_customer_arrival(combined_text):
+        return False
+
+    existing = db.query(ThreadEvent).filter(
+        ThreadEvent.thread_id == thread.id,
+        ThreadEvent.type == ARRIVAL_SUPPRESSION_EVENT_TYPE,
+    ).all()
+    for event in existing:
+        try:
+            meta = json.loads(event.meta or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if meta.get("source_message_id") == newest.id:
+            return True
+
+    record_customer_arrival_event(db, thread, newest.id, "deterministic-suppression")
+    db.add(ThreadEvent(
+        id=str(uuid.uuid4()),
+        thread_id=thread.id,
+        type=ARRIVAL_SUPPRESSION_EVENT_TYPE,
+        agent_id=None,
+        meta=json.dumps({
+            "source_message_id": newest.id,
+            "fragment_message_ids": [fragment.id for fragment in fragments],
+            "sms_account_key": thread.sms_account_key,
+            "classifier": ARRIVAL_CLASSIFIER_VERSION,
+            "outcome": "all-customer-facing-replies-suppressed",
+        }, separators=(",", ":"), sort_keys=True),
+        at=datetime.utcnow(),
+    ))
+    thread.pending_slots = None
+    db.flush()
+    return True
 
 
 def record_customer_arrival_event(
@@ -7825,6 +7916,11 @@ def run_sms_reply_logic(
     try:
         provider_context = resolve_provider_context(thread.sms_account_key)
     except ValueError:
+        return False, False
+    # Arrival silence outranks account eligibility, booking mutation, fixed Q&A,
+    # prompt assembly and model generation. Queued/retry callers enter here too.
+    if suppress_arrival_customer_turn(db, thread):
+        db.commit()
         return False, False
     if not account_allows_conversational_ai(thread.sms_account_key):
         print(f"[Conversational AI Skipped] Disabled for {thread.sms_account_key}.")
@@ -8735,6 +8831,10 @@ def run_sms_reply_logic(
     db.expire_all()
     if not is_latest_customer_turn(db, thread_id, provider_message_id, received_at_naive, body):
         db.rollback()
+        thread = db.query(Thread).filter(Thread.id == thread_id).first()
+        if thread and suppress_arrival_customer_turn(db, thread):
+            db.commit()
+            return False, False
         db.add(ThreadEvent(
             id=str(uuid.uuid4()),
             thread_id=thread_id,
@@ -8927,6 +9027,10 @@ def run_sms_reply_logic(
         # The model call can take several seconds. Re-check immediately before
         # dispatch so a human answer sent while the model was working wins.
         db.expire_all()
+        thread = db.query(Thread).filter(Thread.id == thread_id).first()
+        if thread and suppress_arrival_customer_turn(db, thread):
+            db.commit()
+            return False, False
         if human_replied_after(db, thread_id, received_at_naive):
             thread = db.query(Thread).filter(Thread.id == thread_id).first()
             if thread:
@@ -9123,6 +9227,11 @@ def send_first_contact_auto_reply(
     config: Dict[str, Any],
     dispatch_sms: bool,
 ) -> None:
+    db.expire_all()
+    thread = db.query(Thread).filter(Thread.id == thread.id).first()
+    if not thread or suppress_arrival_customer_turn(db, thread):
+        db.commit()
+        return
     reply_text = sanitize_outgoing_urls(config["message"])
     reply_at = datetime.utcnow()
     outbound = Message(
@@ -10129,7 +10238,7 @@ def automatic_customer_turn_already_handled(
         ThreadEvent.thread_id == customer_message.thread_id,
         ThreadEvent.type.in_([
             "ai-reply-failed", "information-request", "draft-created", "auto-reply-sent",
-            "booking_decision",
+            "booking_decision", ARRIVAL_SUPPRESSION_EVENT_TYPE,
         ]),
     ).all()
     for event_item in terminal_events:
@@ -10495,9 +10604,6 @@ def process_inbound_sms(
                 "duplicate": True,
             }
     
-    first_contact_config = load_first_contact_autoresponder(sms_account_key)
-    first_contact_eligible = False
-
     # Locate or create thread by customer phone
     thread = find_thread_by_phone(db, from_phone, sms_account_key)
     if thread and thread.state == "taken-over":
@@ -10505,22 +10611,6 @@ def process_inbound_sms(
             # Approval, discard, and bulk draft cleanup historically reused
             # taken-over even though no operator chose to suppress AI.
             thread.state = "auto-reply"
-    if (
-        thread
-        and not is_contact_blocked(db, sms_account_key, from_phone)
-        and first_contact_config["enabled"]
-        and first_contact_config["message"]
-        and thread.auto_reply_enabled
-        and thread.state != "taken-over"
-    ):
-        cutoff = received_at_naive - timedelta(days=first_contact_config["cooldownDays"])
-        recent_customer_message = db.query(Message).filter(
-            Message.thread_id == thread.id,
-            Message.role == "customer",
-            Message.at >= cutoff,
-        ).first()
-        first_contact_eligible = recent_customer_message is None
-    
     if not thread:
         # Create a new thread
         thread = Thread(
@@ -10536,14 +10626,6 @@ def process_inbound_sms(
         )
         db.add(thread)
         db.flush() # Populate thread.id
-        first_contact_eligible = (
-            not is_contact_blocked(db, sms_account_key, from_phone)
-            and
-            first_contact_config["enabled"]
-            and bool(first_contact_config["message"])
-            and thread.auto_reply_enabled
-            and thread.state != "taken-over"
-        )
     
     # Append inbound customer message
     customer_message = Message(
@@ -10555,14 +10637,36 @@ def process_inbound_sms(
         at=received_at_naive
     )
     db.add(customer_message)
+    db.flush()
 
-    if is_clear_customer_arrival(payload.body):
-        record_customer_arrival_event(
-            db,
-            thread,
-            customer_message.id,
-            "clear-phrase",
-        )
+    # Deterministic silence is decided on the persisted, account-bound combined
+    # turn before fixed-response selection, generation, drafting or queueing.
+    if suppress_arrival_customer_turn(db, thread):
+        thread.unread_count += 1
+        thread.updated_at = datetime.utcnow()
+        db.commit()
+        return {
+            "status": "success",
+            "thread_id": thread.id,
+            "arrival_suppressed": True,
+        }
+
+    first_contact_config = load_first_contact_autoresponder(sms_account_key)
+    cutoff = received_at_naive - timedelta(days=first_contact_config["cooldownDays"])
+    prior_recent_customer = db.query(Message.id).filter(
+        Message.thread_id == thread.id,
+        Message.role == "customer",
+        Message.id != customer_message.id,
+        Message.at >= cutoff,
+    ).first()
+    first_contact_eligible = (
+        not is_contact_blocked(db, sms_account_key, from_phone)
+        and first_contact_config["enabled"]
+        and bool(first_contact_config["message"])
+        and thread.auto_reply_enabled
+        and thread.state != "taken-over"
+        and prior_recent_customer is None
+    )
     
     # Increment unread_count
     thread.unread_count += 1
@@ -11171,6 +11275,9 @@ def reply_thread(thread_id: str, payload: ReplyInput, db: Session = Depends(get_
         thread = db.query(Thread).filter(Thread.id == thread_id).first()
         if not thread:
             raise HTTPException(status_code=404, detail="Thread not found")
+        if suppress_arrival_customer_turn(db, thread):
+            db.commit()
+            raise HTTPException(status_code=409, detail="Reply suppressed because the newest customer turn is an arrival.")
 
         request_marker = f"manual-reply:{payload.clientRequestId}" if payload.clientRequestId else None
         if request_marker:
@@ -11255,6 +11362,9 @@ def respond_to_information_request(
     thread = db.query(Thread).filter(Thread.id == thread_id).first()
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found.")
+    if suppress_arrival_customer_turn(db, thread):
+        db.commit()
+        raise HTTPException(status_code=409, detail="Reply suppressed because the newest customer turn is an arrival.")
     if thread.state != "needs-review":
         raise HTTPException(status_code=409, detail="This conversation no longer needs information.")
 
@@ -16335,6 +16445,9 @@ def approve_draft_message(message_id: str, db: Session = Depends(get_db)):
         thread = db.query(Thread).filter(Thread.id == msg.thread_id).first()
         if not thread:
             raise HTTPException(status_code=404, detail="Thread not found.")
+        if suppress_arrival_customer_turn(db, thread):
+            db.commit()
+            raise HTTPException(status_code=409, detail="Draft send suppressed because the newest customer turn is an arrival.")
 
         edited_events = db.query(ThreadEvent).filter(
             ThreadEvent.thread_id == thread.id,
@@ -17166,6 +17279,10 @@ def process_due_booking_reminders() -> None:
                 }
                 sms_text = render_template_variables(config["template"], variables)
                 reminder_key = f"booking-reminder:{booking.id}"
+                thread = find_thread_by_phone(db, booking.customer_phone, account_key)
+                if thread and suppress_arrival_customer_turn(db, thread):
+                    db.commit()
+                    continue
                 result = mobilemessage_service.send_sms(
                     booking.customer_phone,
                     sms_text,
@@ -17176,7 +17293,6 @@ def process_due_booking_reminders() -> None:
                 if failure:
                     logger.warning("Booking reminder delivery failed for booking %s", booking.id)
                     continue
-                thread = find_thread_by_phone(db, booking.customer_phone, account_key)
                 if thread:
                     db.add(Message(
                         id=str(uuid.uuid4()),
@@ -17323,7 +17439,17 @@ def create_manual_booking(payload: ManualBookingInput, db: Session = Depends(get
             db.flush()
         else:
             thread.state = "resolved"
-            
+
+        if suppress_arrival_customer_turn(db, thread):
+            db.commit()
+            return {
+                "status": "success",
+                "smsSent": "",
+                "smsError": None,
+                "smsSuppressed": True,
+                "arrivalLink": arrival_link,
+            }
+
         confirmation_msg = Message(
             id=str(uuid.uuid4()),
             thread_id=thread.id,
