@@ -114,3 +114,13 @@ test('curator client uses the protected settings API and explicit state transiti
   assert.match(apiSource, /interval_seconds/);
   assert.match(apiSource, /'manual' \| 'automatic'/);
 });
+
+test('learning backlog supports required context, audited discard, and linked context display', () => {
+  assert.match(settingsSource, /Relevant conversation context \(required\)/);
+  assert.match(settingsSource, /Choose a recent conversation/);
+  assert.match(settingsSource, /Linked context:/);
+  assert.match(settingsSource, /Attach context/);
+  assert.match(settingsSource, /Discard this review item\?/);
+  assert.match(apiSource, /\/learnings\/\$\{encodeURIComponent\(id\)\}\/context/);
+  assert.match(apiSource, /\/learnings\/\$\{encodeURIComponent\(id\)\}\/discard/);
+});

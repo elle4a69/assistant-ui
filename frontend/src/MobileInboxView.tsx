@@ -376,6 +376,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
 
   const reviewDraft = async (messageId: string, action: 'approve' | 'discard') => {
     if (reviewingDraftRef.current) return
+    if (action === 'discard' && !window.confirm('Discard this draft? It will be removed from review and the action will be recorded.')) return
     reviewingDraftRef.current = messageId
     setReviewingDraftId(messageId)
     setError('')

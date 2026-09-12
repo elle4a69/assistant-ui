@@ -20,6 +20,8 @@ import {
   redraftPendingLearnedInformation,
   moveAllLearnedInformationToReview,
   deleteLearnedInformation,
+  discardLearnedInformation,
+  attachLearnedInformationContext,
   uploadKnowledgeFile,
   uploadCredentialsFile,
   KnowledgeFile,
@@ -67,6 +69,10 @@ import {
   listBlockedContacts,
   unblockContact,
   BlockedContact,
+  listThreads,
+  getThread,
+  ThreadListItem,
+  Message,
 } from './api';
 import {
   Key,
@@ -180,6 +186,8 @@ export default function SettingsView() {
   const [learningTopic, setLearningTopic] = useState('');
   const [learningGuidance, setLearningGuidance] = useState('');
   const [learningScope, setLearningScope] = useState<'shared' | 'primary' | 'secondary'>('shared');
+  const [learningContextThreadId, setLearningContextThreadId] = useState('');
+  const [learningContextMessageId, setLearningContextMessageId] = useState('');
   const [savingLearning, setSavingLearning] = useState(false);
   const [redraftingPendingLearnings, setRedraftingPendingLearnings] = useState(false);
   const [lastSavedLearning, setLastSavedLearning] = useState<ManualLearningEntry | null>(null);
@@ -189,6 +197,11 @@ export default function SettingsView() {
   const [editingCuratorContext, setEditingCuratorContext] = useState<{ proposalId: string; recordId: string } | null>(null);
   const [savingLearnedId, setSavingLearnedId] = useState<string | null>(null);
   const [selectedLearnedIds, setSelectedLearnedIds] = useState<Set<string>>(new Set());
+  const [attachingContextId, setAttachingContextId] = useState<string | null>(null);
+  const [contextThreadId, setContextThreadId] = useState('');
+  const [contextMessageId, setContextMessageId] = useState('');
+  const [contextThreads, setContextThreads] = useState<ThreadListItem[]>([]);
+  const [contextTurns, setContextTurns] = useState<Record<string, Message[]>>({});
   const [approvingPendingLearnings, setApprovingPendingLearnings] = useState(false);
   const [generatingSmsLearningPreview, setGeneratingSmsLearningPreview] = useState(false);
   const [importingSmsLearningCandidates, setImportingSmsLearningCandidates] = useState(false);
@@ -700,6 +713,58 @@ export default function SettingsView() {
     }
   };
 
+  const loadContextChoices = async (threadId?: string) => {
+    try {
+      if (!contextThreads.length) setContextThreads((await listThreads()).slice(0, 50));
+      if (threadId && !contextTurns[threadId]) {
+        const thread = await getThread(threadId);
+        setContextTurns(current => ({
+          ...current,
+          [threadId]: thread.messages.filter(message => message.role !== 'draft'),
+        }));
+      }
+    } catch (err) {
+      console.error(err);
+      triggerBanner('error', 'Recent conversations could not be loaded for context selection.');
+    }
+  };
+
+  const handleDiscardLearnedEntry = async (id: string) => {
+    if (!window.confirm('Discard this review item? It will leave the pending backlog and this action will be recorded.')) return;
+    try {
+      await discardLearnedInformation(id);
+      setLearnedEntries(current => current.filter(item => item.id !== id));
+      setSelectedLearnedIds(current => { const next = new Set(current); next.delete(id); return next; });
+      triggerBanner('success', 'Review item discarded and recorded in the audit log.');
+    } catch (err) {
+      console.error(err); triggerBanner('error', err instanceof Error ? err.message : 'Failed to discard review item.');
+    }
+  };
+
+  const beginAttachLearnedContext = (entry: LearnedInformationEntry) => {
+    setAttachingContextId(entry.id);
+    setContextThreadId(entry.context_reference?.thread_id || '');
+    setContextMessageId(entry.context_reference?.thread_id ? entry.context_reference.id : '');
+    loadContextChoices(entry.context_reference?.thread_id);
+  };
+
+  const handleAttachLearnedContext = async (id: string) => {
+    if (!contextThreadId.trim() || !contextMessageId.trim()) {
+      triggerBanner('error', 'Choose both a conversation and a conversation turn.');
+      return;
+    }
+    try {
+      const saved = await attachLearnedInformationContext(id, {
+        thread_id: contextThreadId.trim(), message_id: contextMessageId.trim(),
+      });
+      setLearnedEntries(current => current.map(item => item.id === id ? saved : item));
+      setAttachingContextId(null);
+      triggerBanner('success', 'Conversation context attached and recorded in the audit log.');
+    } catch (err) {
+      console.error(err); triggerBanner('error', err instanceof Error ? err.message : 'Failed to attach conversation context.');
+    }
+  };
+
   const handleApproveLearnedEntry = async (id: string) => {
     try {
       const saved = await approveLearnedInformation(id);
@@ -890,13 +955,21 @@ export default function SettingsView() {
     const topic = learningTopic.trim();
     const guidance = learningGuidance.trim();
     if (!topic || !guidance) return;
+    if (!learningContextThreadId.trim() || !learningContextMessageId.trim()) {
+      triggerBanner('error', 'Attach a relevant conversation turn before adding this item to review.');
+      return;
+    }
 
     setSavingLearning(true);
     try {
-      const result = await createManualLearning(topic, guidance, learningScope);
+      const result = await createManualLearning(topic, guidance, learningScope, {
+        thread_id: learningContextThreadId.trim(), message_id: learningContextMessageId.trim(),
+      });
       setLastSavedLearning(result.entry);
       setLearningTopic('');
       setLearningGuidance('');
+      setLearningContextThreadId('');
+      setLearningContextMessageId('');
       triggerBanner('success', `Learning saved to ${result.filename} for review. It is not available to the AI until approved.`);
       await fetchKnowledgeFilesList();
       setLearnedEntries(await listLearnedInformation());
@@ -1984,13 +2057,19 @@ export default function SettingsView() {
                       />
                       <p className="text-[9px] text-slate-500">Procedures and policies are saved as instructions. Exact wording is saved as an example only when you supply it.</p>
                     </div>
+                    <fieldset className="grid grid-cols-1 gap-2 rounded-lg border border-indigo-200 bg-indigo-50/60 p-3 sm:grid-cols-2">
+                      <legend className="px-1 text-[10px] font-bold uppercase tracking-wider text-indigo-800">Relevant conversation context (required)</legend>
+                      <label className="text-[10px] font-bold text-slate-700">Conversation<select value={learningContextThreadId} onFocus={() => loadContextChoices()} onChange={event => { const id = event.target.value; setLearningContextThreadId(id); setLearningContextMessageId(''); if (id) loadContextChoices(id); }} className="mt-1 w-full rounded border border-slate-300 bg-white p-2 text-xs font-normal"><option value="">Choose a recent conversation…</option>{contextThreads.map(thread => <option key={thread.id} value={thread.id}>{thread.customerPhone} — {thread.lastMessageText.slice(0, 70)}</option>)}</select></label>
+                      <label className="text-[10px] font-bold text-slate-700">Conversation turn<select value={learningContextMessageId} disabled={!learningContextThreadId} onChange={event => setLearningContextMessageId(event.target.value)} className="mt-1 w-full rounded border border-slate-300 bg-white p-2 text-xs font-normal disabled:opacity-50"><option value="">Choose the relevant turn…</option>{(contextTurns[learningContextThreadId] || []).map(message => <option key={message.id} value={message.id}>{message.role}: {message.text.slice(0, 90)}</option>)}</select></label>
+                      <p className="text-[9px] text-indigo-700 sm:col-span-2">Choose the turn that gives this draft its meaning. Nothing can enter review without this link.</p>
+                    </fieldset>
                   </div>
 
                   <div className="flex items-center justify-between gap-3 border-t border-indigo-100 pt-3">
                     <span className="text-[9px] font-semibold text-indigo-700">Nothing is saved if the AI cannot structure it safely.</span>
                     <button
                       type="submit"
-                      disabled={savingLearning || !learningTopic.trim() || !learningGuidance.trim()}
+                      disabled={savingLearning || !learningTopic.trim() || !learningGuidance.trim() || !learningContextThreadId.trim() || !learningContextMessageId.trim()}
                       className="inline-flex items-center gap-1.5 rounded-lg border border-transparent bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-45 cursor-pointer shrink-0"
                     >
                       {savingLearning ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
@@ -2059,8 +2138,8 @@ export default function SettingsView() {
                           <label className="mt-0.5 flex shrink-0 items-center" title={`Select ${entry.topic || entry.type}`}>
                             <input type="checkbox" checked={selectedLearnedIds.has(entry.id)} onChange={() => toggleLearnedSelection(entry.id)} className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
                           </label>
-                          <div className="min-w-0"><p className="text-xs font-bold text-slate-800">{entry.topic || entry.type}</p><p className="mt-1 whitespace-pre-wrap text-[11px] text-slate-600">{entry.text}</p><p className="mt-1 flex flex-wrap gap-1.5 text-[10px] font-semibold"><span className="text-indigo-700">{entry.scope === 'primary' ? 'Line 1' : entry.scope === 'secondary' ? 'Line 2' : entry.scope === 'shared' ? 'Shared' : 'Internal'}</span><span className={entry.review_status === 'approved' ? 'text-emerald-700' : 'text-amber-700'}>{entry.review_status === 'approved' ? (entry.retrieval_enabled ? 'Approved and active' : 'Approved, not injected') : 'Needs review'}</span>{entry.review_source && <span className="text-slate-500">{entry.review_source === 'knowledge-curator' ? 'Knowledge Curator' : entry.review_source === 'ai-redrafted' ? 'AI redrafted' : entry.review_source === 'ai-drafted' ? 'AI drafted' : entry.review_source === 'sms-pair-template' ? 'SMS example' : 'Staff-edited reply'}</span>}</p>{entry.review_note && <p className="mt-1 text-[10px] text-amber-700">{entry.review_note}</p>}</div>
-                          <div className="flex shrink-0 gap-1"><button onClick={() => beginLearnedEdit(entry)} className="rounded p-1.5 text-indigo-600 hover:bg-indigo-50" title="Edit learned rule"><Edit className="h-3.5 w-3.5" /></button>{entry.review_status !== 'approved' && <><button onClick={() => handleRedraftLearnedEntry(entry.id)} className="rounded border border-indigo-200 px-2 py-1 text-[10px] font-bold text-indigo-700 hover:bg-indigo-50" title="Ask AI to improve this draft">Redraft</button><button onClick={() => handleApproveLearnedEntry(entry.id)} className="rounded border border-emerald-200 px-2 py-1 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50" title="Approve learned rule">Approve</button></>}<button onClick={() => handleDeleteLearnedEntry(entry.id)} className="rounded p-1.5 text-rose-600 hover:bg-rose-50" title="Delete learned rule"><Trash2 className="h-3.5 w-3.5" /></button></div>
+                          <div className="min-w-0 flex-1"><p className="text-xs font-bold text-slate-800">{entry.topic || entry.type}</p><p className="mt-1 whitespace-pre-wrap text-[11px] text-slate-600">{entry.text}</p><p className="mt-1 flex flex-wrap gap-1.5 text-[10px] font-semibold"><span className="text-indigo-700">{entry.scope === 'primary' ? 'Line 1' : entry.scope === 'secondary' ? 'Line 2' : entry.scope === 'shared' ? 'Shared' : 'Internal'}</span><span className={entry.review_status === 'approved' ? 'text-emerald-700' : 'text-amber-700'}>{entry.review_status === 'approved' ? (entry.retrieval_enabled ? 'Approved and active' : 'Approved, not injected') : 'Needs review'}</span>{entry.review_source && <span className="text-slate-500">{entry.review_source === 'knowledge-curator' ? 'Knowledge Curator' : entry.review_source === 'ai-redrafted' ? 'AI redrafted' : entry.review_source === 'ai-drafted' ? 'AI drafted' : entry.review_source === 'sms-pair-template' ? 'SMS example' : 'Staff-edited reply'}</span>}</p>{entry.context_reference ? <p className="mt-1 text-[10px] text-emerald-700"><strong>Linked context:</strong> {entry.context_reference.thread_id ? `conversation ${entry.context_reference.thread_id}, ` : ''}turn {entry.context_reference.id}</p> : <p className="mt-1 text-[10px] font-bold text-amber-700">Missing conversation context — attach it before re-saving or approving.</p>}{entry.review_note && <p className="mt-1 text-[10px] text-amber-700">{entry.review_note}</p>}{attachingContextId === entry.id && <div className="mt-2 grid gap-2 rounded border border-indigo-200 bg-indigo-50 p-2 sm:grid-cols-2"><select aria-label="Conversation" value={contextThreadId} onFocus={() => loadContextChoices()} onChange={event => { const id = event.target.value; setContextThreadId(id); setContextMessageId(''); if (id) loadContextChoices(id); }} className="rounded border border-slate-300 p-2 text-xs"><option value="">Choose a recent conversation…</option>{contextThreads.map(thread => <option key={thread.id} value={thread.id}>{thread.customerPhone} — {thread.lastMessageText.slice(0, 70)}</option>)}</select><select aria-label="Conversation turn" value={contextMessageId} disabled={!contextThreadId} onChange={event => setContextMessageId(event.target.value)} className="rounded border border-slate-300 p-2 text-xs disabled:opacity-50"><option value="">Choose the relevant turn…</option>{(contextTurns[contextThreadId] || []).map(message => <option key={message.id} value={message.id}>{message.role}: {message.text.slice(0, 90)}</option>)}</select><div className="flex gap-2 sm:col-span-2"><button type="button" onClick={() => handleAttachLearnedContext(entry.id)} className="rounded bg-indigo-700 px-2 py-1.5 text-[10px] font-bold text-white">Attach context</button><button type="button" onClick={() => setAttachingContextId(null)} className="rounded border border-slate-300 bg-white px-2 py-1.5 text-[10px]">Cancel</button></div></div>}</div>
+                          <div className="flex shrink-0 flex-wrap justify-end gap-1"><button onClick={() => beginLearnedEdit(entry)} className="rounded p-1.5 text-indigo-600 hover:bg-indigo-50" title="Edit learned rule"><Edit className="h-3.5 w-3.5" /></button>{entry.review_status !== 'approved' ? <><button onClick={() => beginAttachLearnedContext(entry)} className="rounded border border-slate-300 px-2 py-1 text-[10px] font-bold text-slate-700 hover:bg-slate-50">Attach context</button><button onClick={() => handleRedraftLearnedEntry(entry.id)} className="rounded border border-indigo-200 px-2 py-1 text-[10px] font-bold text-indigo-700 hover:bg-indigo-50" title="Ask AI to improve this draft">Redraft</button><button onClick={() => handleApproveLearnedEntry(entry.id)} disabled={!entry.context_reference} className="rounded border border-emerald-200 px-2 py-1 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50 disabled:opacity-40" title="Approve learned rule">Approve</button><button onClick={() => handleDiscardLearnedEntry(entry.id)} className="rounded border border-rose-200 px-2 py-1 text-[10px] font-bold text-rose-700 hover:bg-rose-50">Discard</button></> : <button onClick={() => handleDeleteLearnedEntry(entry.id)} className="rounded p-1.5 text-rose-600 hover:bg-rose-50" title="Delete learned rule"><Trash2 className="h-3.5 w-3.5" /></button>}</div>
                         </div>}
                       </div>
                     ))}

@@ -1721,7 +1721,9 @@ init_db()
 # Kept near the loader because the loader needs to recognise learned records
 # during module startup, before the learning helpers are defined below.
 LEARNED_INFORMATION_FILENAME = "learned_information.jsonl"
-LEARNING_REVIEW_STATUSES = {"pending", "approved"}
+LEARNING_REVIEW_STATUSES = {"pending", "approved", "expired"}
+REVIEW_RETENTION_DAYS = 7
+LEARNING_REVIEW_AUDIT_FILENAME = "learning_review_audit.jsonl"
 KNOWLEDGE_RECORD_STATUSES = {"active", "superseded", "expired", "quarantined"}
 KNOWLEDGE_REASON_CODES = {
     "knowledge_excluded_unapproved",
@@ -2645,6 +2647,58 @@ def build_authority_context(query: str, account_key: str, *, booking_or_availabi
 
 
 LEARNED_INFORMATION_LOCK = threading.Lock()
+LEARNING_REVIEW_AUDIT_LOCK = threading.Lock()
+
+
+def _context_reference(
+    context_type: str,
+    context_id: str,
+    *,
+    thread_id: Optional[str] = None,
+) -> Dict[str, str]:
+    reference = {"type": str(context_type).strip(), "id": str(context_id).strip()}
+    if thread_id:
+        reference["thread_id"] = str(thread_id).strip()
+    return reference
+
+
+def _valid_context_reference(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and bool(str(value.get("type") or "").strip())
+        and bool(str(value.get("id") or "").strip())
+    )
+
+
+def _require_review_context(entry: Dict[str, Any]) -> None:
+    if entry.get("review_status") == "pending" and not _valid_context_reference(entry.get("context_reference")):
+        raise ValueError(
+            "A conversation turn or other relevant context reference is required before this item can be saved for review."
+        )
+
+
+def _append_learning_review_audit(
+    action: str,
+    entry_id: str,
+    *,
+    context_reference: Optional[Dict[str, str]] = None,
+    actor: str = "authenticated-owner",
+    at: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    event = {
+        "id": str(uuid.uuid4()),
+        "action": action,
+        "entry_id": entry_id,
+        "actor": actor,
+        "at": (at or datetime.utcnow()).isoformat() + "Z",
+    }
+    if context_reference:
+        event["context_reference"] = context_reference
+    os.makedirs(DATA_DIR, exist_ok=True)
+    path = os.path.join(DATA_DIR, LEARNING_REVIEW_AUDIT_FILENAME)
+    with LEARNING_REVIEW_AUDIT_LOCK, open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+    return event
 
 
 def _parse_json_object(text: str) -> Dict[str, Any]:
@@ -2726,6 +2780,7 @@ def save_learned_information(
     supplied_information: str,
     knowledge_summary: str,
     account_key: str,
+    context_reference: Dict[str, str],
 ) -> str:
     """Atomically upsert one reusable learned-information record and refresh RAG."""
     entry = {
@@ -2744,6 +2799,7 @@ def save_learned_information(
         "revision": 1,
         "review_status": "pending",
         "retrieval_enabled": False,
+        "context_reference": context_reference,
     }
     entry.update(classify_knowledge_entries([entry]).get(entry["id"], _quarantined_knowledge_classification()))
     entry["review_status"] = "pending"
@@ -2764,6 +2820,7 @@ def _upsert_learned_information_entry(entry: Dict[str, Any]) -> bool:
         if prepared is None:
             return False
         entry = prepared
+    _require_review_context(entry)
     entry_id = str(entry.get("id", "")).strip()
     if not entry_id:
         raise ValueError("A learned-information entry requires an id.")
@@ -2829,6 +2886,7 @@ def replace_learned_information_entry(entry_id: str, updates: Dict[str, Any]) ->
                 "topic", "text", "scope", "applies_when", "instruction",
                 "example_reply", "owner_topic", "owner_guidance",
             })
+            had_pending_review = item.get("review_status") == "pending"
             item.update(updates)
             if semantic_edit:
                 try:
@@ -2839,6 +2897,13 @@ def replace_learned_information_entry(entry_id: str, updates: Dict[str, Any]) ->
                 item["status"] = "quarantined"
                 item["review_status"] = "pending"
                 item["retrieval_enabled"] = False
+            if (
+                item.get("review_status") == "pending"
+                and not had_pending_review
+                and not _valid_context_reference(item.get("context_reference"))
+            ):
+                item["context_reference"] = _context_reference("knowledge_record", entry_id)
+            _require_review_context(item)
             item["updated_at"] = datetime.utcnow().isoformat() + "Z"
             updated_entry = item
             retained.append(json.dumps(item, ensure_ascii=False))
@@ -3049,6 +3114,11 @@ def approve_learned_information_entry(entry_id: str) -> Dict[str, Any]:
     entry = entries.get(entry_id)
     if not entry:
         raise KeyError(entry_id)
+    if entry.get("review_status") != "pending":
+        if entry.get("review_status") == "approved":
+            return entry
+        raise ValueError("Only items awaiting review can be approved.")
+    _require_review_context(entry)
     if entry.get("source_type") == "curator_proposal" and entry.get("proposed_supersedes_id"):
         return _approve_curator_supersession_entry(entry)
     classification = classify_knowledge_entries([entry]).get(entry_id, _quarantined_knowledge_classification())
@@ -3075,7 +3145,7 @@ def approve_pending_learned_information() -> Dict[str, int]:
     active = 0
     restricted = 0
     for entry in list_learned_information():
-        if entry.get("review_status") == "approved":
+        if entry.get("review_status") != "pending":
             continue
         approved = approve_learned_information_entry(entry["id"])
         processed += 1
@@ -3095,7 +3165,7 @@ def approve_selected_learned_information(entry_ids: List[str]) -> Dict[str, int]
     active = 0
     restricted = 0
     for entry_id in entry_ids:
-        if entries[entry_id].get("review_status") == "approved":
+        if entries[entry_id].get("review_status") != "pending":
             continue
         approved = approve_learned_information_entry(entry_id)
         processed += 1
@@ -3129,6 +3199,88 @@ def delete_learned_information_entry(entry_id: str) -> None:
             handle.write("\n".join(retained) + "\n")
         os.replace(temporary, filepath)
     load_knowledge_base()
+
+
+def discard_pending_learned_information_entry(entry_id: str) -> None:
+    entry = next((item for item in list_learned_information() if item.get("id") == entry_id), None)
+    if not entry:
+        raise KeyError(entry_id)
+    if entry.get("review_status") != "pending":
+        raise ValueError("Only items awaiting review can be discarded.")
+    context_reference = entry.get("context_reference") if _valid_context_reference(entry.get("context_reference")) else None
+    delete_learned_information_entry(entry_id)
+    _append_learning_review_audit("discarded", entry_id, context_reference=context_reference)
+
+
+def attach_learned_information_context(
+    entry_id: str,
+    thread_id: str,
+    message_id: str,
+    db: Session,
+) -> Dict[str, Any]:
+    entry = next((item for item in list_learned_information() if item.get("id") == entry_id), None)
+    if not entry:
+        raise KeyError(entry_id)
+    if entry.get("review_status") != "pending":
+        raise ValueError("Context can only be attached to an item awaiting review.")
+    message = db.query(Message).filter(
+        Message.id == message_id,
+        Message.thread_id == thread_id,
+        Message.role.in_(["customer", "agent", "system"]),
+    ).first()
+    if not message:
+        raise ValueError("Select an existing conversation turn from that conversation.")
+    context_reference = _context_reference("conversation_turn", message.id, thread_id=thread_id)
+    updated = replace_learned_information_entry(entry_id, {"context_reference": context_reference})
+    _append_learning_review_audit("context_attached", entry_id, context_reference=context_reference)
+    return updated
+
+
+def _review_timestamp(entry: Dict[str, Any]) -> Optional[datetime]:
+    value = entry.get("updated_at") or entry.get("created_at")
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return None
+
+
+def expire_stale_review_items(db: Session, now: Optional[datetime] = None) -> Dict[str, int]:
+    """Expire, but never activate, review items untouched for seven days."""
+    current = now or datetime.utcnow()
+    cutoff = current - timedelta(days=REVIEW_RETENTION_DAYS)
+    expired_learnings = 0
+    for entry in list_learned_information():
+        reviewed_at = _review_timestamp(entry)
+        if entry.get("review_status") != "pending" or not reviewed_at or reviewed_at > cutoff:
+            continue
+        replace_learned_information_entry(entry["id"], {
+            "review_status": "expired",
+            "status": "expired",
+            "retrieval_enabled": False,
+            "expired_at": current.isoformat() + "Z",
+        })
+        _append_learning_review_audit("expired", entry["id"], at=current)
+        expired_learnings += 1
+
+    stale_drafts = db.query(Message).filter(Message.role == "draft", Message.at <= cutoff).all()
+    affected_thread_ids = {item.thread_id for item in stale_drafts}
+    for draft in stale_drafts:
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()), thread_id=draft.thread_id, type="draft-expired",
+            agent_id="retention", meta=json.dumps({"message_id": draft.id}), at=current,
+        ))
+        db.delete(draft)
+    if affected_thread_ids:
+        for thread in db.query(Thread).filter(Thread.id.in_(affected_thread_ids)).all():
+            remaining = db.query(Message).filter(
+                Message.thread_id == thread.id, Message.role == "draft", Message.at > cutoff,
+            ).count()
+            if not remaining and thread.state == "needs-review":
+                thread.state = "auto-reply"
+    db.commit()
+    return {"expiredDrafts": len(stale_drafts), "expiredLearnings": expired_learnings}
 
 
 KNOWLEDGE_CLASSIFICATION_VERSION = 1
@@ -3331,6 +3483,7 @@ def save_manual_learning(
     owner_guidance: str,
     structured: Dict[str, str],
     scope: str = "shared",
+    context_reference: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     now = datetime.utcnow().isoformat() + "Z"
     text_parts = [
@@ -3361,6 +3514,7 @@ def save_manual_learning(
         "review_status": "pending",
         "retrieval_enabled": False,
         "review_source": "ai-drafted",
+        "context_reference": context_reference,
     }
     entry.update(classify_knowledge_entries([entry]).get(entry["id"], _quarantined_knowledge_classification()))
     entry["review_status"] = "pending"
@@ -4654,6 +4808,7 @@ def resolve_knowledge_curator_proposal(proposal_id: str, resolution: str, select
             "review_source": "knowledge-curator",
             "curator_proposal_id": proposal_id,
             "curator_fingerprint": proposal.get("fingerprint"),
+            "context_reference": _context_reference("knowledge_curator_proposal", proposal_id),
         }
         _upsert_learned_information_entry(entry)
         proposal["status"] = "accepted"
@@ -4865,6 +5020,7 @@ def save_sms_pair_learning_candidates(candidates: List[Dict[str, str]]) -> Dict[
             "example_reply": fields["example_reply"],
             "text": "\n".join(text_parts),
             "source_pair_message_id": source_id,
+            "context_reference": _context_reference("conversation_turn", source_id),
             "source_account_key": account_key,
             "scope": account_key,
             "created_at": now,
@@ -4923,6 +5079,7 @@ def save_edited_draft_learning(db: Session, thread: Thread, draft: Message) -> O
         "review_status": "pending",
         "retrieval_enabled": False,
         "review_source": "staff-edited-reply",
+        "context_reference": _context_reference("conversation_turn", customer_message.id, thread_id=thread.id),
     }
     entry.update(
         classify_knowledge_entries([entry]).get(
@@ -5640,10 +5797,22 @@ class FirstContactAutoresponderAccountsInput(BaseModel):
         return self
 
 
+class ReviewContextInput(BaseModel):
+    thread_id: str = Field(min_length=1, max_length=200)
+    message_id: str = Field(min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def clean_reference(self):
+        self.thread_id = self.thread_id.strip()
+        self.message_id = self.message_id.strip()
+        return self
+
+
 class ManualLearningInput(BaseModel):
     topic: str = Field(min_length=1, max_length=500)
     guidance: str = Field(min_length=1, max_length=6000)
     scope: Literal["shared", "primary", "secondary"] = "shared"
+    context: Optional[ReviewContextInput] = None
 
     @model_validator(mode="after")
     def clean_learning(self):
@@ -5651,6 +5820,8 @@ class ManualLearningInput(BaseModel):
         self.guidance = self.guidance.strip()
         if not self.topic or not self.guidance:
             raise ValueError("Both a topic and guidance are required.")
+        if self.context is None:
+            raise ValueError("A relevant conversation turn is required before saving this item for review.")
         return self
 
 
@@ -5757,6 +5928,32 @@ app = FastAPI(title="Assistant UI Backend")
 async def start_knowledge_curator_worker() -> None:
     if KNOWLEDGE_CURATOR_AUTO_ENABLED and KNOWLEDGE_CURATOR_AUTO_INTERVAL_SECONDS is not None:
         asyncio.create_task(knowledge_curator_worker())
+
+
+def _expire_stale_review_items_once() -> Dict[str, int]:
+    db = SessionLocal()
+    try:
+        return expire_stale_review_items(db)
+    finally:
+        db.close()
+
+
+async def review_retention_worker() -> None:
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            await asyncio.to_thread(_expire_stale_review_items_once)
+        except Exception:
+            logger.exception("Review retention pass failed")
+
+
+@app.on_event("startup")
+async def start_review_retention_worker() -> None:
+    try:
+        await asyncio.to_thread(_expire_stale_review_items_once)
+    except Exception:
+        logger.exception("Initial review retention pass failed")
+    asyncio.create_task(review_retention_worker())
 app.include_router(anon_content_router)
 
 # CORS setup
@@ -8892,6 +9089,8 @@ def run_sms_reply_logic(
             at=datetime.utcnow(),
         ))
     elif TRAINING_MODE_ENABLED or draft_only:
+        if not source_message:
+            raise ValueError("A relevant conversation turn is required before a draft can be saved for review.")
         reply_at_naive = datetime.utcnow()
         draft_message = Message(
             id=str(uuid.uuid4()),
@@ -8911,7 +9110,7 @@ def run_sms_reply_logic(
             agent_id=None,
             meta=json.dumps({
                 "message_id": draft_message.id,
-                "customer_message_id": source_message.id if source_message else None,
+                "customer_message_id": source_message.id,
                 **({"source": "catch-up"} if draft_only else {}),
             }),
             at=reply_at_naive,
@@ -11305,6 +11504,7 @@ def respond_to_information_request(
         payload.information,
         generated["knowledge_summary"],
         thread.sms_account_key,
+        _context_reference("conversation_turn", customer_message.id, thread_id=thread.id),
     )
 
     if not thread.customer_phone.startswith("locanto_"):
@@ -16550,9 +16750,19 @@ def clear_review_only_threads(db: Session = Depends(get_db)):
 
 
 @app.post("/api/settings/learnings")
-def create_manual_learning(payload: ManualLearningInput):
+def create_manual_learning(payload: ManualLearningInput, db: Session = Depends(get_db)):
+    context_message = db.query(Message).filter(
+        Message.id == payload.context.message_id,
+        Message.thread_id == payload.context.thread_id,
+        Message.role.in_(["customer", "agent", "system"]),
+    ).first()
+    if not context_message:
+        raise HTTPException(status_code=422, detail="Select an existing conversation turn before saving this item for review.")
     structured = generate_manual_learning(payload.topic, payload.guidance)
-    entry = save_manual_learning(payload.topic, payload.guidance, structured, payload.scope)
+    entry = save_manual_learning(
+        payload.topic, payload.guidance, structured, payload.scope,
+        _context_reference("conversation_turn", context_message.id, thread_id=payload.context.thread_id),
+    )
     return {
         "status": "success",
         "filename": LEARNED_INFORMATION_FILENAME,
@@ -16627,8 +16837,9 @@ def export_messages_csv(db: Session = Depends(get_db)):
 
 
 @app.get("/api/settings/learnings")
-def get_learned_information():
-    return {"entries": list_learned_information()}
+def get_learned_information(db: Session = Depends(get_db)):
+    expire_stale_review_items(db)
+    return {"entries": [entry for entry in list_learned_information() if entry.get("review_status") != "expired"]}
 
 
 @app.put("/api/settings/learnings/{entry_id}")
@@ -16655,7 +16866,60 @@ def update_learned_information(entry_id: str, payload: LearnedInformationUpdateI
         })
     except KeyError:
         raise HTTPException(status_code=404, detail="Learned entry not found.")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": "success", "entry": entry}
+
+
+@app.post("/api/settings/learnings/{entry_id}/context")
+def attach_learning_context(entry_id: str, payload: ReviewContextInput, db: Session = Depends(get_db)):
+    try:
+        entry = attach_learned_information_context(entry_id, payload.thread_id, payload.message_id, db)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Learned entry not found.")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": "success", "entry": entry}
+
+
+@app.post("/api/settings/learnings/{entry_id}/discard")
+def discard_learning(entry_id: str):
+    try:
+        discard_pending_learned_information_entry(entry_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Learned entry not found.")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "success"}
+
+
+@app.post("/api/messages/{message_id}/context")
+def attach_draft_context(message_id: str, payload: ReviewContextInput, db: Session = Depends(get_db)):
+    draft = db.query(Message).filter(Message.id == message_id).first()
+    if not draft:
+        raise HTTPException(status_code=404, detail="Message not found.")
+    if draft.role != "draft":
+        raise HTTPException(status_code=400, detail="Context can only be attached to a draft message.")
+    if draft.thread_id != payload.thread_id:
+        raise HTTPException(status_code=422, detail="Draft context must come from the same conversation.")
+    context_message = db.query(Message).filter(
+        Message.id == payload.message_id,
+        Message.thread_id == draft.thread_id,
+        Message.role.in_(["customer", "agent", "system"]),
+    ).first()
+    if not context_message:
+        raise HTTPException(status_code=422, detail="Select an existing conversation turn from this conversation.")
+    db.add(ThreadEvent(
+        id=str(uuid.uuid4()), thread_id=draft.thread_id, type="draft-context-attached",
+        agent_id="authenticated-owner",
+        meta=json.dumps({"message_id": draft.id, "customer_message_id": context_message.id}),
+        at=datetime.utcnow(),
+    ))
+    db.commit()
+    return {
+        "status": "success",
+        "contextReference": _context_reference("conversation_turn", context_message.id, thread_id=draft.thread_id),
+    }
 
 
 @app.post("/api/settings/learnings/{entry_id}/approve")
@@ -16717,7 +16981,13 @@ def move_all_learnings_to_review():
 @app.delete("/api/settings/learnings/{entry_id}")
 def remove_learned_information(entry_id: str):
     try:
-        delete_learned_information_entry(entry_id)
+        entry = next((item for item in list_learned_information() if item.get("id") == entry_id), None)
+        if not entry:
+            raise KeyError(entry_id)
+        if entry.get("review_status") == "pending":
+            discard_pending_learned_information_entry(entry_id)
+        else:
+            delete_learned_information_entry(entry_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Learned entry not found.")
     return {"status": "success"}
@@ -17628,7 +17898,11 @@ def handle_locanto_message(payload: LocantoMessagePayload, db: Session = Depends
                     thread_id=thread.id,
                     type="draft-created",
                     agent_id=None,
-                    meta=json.dumps({"message_id": outbound_msg.id, "locanto_ad": payload.adTitle}),
+                    meta=json.dumps({
+                        "message_id": outbound_msg.id,
+                        "customer_message_id": incoming_msg.id,
+                        "locanto_ad": payload.adTitle,
+                    }),
                     at=datetime.utcnow()
                 )
                 db.add(event_log)
@@ -18074,6 +18348,7 @@ def respond_to_bootcamp_information_request(
         payload.information,
         generated["knowledge_summary"],
         "primary",
+        _context_reference("bootcamp_turn", latest_persona_message["id"], thread_id=conversation_id),
     )
     BOOTCAMP_STORE.add_message(
         conversation_id,

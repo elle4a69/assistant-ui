@@ -17,7 +17,10 @@ def test_information_request_learning_is_forced_to_its_active_line(monkeypatch):
     captured = {}
     monkeypatch.setattr(main, "classify_knowledge_entries", lambda entries: {entries[0]["id"]: {"scope": "shared", "retrieval_enabled": True}})
     monkeypatch.setattr(main, "_upsert_learned_information_entry", lambda entry: captured.update(entry))
-    main.save_learned_information("request-1", "Question", "Owner answer", "Durable fact", "secondary")
+    main.save_learned_information(
+        "request-1", "Question", "Owner answer", "Durable fact", "secondary",
+        {"type": "conversation_turn", "id": "message-1", "thread_id": "thread-1"},
+    )
     assert captured["scope"] == "secondary"
     assert captured["source_account_key"] == "secondary"
 

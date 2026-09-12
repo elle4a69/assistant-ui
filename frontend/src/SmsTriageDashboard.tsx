@@ -641,6 +641,7 @@ export default function SmsTriageDashboard() {
 
   const handleDiscardDraft = async (messageId: string) => {
     if (!selectedThreadId) return;
+    if (!window.confirm('Discard this draft? It will be removed from review and the action will be recorded.')) return;
     try {
       await discardDraft(messageId);
       await Promise.all([fetchThreadsList(), fetchThreadDetail(selectedThreadId, true)]);

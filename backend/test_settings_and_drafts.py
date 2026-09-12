@@ -8,6 +8,8 @@ from sqlalchemy.orm import sessionmaker
 import main
 from main import Base, Message, SettingsUpdateInput, Thread, ThreadEvent, find_oldest_catch_up_candidate
 
+CONTEXT_REFERENCE = {"type": "conversation_turn", "id": "customer-context", "thread_id": "thread-context"}
+
 
 class FakeLearningResponses:
     def __init__(self, output_text):
@@ -45,6 +47,13 @@ def add_thread(db, thread_id: str, state: str = "needs-review"):
         created_at=now,
         updated_at=now,
     ))
+
+
+def add_context_turn(db):
+    add_thread(db, "thread-context")
+    db.add(Message(id="customer-context", thread_id="thread-context", role="customer", text="Relevant question", at=datetime.utcnow()))
+    db.commit()
+    return db
 
 
 def test_avatar_setting_can_be_saved_as_false(monkeypatch, tmp_path):
@@ -335,10 +344,12 @@ def test_manual_learning_is_ai_structured_saved_and_reindexed(monkeypatch, tmp_p
     monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
     monkeypatch.setattr(main, "KNOWLEDGE_CHUNKS", [])
 
+    db = add_context_turn(make_db())
     result = main.create_manual_learning(main.ManualLearningInput(
         topic="changing booking times",
         guidance="Check that it is their booking first, then offer the closest valid time.",
-    ))
+        context={"thread_id": "thread-context", "message_id": "customer-context"},
+    ), db)
 
     lines = (tmp_path / main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8").splitlines()
     saved = json.loads(lines[0])
@@ -364,7 +375,7 @@ def test_approved_learning_is_retrievable_but_editing_returns_it_to_review(monke
     monkeypatch.setattr(main, "KNOWLEDGE_CHUNKS", [])
     entry = {
         "id": "review-1", "type": "manual_guidance", "text": "Natural service details.",
-        "scope": "primary", "review_status": "pending", "retrieval_enabled": False,
+        "scope": "primary", "review_status": "pending", "retrieval_enabled": False, "context_reference": CONTEXT_REFERENCE,
     }
     main._upsert_learned_information_entry(entry)
 
@@ -392,11 +403,11 @@ def test_bulk_approval_applies_the_normal_safety_gate(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "KNOWLEDGE_CHUNKS", [])
     main._upsert_learned_information_entry({
         "id": "safe", "type": "manual_guidance", "text": "Clients can ask about services.",
-        "scope": "shared", "review_status": "pending", "retrieval_enabled": False,
+        "scope": "shared", "review_status": "pending", "retrieval_enabled": False, "context_reference": CONTEXT_REFERENCE,
     })
     main._upsert_learned_information_entry({
         "id": "price", "type": "manual_guidance", "text": "The price is $200.",
-        "scope": "shared", "review_status": "pending", "retrieval_enabled": False,
+        "scope": "shared", "review_status": "pending", "retrieval_enabled": False, "context_reference": CONTEXT_REFERENCE,
     })
 
     result = main.approve_pending_learned_information()
@@ -516,7 +527,7 @@ def test_learning_redraft_stays_pending_and_is_labelled(monkeypatch, tmp_path):
     })))
     main._upsert_learned_information_entry({
         "id": "redraft-1", "topic": "arrival", "text": "Customers should arrive on time.",
-        "scope": "shared", "review_status": "pending", "retrieval_enabled": False,
+        "scope": "shared", "review_status": "pending", "retrieval_enabled": False, "context_reference": CONTEXT_REFERENCE,
     })
 
     redrafted = main.redraft_learned_information_entry("redraft-1")
@@ -559,7 +570,8 @@ def test_manual_learning_fails_closed_when_ai_is_unavailable(monkeypatch, tmp_pa
         main.create_manual_learning(main.ManualLearningInput(
             topic="a topic",
             guidance="some guidance",
-        ))
+            context={"thread_id": "thread-context", "message_id": "customer-context"},
+        ), add_context_turn(make_db()))
 
     assert exc_info.value.status_code == 503
     assert not (tmp_path / main.LEARNED_INFORMATION_FILENAME).exists()
@@ -573,8 +585,72 @@ def test_manual_learning_saves_nothing_for_invalid_ai_json(monkeypatch, tmp_path
         main.create_manual_learning(main.ManualLearningInput(
             topic="a topic",
             guidance="some guidance",
-        ))
+            context={"thread_id": "thread-context", "message_id": "customer-context"},
+        ), add_context_turn(make_db()))
 
     assert exc_info.value.status_code == 502
     assert not (tmp_path / main.LEARNED_INFORMATION_FILENAME).exists()
+
+
+def test_reviewable_learning_requires_context_reference(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
+    entry = {
+        "id": "missing-context", "source_type": "curator_proposal", "text": "Review me",
+        "scope": "shared", "review_status": "pending", "retrieval_enabled": False,
+    }
+
+    with pytest.raises(ValueError, match="context reference is required"):
+        main._upsert_learned_information_entry(entry)
+
+    entry["context_reference"] = CONTEXT_REFERENCE
+    assert main._upsert_learned_information_entry(entry) is True
+    assert main.list_learned_information()[0]["context_reference"] == CONTEXT_REFERENCE
+
+
+def test_attach_context_then_discard_is_audited(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    path = tmp_path / main.LEARNED_INFORMATION_FILENAME
+    path.write_text(json.dumps({
+        "id": "legacy-review", "source_type": "curator_proposal", "text": "Needs context",
+        "scope": "shared", "review_status": "pending", "retrieval_enabled": False,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }) + "\n", encoding="utf-8")
+    db = add_context_turn(make_db())
+
+    attached = main.attach_learned_information_context(
+        "legacy-review", "thread-context", "customer-context", db,
+    )
+    assert attached["context_reference"] == CONTEXT_REFERENCE
+
+    main.discard_pending_learned_information_entry("legacy-review")
+    assert main.list_learned_information() == []
+    audit = [json.loads(line) for line in (tmp_path / main.LEARNING_REVIEW_AUDIT_FILENAME).read_text().splitlines()]
+    assert [event["action"] for event in audit] == ["context_attached", "discarded"]
+    assert audit[0]["context_reference"] == CONTEXT_REFERENCE
+
+
+def test_review_retention_expires_only_stale_pending_items(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    db = make_db()
+    now = datetime(2030, 1, 10, 12, 0, 0)
+    add_thread(db, "stale-thread")
+    db.add(Message(id="stale-draft", thread_id="stale-thread", role="draft", text="Old", at=now - timedelta(days=8)))
+    db.commit()
+    path = tmp_path / main.LEARNED_INFORMATION_FILENAME
+    records = [
+        {"id": "old", "review_status": "pending", "status": "quarantined", "retrieval_enabled": False, "created_at": "2030-01-01T00:00:00Z", "context_reference": CONTEXT_REFERENCE},
+        {"id": "approved", "review_status": "approved", "status": "active", "retrieval_enabled": True, "created_at": "2030-01-01T00:00:00Z"},
+    ]
+    path.write_text("".join(json.dumps(item) + "\n" for item in records), encoding="utf-8")
+
+    result = main.expire_stale_review_items(db, now)
+
+    assert result == {"expiredDrafts": 1, "expiredLearnings": 1}
+    saved = {item["id"]: item for item in main.list_learned_information()}
+    assert saved["old"]["review_status"] == "expired"
+    assert saved["approved"]["review_status"] == "approved"
+    assert db.query(Message).filter(Message.role == "draft").count() == 0
+    assert db.query(ThreadEvent).filter(ThreadEvent.type == "draft-expired").count() == 1
 

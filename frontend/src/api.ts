@@ -750,6 +750,13 @@ export interface ManualLearningEntry {
   created_at: string;
   updated_at: string;
   scope?: 'shared' | 'primary' | 'secondary';
+  context_reference?: ReviewContextReference;
+}
+
+export interface ReviewContextReference {
+  type: string;
+  id: string;
+  thread_id?: string;
 }
 
 export async function setThreadPinned(threadId: string, pinned: boolean): Promise<{ status: string; pinned: boolean }> {
@@ -1026,11 +1033,12 @@ export async function createManualLearning(
   topic: string,
   guidance: string,
   scope: 'shared' | 'primary' | 'secondary',
+  context: { thread_id: string; message_id: string },
 ): Promise<{ status: string; filename: string; entry: ManualLearningEntry }> {
   const response = await apiFetch(`${API_BASE}/api/settings/learnings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic, guidance, scope }),
+    body: JSON.stringify({ topic, guidance, scope, context }),
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
@@ -1167,6 +1175,22 @@ export async function moveAllLearnedInformationToReview(): Promise<number> {
 export async function deleteLearnedInformation(id: string): Promise<void> {
   const response = await apiFetch(`${API_BASE}/api/settings/learnings/${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to delete learned rule.');
+}
+
+export async function discardLearnedInformation(id: string): Promise<void> {
+  const response = await apiFetch(`${API_BASE}/api/settings/learnings/${encodeURIComponent(id)}/discard`, { method: 'POST' });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to discard review item.');
+}
+
+export async function attachLearnedInformationContext(
+  id: string,
+  context: { thread_id: string; message_id: string },
+): Promise<LearnedInformationEntry> {
+  const response = await apiFetch(`${API_BASE}/api/settings/learnings/${encodeURIComponent(id)}/context`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(context),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to attach conversation context.');
+  return (await response.json()).entry;
 }
 
 export async function uploadKnowledgeFile(file: File): Promise<{ status: string; filename: string }> {
@@ -1500,6 +1524,19 @@ export async function discardDraft(messageId: string): Promise<{ status: string 
     method: 'POST',
   });
   if (!response.ok) throw new Error(`Failed to discard draft message: ${response.statusText}`);
+  return response.json();
+}
+
+export async function attachDraftContext(
+  messageId: string,
+  threadId: string,
+  contextMessageId: string,
+): Promise<{ status: string; contextReference: ReviewContextReference }> {
+  const response = await apiFetch(`${API_BASE}/api/messages/${messageId}/context`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ thread_id: threadId, message_id: contextMessageId }),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to attach draft context.');
   return response.json();
 }
 
