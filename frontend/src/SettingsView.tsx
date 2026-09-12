@@ -31,6 +31,7 @@ import {
   getKnowledgeCuratorState,
   runKnowledgeCurator,
   resolveKnowledgeCuratorProposal,
+  discardKnowledgeCuratorProposal,
   closeKnowledgeCuratorAfterApprovedEdit,
   KnowledgeCuratorResolution,
   getKnowledgeFile,
@@ -195,6 +196,7 @@ export default function SettingsView() {
   const [smsLearningPreview, setSmsLearningPreview] = useState<SmsLearningPreview | null>(null);
   const [knowledgeCurator, setKnowledgeCurator] = useState<KnowledgeCuratorState>({
     runs: [], proposals: [],
+    lifecycle_events: [], metrics: { waiting_review: 0, actionable: 0, expired: 0, discarded: 0 },
     automation: { enabled: false, interval_seconds: null, last_run_at: null, last_status: null },
   });
   const [runningKnowledgeAudit, setRunningKnowledgeAudit] = useState(false);
@@ -868,6 +870,21 @@ export default function SettingsView() {
     } catch (err) {
       console.error(err);
       triggerBanner('error', err instanceof Error ? `${err.message} Nothing changed.` : 'Your choice could not be saved. Nothing changed.');
+    } finally {
+      setUpdatingCuratorProposalId(null);
+    }
+  };
+
+  const handleDiscardCuratorProposal = async (proposal: KnowledgeCuratorProposal) => {
+    if (!window.confirm('Discard this Curator item and any inactive draft it created? Approved guidance will not be changed.')) return;
+    setUpdatingCuratorProposalId(proposal.id);
+    try {
+      await discardKnowledgeCuratorProposal(proposal.id);
+      setLearnedEntries(await listLearnedInformation());
+      await refreshKnowledgeCurator();
+      triggerBanner('success', 'Curator item discarded. No approved guidance was changed.');
+    } catch (err) {
+      triggerBanner('error', err instanceof Error ? err.message : 'The Curator item could not be discarded.');
     } finally {
       setUpdatingCuratorProposalId(null);
     }
@@ -2022,6 +2039,7 @@ export default function SettingsView() {
                   editableRecordIds={new Set(learnedEntries.map(entry => entry.id))}
                   onRun={handleRunKnowledgeAudit}
                   onResolve={handleCuratorProposal}
+                  onDiscard={handleDiscardCuratorProposal}
                   onEditRecord={handleEditCuratorRecord}
                 />
 

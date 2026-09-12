@@ -83,9 +83,40 @@ def test_information_request_saves_knowledge_sends_reply_and_resolves(monkeypatc
     assert request_meta["status"] == "resolved"
     assert knowledge_entry["id"] == request_event.id
     assert knowledge_entry["text"] == "Couples are accepted for the couples service."
+    assert [item["role"] for item in knowledge_entry["review_context"]] == ["customer", "agent"]
     assert db.query(Message).filter(Message.role == "system").one().text == result["message"]["text"]
     assert db.query(ThreadEvent).filter(ThreadEvent.type == "information-request-resolved").count() == 1
     db.close()
+
+
+def test_structured_information_request_is_known_once_in_account_scope():
+    test_engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=test_engine)
+    db = sessionmaker(bind=test_engine)()
+    now = datetime.utcnow()
+    first = Thread(id="thread-a", customer_phone="+61400000001", sms_account_key="primary", state="auto-reply", priority="medium", sla_due_at=now + timedelta(hours=1), unread_count=0, created_at=now, updated_at=now)
+    second = Thread(id="thread-b", customer_phone="+61400000002", sms_account_key="primary", state="auto-reply", priority="medium", sla_due_at=now + timedelta(hours=1), unread_count=0, created_at=now, updated_at=now)
+    isolated = Thread(id="thread-c", customer_phone="+61400000003", sms_account_key="secondary", state="auto-reply", priority="medium", sla_due_at=now + timedelta(hours=1), unread_count=0, created_at=now, updated_at=now)
+    event = ThreadEvent(id="known-service", thread_id=first.id, type="information-request", meta=json.dumps({
+        "missing_item": "couples_policy", "reason": "Are couples accepted?", "resolution_scope": "account",
+        "status": "resolved", "knowledge_summary": "Couples are accepted.",
+    }), at=now)
+    db.add_all([first, second, isolated, event])
+    db.commit()
+
+    assert main.information_request_exists(db, second, "couples_policy") is True
+    assert "Couples are accepted" in main.resolved_information_context(db, second)
+    assert main.information_request_exists(db, isolated, "couples_policy") is False
+    db.close()
+
+
+def test_information_handoff_requires_one_structured_item():
+    parsed = main.parse_information_handoff(
+        "missing_item=couples policy; question=Are couples accepted?; scope=account"
+    )
+    assert parsed == {
+        "missing_item": "couples_policy", "question": "Are couples accepted?", "resolution_scope": "account",
+    }
 
 
 def test_old_handoff_event_is_treated_as_an_information_request():

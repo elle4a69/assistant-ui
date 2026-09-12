@@ -422,11 +422,13 @@ def test_catch_up_delivery_not_accepted_stays_as_review_draft(monkeypatch):
     delivery_event = db.query(ThreadEvent).filter_by(
         thread_id="delivery-failed", type="draft-created",
     ).one()
-    assert json.loads(delivery_event.meta) == {
+    delivery_meta = json.loads(delivery_event.meta)
+    assert {key: delivery_meta[key] for key in ("message_id", "customer_message_id", "source", "reason")} == {
         "message_id": draft.id,
         "customer_message_id": "delivery-failed-customer",
         "source": "sms-delivery-failed",
         "reason": "MobileMessage: Not configured",
     }
+    assert [item["message_id"] for item in delivery_meta["review_context"]] == ["delivery-failed-customer"]
     db.close()
 

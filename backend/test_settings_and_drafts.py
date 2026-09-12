@@ -214,6 +214,29 @@ def test_clear_review_only_threads_preserves_pending_drafts():
     assert main.clear_review_only_threads(db) == {
         "status": "success", "clearedThreads": 0, "draftReviewThreads": 1,
     }
+
+
+def test_draft_from_older_customer_turn_cannot_be_approved(monkeypatch):
+    db = make_db()
+    add_thread(db, "stale-draft-thread")
+    thread = db.query(Thread).filter(Thread.id == "stale-draft-thread").one()
+    now = datetime.utcnow()
+    old_customer = Message(id="old-customer", thread_id=thread.id, role="customer", text="First question", at=now)
+    draft = Message(id="old-draft", thread_id=thread.id, role="draft", text="Old answer", at=now + timedelta(seconds=1))
+    newer_customer = Message(id="new-customer", thread_id=thread.id, role="customer", text="Actually, a different question", at=now + timedelta(seconds=2))
+    event = ThreadEvent(id="old-draft-event", thread_id=thread.id, type="draft-created", meta=json.dumps({
+        "message_id": draft.id, "customer_message_id": old_customer.id,
+        "review_context": [{"message_id": old_customer.id, "role": "customer", "text": old_customer.text, "at": now.isoformat() + "Z"}],
+    }), at=draft.at)
+    db.add_all([old_customer, draft, newer_customer, event])
+    db.commit()
+    monkeypatch.setattr(main, "suppress_arrival_customer_turn", lambda *_args: False)
+
+    with pytest.raises(main.HTTPException, match="older customer turn") as rejected:
+        main.approve_draft_message(draft.id, db)
+    assert rejected.value.status_code == 409
+    assert db.query(Message).filter(Message.id == draft.id).one().role == "draft"
+    db.close()
     db.close()
 
 
@@ -412,7 +435,8 @@ def test_sms_pair_preview_is_view_only_and_separates_candidate_from_rejection(mo
     add_thread(db, "preview-1")
     now = datetime.utcnow()
     db.add_all([
-        Message(id="preview-customer", thread_id="preview-1", role="customer", text="What services do you offer?", at=now),
+        Message(id="preview-customer", thread_id="preview-1", role="customer", text="What services", at=now),
+        Message(id="preview-customer-2", thread_id="preview-1", role="customer", text="do you offer?", at=now + timedelta(seconds=5)),
         Message(id="preview-agent", thread_id="preview-1", role="agent", text="I can explain the services available.", at=now + timedelta(minutes=1)),
     ])
     db.commit()
@@ -427,9 +451,22 @@ def test_sms_pair_preview_is_view_only_and_separates_candidate_from_rejection(mo
     assert preview["sampled"] == 1
     assert len(preview["candidates"]) == 1
     assert preview["candidates"][0]["account_key"] == "primary"
+    assert preview["candidates"][0]["customer"] == "What services\ndo you offer?"
+    assert [item["role"] for item in preview["candidates"][0]["review_context"]] == ["customer", "customer", "agent"]
     assert preview["rejected"] == []
     assert main.list_learned_information() == []
     db.close()
+
+
+def test_sms_pair_candidate_without_customer_and_agent_context_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
+    result = main.save_sms_pair_learning_candidates([{
+        "id": "context-free", "account_key": "primary", "topic": "Services",
+        "applies_when": "A customer asks about services.", "instruction": "Use the current catalogue.",
+        "example_reply": "I can help with services.",
+    }])
+    assert result == {"created": 0, "skipped": 1}
+    assert main.list_learned_information() == []
 
 
 def test_sms_pair_templates_keep_variables_then_enter_review_queue(monkeypatch, tmp_path):
@@ -443,6 +480,10 @@ def test_sms_pair_templates_keep_variables_then_enter_review_queue(monkeypatch, 
         "applies_when": "A customer asks what is offered or wants more information.",
         "instruction": "Explain the relevant {service} from the current catalogue and offer {line_information_url} if useful.",
         "example_reply": "I can tell you about {service}. Have a look at {line_information_url} too if you want.",
+        "review_context": [
+            {"message_id": "customer-1", "role": "customer", "text": "What do you offer?", "at": "2030-01-01T00:00:00Z"},
+            {"message_id": "source-agent-1", "role": "agent", "text": "I can help with that.", "at": "2030-01-01T00:01:00Z"},
+        ],
     }])
 
     assert result == {"created": 1, "skipped": 0}
@@ -469,6 +510,10 @@ def test_sms_pair_template_rejects_literal_price_but_allows_price_token(monkeypa
         "applies_when": "A customer asks about cost.",
         "instruction": "Use the current catalogue for the {service} and {price}.",
         "example_reply": "The current price for {service} is {price}.",
+        "review_context": [
+            {"message_id": "customer-price", "role": "customer", "text": "How much?", "at": "2030-01-01T00:00:00Z"},
+            {"message_id": "safe-template", "role": "agent", "text": "I will check the current catalogue.", "at": "2030-01-01T00:01:00Z"},
+        ],
     }])
     unsafe = main.save_sms_pair_learning_candidates([{
         "id": "old-price",
@@ -477,6 +522,10 @@ def test_sms_pair_template_rejects_literal_price_but_allows_price_token(monkeypa
         "applies_when": "A customer asks about cost.",
         "instruction": "Quote the old price.",
         "example_reply": "It is $200.",
+        "review_context": [
+            {"message_id": "customer-old", "role": "customer", "text": "How much?", "at": "2030-01-01T00:00:00Z"},
+            {"message_id": "old-price", "role": "agent", "text": "It is $200.", "at": "2030-01-01T00:01:00Z"},
+        ],
     }])
 
     assert safe == {"created": 1, "skipped": 0}

@@ -197,10 +197,11 @@ type Props = {
   editableRecordIds: Set<string>;
   onRun: () => void;
   onResolve: (proposal: KnowledgeCuratorProposal, resolution: KnowledgeCuratorResolution, selectedRecordIds?: string[]) => void;
+  onDiscard: (proposal: KnowledgeCuratorProposal) => void;
   onEditRecord: (proposalId: string, recordId: string) => void;
 };
 
-export default function KnowledgeCuratorPanel({ state, loadStatus, running, updatingId, lineLabels, editableRecordIds, onRun, onResolve, onEditRecord }: Props) {
+export default function KnowledgeCuratorPanel({ state, loadStatus, running, updatingId, lineLabels, editableRecordIds, onRun, onResolve, onDiscard, onEditRecord }: Props) {
   const latest = state.runs[0];
   const findings = state.proposals.filter(item => item.status === 'proposed' || item.status === 'accepted');
 
@@ -231,6 +232,7 @@ export default function KnowledgeCuratorPanel({ state, loadStatus, running, upda
           </div>
           : null}
         <p className="mt-1 text-violet-800">Any draft or correction task goes to the Learning review queue and stays out of customer replies until you approve it.</p>
+        <p className="mt-1 text-slate-600">{state.metrics.actionable} actionable · {state.metrics.expired} expired · {state.metrics.discarded} discarded</p>
       </div>
 
       {findings.length === 0 ? <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-[11px] text-emerald-900"><strong>Nothing needs your decision right now.</strong><br />Current guidance stays as it is. A future check will show new questions here.</div> : <div className="mt-3 space-y-3">
@@ -254,6 +256,10 @@ export default function KnowledgeCuratorPanel({ state, loadStatus, running, upda
                 </div>
                 {record.applies_when && <p className="mt-1"><strong>Use when:</strong> {record.applies_when}</p>}
                 {record.customer_message && <p className="mt-1"><strong>Customer asks:</strong> {record.customer_message}</p>}
+                {record.review_context && record.review_context.length > 0 && <div className="mt-2 rounded border border-slate-200 bg-white p-2" aria-label="Chronological customer and agent context">
+                  <p className="font-bold text-slate-800">Conversation context</p>
+                  {record.review_context.map(item => <p key={`${item.message_id}-${item.at}`} className="mt-1 whitespace-pre-wrap"><strong>{item.role === 'customer' ? 'Customer' : 'Agent'}:</strong> {item.text}</p>)}
+                </div>}
                 <p className="mt-1 whitespace-pre-wrap"><strong>{approvedInformationLabel(record)}:</strong> {approvedInformation(record)}</p>
                 {record.instruction && record.instruction !== approvedInformation(record) && <p className="mt-1 whitespace-pre-wrap text-slate-600"><strong>Supporting rule:</strong> {record.instruction}</p>}
                 {editableRecordIds.has(record.id) && <><button type="button" onClick={() => onEditRecord(proposal.id, record.id)} disabled={busy} className="mt-3 min-h-11 w-full rounded border border-indigo-300 bg-indigo-50 px-2 py-2 font-bold text-indigo-900 hover:bg-indigo-100 disabled:opacity-50">Clarify or correct this information</button><p className="mt-1 text-[11px] text-slate-600">Edit the exact saved item, then approve your correction to close this question.</p></>}
@@ -278,6 +284,7 @@ export default function KnowledgeCuratorPanel({ state, loadStatus, running, upda
                 </button>)}
                 {busy && <p role="status" className="col-span-full text-xs font-semibold text-violet-800">Saving your choice…</p>}
               </div>}
+            <button type="button" onClick={() => onDiscard(proposal)} disabled={busy} className="mt-3 min-h-11 rounded-lg border border-rose-200 bg-white px-3 py-2 text-xs font-bold text-rose-800 hover:bg-rose-50 disabled:opacity-50">Discard low-quality item</button>
           </article>;
         })}
       </div>}

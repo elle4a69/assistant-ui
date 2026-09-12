@@ -819,6 +819,7 @@ export interface LearnedInformationEntry extends Omit<ManualLearningEntry, 'scop
   category?: string;
   review_note?: string;
   review_source?: 'ai-drafted' | 'ai-redrafted' | 'staff-edited-reply' | 'sms-pair-template' | 'knowledge-curator';
+  review_context?: Array<{ message_id: string; role: 'customer' | 'agent'; text: string; at: string }>;
 }
 
 export interface KnowledgeCuratorRecordRef {
@@ -849,6 +850,7 @@ export interface KnowledgeCuratorRecordPreview extends KnowledgeCuratorRecordRef
   created_at?: string;
   updated_at?: string;
   metadata_issues?: { missing_fields: string[]; invalid_fields: string[] };
+  review_context?: Array<{ message_id: string; role: 'customer' | 'agent'; text: string; at: string }>;
 }
 
 export type KnowledgeCuratorResolution =
@@ -868,9 +870,10 @@ export interface KnowledgeCuratorProposal {
   proposed_action: 'no_action' | 'ask_owner' | 'draft_replacement' | 'draft_supersession' | 'quarantine_for_review' | 'merge_duplicate';
   confidence: string;
   owner_questions: string[];
-  status: 'proposed' | 'accepted' | 'rejected' | 'dismissed' | 'applied' | 'resolved' | 'resolved_not_an_issue' | 'resolved_no_longer_detected';
+  status: 'proposed' | 'accepted' | 'rejected' | 'dismissed' | 'discarded' | 'expired' | 'applied' | 'resolved' | 'resolved_not_an_issue' | 'resolved_no_longer_detected';
   created_at: string;
   updated_at: string;
+  expires_at?: string;
   draft_entry_id?: string | null;
   resolution?: KnowledgeCuratorResolution;
   selected_record_ids?: string[];
@@ -896,6 +899,8 @@ export interface KnowledgeCuratorRun {
 export interface KnowledgeCuratorState {
   runs: KnowledgeCuratorRun[];
   proposals: KnowledgeCuratorProposal[];
+  lifecycle_events: Array<{ id: string; proposal_id: string; action: 'created' | 'discarded' | 'expired' | 'resolved' | 'draft_created'; at: string; actor: string }>;
+  metrics: { waiting_review: number; actionable: number; expired: number; discarded: number };
   automation: {
     enabled: boolean;
     interval_seconds: number | null;
@@ -914,6 +919,7 @@ export interface SmsLearningPreviewItem {
   applies_when?: string;
   instruction?: string;
   example_reply?: string;
+  review_context: Array<{ message_id: string; role: 'customer' | 'agent'; text: string; at: string }>;
 }
 
 export interface SmsLearningPreview {
@@ -1069,6 +1075,12 @@ export async function transitionKnowledgeCuratorProposal(id: string, transition:
   return (await response.json()).proposal;
 }
 
+export async function discardKnowledgeCuratorProposal(id: string): Promise<KnowledgeCuratorProposal> {
+  const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator/proposals/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Curator item could not be discarded.');
+  return (await response.json()).proposal;
+}
+
 export async function resolveKnowledgeCuratorProposal(id: string, resolution: KnowledgeCuratorResolution, selectedRecordIds: string[] = []): Promise<KnowledgeCuratorProposal> {
   const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator/proposals/${encodeURIComponent(id)}/resolve`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1133,13 +1145,14 @@ export async function importSmsPairLearningCandidates(
   const response = await apiFetch(`${API_BASE}/api/settings/learnings/sms-pair-import`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ candidates: candidates.map(({ id, account_key, topic, applies_when, instruction, example_reply }) => ({
+    body: JSON.stringify({ candidates: candidates.map(({ id, account_key, topic, applies_when, instruction, example_reply, review_context }) => ({
       id,
       account_key,
       topic: topic || '',
       applies_when: applies_when || '',
       instruction: instruction || '',
       example_reply: example_reply || '',
+      review_context,
     })) }),
   });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Failed to add SMS learning candidates to review.');

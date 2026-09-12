@@ -572,11 +572,42 @@ def test_curator_settings_api_is_admin_protected(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "runs": [], "proposals": [],
+        "lifecycle_events": [],
+        "metrics": {"waiting_review": 0, "actionable": 0, "expired": 0, "discarded": 0},
         "automation": {
             "enabled": False, "interval_seconds": 86400,
             "last_run_at": None, "last_status": None,
         },
     }
+
+
+def test_discard_removes_only_inactive_curator_draft_and_records_audit(tmp_path, monkeypatch):
+    curator_paths(tmp_path, monkeypatch, [record("price", text="The service costs $100.")])
+    proposal = next(item for item in main.run_knowledge_curator()["proposals"] if item["finding_type"] == "literal_dynamic_authority")
+    accepted = main.accept_knowledge_curator_proposal(proposal["id"])
+    assert accepted["draft_entry_id"] in {item["id"] for item in main.list_learned_information()}
+
+    discarded = main.discard_knowledge_curator_proposal(proposal["id"])
+
+    assert discarded["status"] == "discarded"
+    assert accepted["draft_entry_id"] not in {item["id"] for item in main.list_learned_information()}
+    state = main.get_knowledge_curator_state()
+    assert state["metrics"]["discarded"] == 1
+    assert state["lifecycle_events"][0]["action"] == "discarded"
+
+
+def test_stale_unresolved_curator_item_expires_without_changing_approved_knowledge(tmp_path, monkeypatch):
+    _, data = curator_paths(tmp_path, monkeypatch, [record("price", text="The service costs $100.")])
+    proposal = next(item for item in main.run_knowledge_curator()["proposals"] if item["finding_type"] == "literal_dynamic_authority")
+    state = json.loads((data / "curator.json").read_text(encoding="utf-8"))
+    saved = next(item for item in state["proposals"] if item["id"] == proposal["id"])
+    saved["expires_at"] = "2000-01-01T00:00:00Z"
+    (data / "curator.json").write_text(json.dumps(state), encoding="utf-8")
+
+    presented = main.get_knowledge_curator_state()
+
+    assert next(item for item in presented["proposals"] if item["id"] == proposal["id"])["status"] == "expired"
+    assert next(item for item in main.list_learned_information() if item["id"] == "price")["retrieval_enabled"] is True
 
 
 def test_curator_previews_are_returned_only_to_authenticated_settings_client(tmp_path, monkeypatch):

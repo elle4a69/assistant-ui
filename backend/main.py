@@ -937,6 +937,59 @@ def customer_burst_received_at(
     return received_at
 
 
+REVIEW_CONTEXT_MAX_MESSAGES = 12
+CONTEXTUAL_LEARNING_SOURCES = {
+    "sms_pair_template", "staff_edited_draft", "information_request_resolution",
+}
+
+
+def bounded_review_context(messages: List[Any], *, through_at: Optional[datetime] = None) -> List[Dict[str, str]]:
+    """Return bounded chronological customer/agent evidence for human review only."""
+    context: List[Dict[str, str]] = []
+    for message in sorted(messages, key=lambda item: (getattr(item, "at", datetime.min), str(getattr(item, "id", "")))):
+        at = getattr(message, "at", None)
+        if through_at and isinstance(at, datetime) and at > through_at:
+            continue
+        raw_role = str(getattr(message, "role", ""))
+        if raw_role == "customer":
+            role = "customer"
+        elif raw_role in {"agent", "system", "draft"}:
+            role = "agent"
+        else:
+            continue
+        text = str(getattr(message, "text", "")).strip()
+        if not text:
+            continue
+        context.append({
+            "message_id": str(getattr(message, "id", ""))[:160],
+            "role": role,
+            "text": text[:1600],
+            "at": (at.isoformat() + "Z") if isinstance(at, datetime) else "",
+        })
+    return context[-REVIEW_CONTEXT_MAX_MESSAGES:]
+
+
+def _safe_review_context(value: Any) -> List[Dict[str, str]]:
+    """Validate caller-produced review evidence without making it authoritative."""
+    if not isinstance(value, list):
+        return []
+    safe: List[Dict[str, str]] = []
+    previous_at = ""
+    for item in value[-REVIEW_CONTEXT_MAX_MESSAGES:]:
+        if not isinstance(item, dict) or item.get("role") not in {"customer", "agent"}:
+            return []
+        text = str(item.get("text") or "").strip()[:1600]
+        at = str(item.get("at") or "")[:64]
+        if not text or (previous_at and at and at < previous_at):
+            return []
+        previous_at = at or previous_at
+        safe.append({
+            "message_id": str(item.get("message_id") or "")[:160],
+            "role": str(item["role"]), "text": text, "at": at,
+        })
+    return safe
+
+
 def assemble_safe_prompt(
     system_prompt_tmpl: str,
     user_prompt_tmpl: str,
@@ -2726,8 +2779,14 @@ def save_learned_information(
     supplied_information: str,
     knowledge_summary: str,
     account_key: str,
+    review_context: Optional[List[Dict[str, str]]] = None,
+    resolution_scope: str = "account",
 ) -> str:
     """Atomically upsert one reusable learned-information record and refresh RAG."""
+    if resolution_scope == "thread":
+        # Thread-only facts remain on the account-bound conversation event and
+        # must never become reusable knowledge for another customer.
+        return "thread-event"
     entry = {
         "id": request_event_id,
         "type": "information_request_resolution",
@@ -2744,6 +2803,7 @@ def save_learned_information(
         "revision": 1,
         "review_status": "pending",
         "retrieval_enabled": False,
+        "review_context": review_context or [],
     }
     entry.update(classify_knowledge_entries([entry]).get(entry["id"], _quarantined_knowledge_classification()))
     entry["review_status"] = "pending"
@@ -3019,6 +3079,15 @@ def prepare_learning_candidate(entry: Dict[str, Any]) -> Optional[Dict[str, Any]
     ):
         prepared.pop(private_field, None)
     account_key = str(prepared.get("scope") or prepared.get("sms_account_key") or "")
+    review_context = _safe_review_context(prepared.get("review_context"))
+    if str(prepared.get("source_type") or "") in CONTEXTUAL_LEARNING_SOURCES:
+        roles = {item["role"] for item in review_context}
+        if roles != {"customer", "agent"}:
+            return None
+    if review_context:
+        prepared["review_context"] = review_context
+    else:
+        prepared.pop("review_context", None)
     rendered_fields = {}
     for field in ("topic", "applies_when", "instruction", "example_reply", "text"):
         if field in prepared and prepared.get(field):
@@ -3429,7 +3498,9 @@ KNOWLEDGE_CURATOR_LOCK = threading.Lock()
 KNOWLEDGE_CURATOR_MAX_RUNS = 50
 KNOWLEDGE_CURATOR_MAX_PROPOSALS = 500
 KNOWLEDGE_CURATOR_MAX_MAINTENANCE_AUDITS = 50
+KNOWLEDGE_CURATOR_MAX_LIFECYCLE_EVENTS = 500
 KNOWLEDGE_CURATOR_MAX_BACKUPS = 10
+KNOWLEDGE_CURATOR_PROPOSAL_TTL = timedelta(days=30)
 # Use the deployment's supported model selection when it is configured.  The
 # fallback preserves the application default for existing installations.
 KNOWLEDGE_CURATOR_MODEL = os.getenv("KNOWLEDGE_CURATOR_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.6-terra"
@@ -3511,7 +3582,7 @@ def is_openai_quota_exhausted(exc: Exception) -> bool:
 
 
 def _curator_empty_state() -> Dict[str, Any]:
-    return {"version": 2, "runs": [], "proposals": [], "maintenance_history": []}
+    return {"version": 2, "runs": [], "proposals": [], "maintenance_history": [], "lifecycle_events": []}
 
 
 def _bound_curator_proposals(proposals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -3544,12 +3615,35 @@ def _load_curator_state(*, fail_on_invalid: bool = False) -> Dict[str, Any]:
     normalized = [_curator_safe_state_proposal(item) for item in proposals if isinstance(item, dict)]
     normalized_runs = [_curator_safe_state_run(item) for item in runs if isinstance(item, dict)]
     maintenance = state.get("maintenance_history") if isinstance(state.get("maintenance_history"), list) else []
+    lifecycle = state.get("lifecycle_events") if isinstance(state.get("lifecycle_events"), list) else []
     return {
         "version": 2,
         "runs": normalized_runs[-KNOWLEDGE_CURATOR_MAX_RUNS:],
         "proposals": _bound_curator_proposals(normalized),
         "maintenance_history": [_curator_safe_maintenance_entry(item) for item in maintenance if isinstance(item, dict)][-KNOWLEDGE_CURATOR_MAX_MAINTENANCE_AUDITS:],
+        "lifecycle_events": [_curator_safe_lifecycle_event(item) for item in lifecycle if isinstance(item, dict)][-KNOWLEDGE_CURATOR_MAX_LIFECYCLE_EVENTS:],
     }
+
+
+def _curator_safe_lifecycle_event(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist content-free proposal lifecycle audit facts."""
+    action = str(entry.get("action") or "")
+    if action not in {"created", "discarded", "expired", "resolved", "draft_created"}:
+        action = "resolved"
+    return {
+        "id": str(entry.get("id") or "")[:160],
+        "proposal_id": str(entry.get("proposal_id") or "")[:160],
+        "action": action,
+        "at": str(entry.get("at") or "")[:64],
+        "actor": str(entry.get("actor") or "system")[:80],
+    }
+
+
+def _record_curator_lifecycle(state: Dict[str, Any], proposal_id: str, action: str, *, actor: str = "system", at: Optional[str] = None) -> None:
+    state.setdefault("lifecycle_events", []).append({
+        "id": f"kce-{uuid.uuid4()}", "proposal_id": proposal_id, "action": action,
+        "at": at or datetime.utcnow().isoformat() + "Z", "actor": actor,
+    })
 
 
 def _curator_safe_state_run(run: Dict[str, Any]) -> Dict[str, Any]:
@@ -3606,7 +3700,7 @@ def _curator_safe_state_proposal(proposal: Dict[str, Any]) -> Dict[str, Any]:
     allowed = {
         "id", "fingerprint", "canonical_key", "scope", "finding_type", "records", "reason_codes", "evidence",
         "proposed_action", "replacement_draft", "confidence", "owner_questions", "status", "created_at", "updated_at",
-        "last_seen_at", "draft_entry_id", "resolution", "selected_record_ids", "malformed_references", "malformed_reference_count",
+        "last_seen_at", "expires_at", "draft_entry_id", "resolution", "selected_record_ids", "malformed_references", "malformed_reference_count",
     }
     safe = {key: value for key, value in proposal.items() if key in allowed}
     # Inspect the original container before normalising it.  Dropping a bad
@@ -3687,6 +3781,7 @@ def _save_curator_state(state: Dict[str, Any]) -> None:
         "runs": [_curator_safe_state_run(item) for item in state.get("runs", []) if isinstance(item, dict)][-KNOWLEDGE_CURATOR_MAX_RUNS:],
         "proposals": _bound_curator_proposals([_curator_safe_state_proposal(item) for item in state.get("proposals", []) if isinstance(item, dict)]),
         "maintenance_history": [_curator_safe_maintenance_entry(item) for item in state.get("maintenance_history", []) if isinstance(item, dict)][-KNOWLEDGE_CURATOR_MAX_MAINTENANCE_AUDITS:],
+        "lifecycle_events": [_curator_safe_lifecycle_event(item) for item in state.get("lifecycle_events", []) if isinstance(item, dict)][-KNOWLEDGE_CURATOR_MAX_LIFECYCLE_EVENTS:],
     }
     temporary = f"{KNOWLEDGE_CURATOR_STATE_PATH}.{uuid.uuid4().hex}.tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
@@ -3709,6 +3804,7 @@ def _curator_record_preview(record: Dict[str, Any]) -> Dict[str, Any]:
         "knowledge_text": str(record.get("text") or ""), "status": str(record.get("status") or ""),
         "review_status": str(record.get("review_status") or ""), "retrieval_enabled": _knowledge_bool(record.get("retrieval_enabled")),
         "created_at": str(record.get("created_at") or ""), "updated_at": str(record.get("updated_at") or ""),
+        "review_context": _safe_review_context(raw.get("review_context")),
         "metadata_issues": _curator_invalid_metadata_fields(record),
     }
 
@@ -3776,9 +3872,18 @@ def _present_curator_state(state: Dict[str, Any], *, unresolved_only: bool = Fal
         proposals = [item for item in proposals if item.get("status") in KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES]
     automatic_runs = [item for item in state.get("runs", []) if item.get("trigger") == "automatic"]
     latest_automatic = automatic_runs[-1] if automatic_runs else None
+    status_counts = Counter(str(item.get("status") or "unknown") for item in state.get("proposals", []))
+    presented = [_present_curator_proposal(item, current) for item in reversed(proposals)]
     return {
         "runs": list(reversed(state.get("runs", []))),
-        "proposals": [_present_curator_proposal(item, current) for item in reversed(proposals)],
+        "proposals": presented,
+        "lifecycle_events": list(reversed(state.get("lifecycle_events", []))),
+        "metrics": {
+            "waiting_review": sum(status_counts.get(status, 0) for status in KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES),
+            "actionable": sum(1 for item in presented if item.get("status") in KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES and item.get("actionable")),
+            "expired": status_counts.get("expired", 0),
+            "discarded": status_counts.get("discarded", 0) + status_counts.get("rejected", 0),
+        },
         "automation": {
             "enabled": bool(KNOWLEDGE_CURATOR_AUTO_ENABLED and KNOWLEDGE_CURATOR_AUTO_INTERVAL_SECONDS),
             "interval_seconds": KNOWLEDGE_CURATOR_AUTO_INTERVAL_SECONDS,
@@ -4363,6 +4468,7 @@ def _run_knowledge_curator_locked(*, trigger: str, audit_time: Optional[datetime
     enrichments, error_code = _curator_enrich_proposals(findings)
     state = _load_curator_state()
     now_text = (audit_time or datetime.utcnow()).isoformat() + "Z"
+    _expire_curator_proposals(state, now=audit_time or datetime.utcnow())
     by_fingerprint = {item.get("fingerprint"): item for item in state["proposals"]}
     observed_fingerprints = {item["fingerprint"] for item in findings}
     for prior in state["proposals"]:
@@ -4372,10 +4478,21 @@ def _run_knowledge_curator_locked(*, trigger: str, audit_time: Optional[datetime
             prior["status"] = "resolved_no_longer_detected"
             prior["resolution"] = "dismiss_for_now"
             prior["updated_at"] = now_text
+            _record_curator_lifecycle(state, str(prior.get("id") or ""), "resolved", at=now_text)
     created = 0
     for finding in findings:
         existing = by_fingerprint.get(finding["fingerprint"])
         if existing:
+            if existing.get("status") == "expired":
+                # Expiry clears an abandoned review item and its inactive
+                # draft. A later audit may surface the still-present issue as
+                # a fresh bounded review window without duplicating the card.
+                existing["status"] = "proposed"
+                existing["created_at"] = now_text
+                existing["expires_at"] = ((audit_time or datetime.utcnow()) + KNOWLEDGE_CURATOR_PROPOSAL_TTL).isoformat() + "Z"
+                existing["draft_entry_id"] = None
+                _record_curator_lifecycle(state, str(existing.get("id") or ""), "created", at=now_text)
+                created += 1
             # Deferral must mean "ask me again", not permanently hide a
             # still-present problem. Re-open it on the next curator check.
             if existing.get("resolution") in {"dismiss_for_now", "needs_manual_investigation"}:
@@ -4393,9 +4510,11 @@ def _run_knowledge_curator_locked(*, trigger: str, audit_time: Optional[datetime
             "created_at": now_text,
             "updated_at": now_text,
             "last_seen_at": now_text,
+            "expires_at": ((audit_time or datetime.utcnow()) + KNOWLEDGE_CURATOR_PROPOSAL_TTL).isoformat() + "Z",
             "draft_entry_id": None,
         }
         state["proposals"].append(proposal)
+        _record_curator_lifecycle(state, proposal["id"], "created", at=now_text)
         created += 1
     counts = dict(Counter(item["finding_type"] for item in findings))
     run = {
@@ -4503,7 +4622,63 @@ async def knowledge_curator_worker() -> None:
 def get_knowledge_curator_state() -> Dict[str, Any]:
     with KNOWLEDGE_CURATOR_LOCK:
         state = _load_curator_state()
+        if _expire_curator_proposals(state):
+            _save_curator_state(state)
     return _present_curator_state(state)
+
+
+def _delete_curator_review_draft(proposal: Dict[str, Any]) -> bool:
+    """Delete only this proposal's still-inactive review draft."""
+    draft_id = str(proposal.get("draft_entry_id") or "")
+    if not draft_id:
+        return False
+    entry = next((item for item in list_learned_information() if str(item.get("id")) == draft_id), None)
+    if not entry or entry.get("source_type") != "curator_proposal" or entry.get("curator_proposal_id") != proposal.get("id"):
+        return False
+    if entry.get("review_status") == "approved" or _knowledge_bool(entry.get("retrieval_enabled")):
+        return False
+    delete_learned_information_entry(draft_id)
+    return True
+
+
+def _expire_curator_proposals(state: Dict[str, Any], *, now: Optional[datetime] = None) -> int:
+    """Close stale unresolved cards and remove only their inactive generated drafts."""
+    current = now or datetime.utcnow()
+    expired = 0
+    for proposal in state.get("proposals", []):
+        if proposal.get("status") not in KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES:
+            continue
+        deadline = _curator_parse_timestamp(proposal.get("expires_at"))
+        if deadline is None:
+            created = _curator_parse_timestamp(proposal.get("created_at"))
+            deadline = created + KNOWLEDGE_CURATOR_PROPOSAL_TTL if created else None
+        if deadline is None or current < deadline:
+            continue
+        _delete_curator_review_draft(proposal)
+        proposal["status"] = "expired"
+        proposal["updated_at"] = current.isoformat() + "Z"
+        _record_curator_lifecycle(state, str(proposal.get("id") or ""), "expired", at=proposal["updated_at"])
+        expired += 1
+    return expired
+
+
+def discard_knowledge_curator_proposal(proposal_id: str, *, actor: str = "owner") -> Dict[str, Any]:
+    """Discard one low-quality card and its inactive generated review draft."""
+    with KNOWLEDGE_CURATOR_LOCK:
+        state = _load_curator_state()
+        proposal = next((item for item in state["proposals"] if item.get("id") == proposal_id), None)
+        if not proposal:
+            raise KeyError(proposal_id)
+        if proposal.get("status") == "discarded":
+            return dict(proposal)
+        if proposal.get("status") not in KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES:
+            raise ValueError("Only unresolved Curator items can be discarded.")
+        _delete_curator_review_draft(proposal)
+        proposal["status"] = "discarded"
+        proposal["updated_at"] = datetime.utcnow().isoformat() + "Z"
+        _record_curator_lifecycle(state, proposal_id, "discarded", actor=actor, at=proposal["updated_at"])
+        _save_curator_state(state)
+        return dict(proposal)
 
 
 def _curator_proposal_is_current(proposal: Dict[str, Any]) -> bool:
@@ -4525,6 +4700,7 @@ def transition_knowledge_curator_proposal(proposal_id: str, status_value: str) -
             raise ValueError("The involved record revisions changed or are unavailable; run a fresh audit.")
         proposal["status"] = status_value
         proposal["updated_at"] = datetime.utcnow().isoformat() + "Z"
+        _record_curator_lifecycle(state, proposal_id, "discarded" if status_value == "rejected" else "resolved", actor="owner", at=proposal["updated_at"])
         _save_curator_state(state)
         return dict(proposal)
 
@@ -4610,6 +4786,7 @@ def resolve_knowledge_curator_proposal(proposal_id: str, resolution: str, select
         if resolution not in draft_resolutions:
             proposal["status"] = "resolved_not_an_issue" if resolution == "not_an_issue" else "resolved"
             proposal["updated_at"] = now_text
+            _record_curator_lifecycle(state, proposal_id, "resolved", actor="owner", at=now_text)
             _save_curator_state(state)
             return dict(proposal)
 
@@ -4618,6 +4795,9 @@ def resolve_knowledge_curator_proposal(proposal_id: str, resolution: str, select
         predecessor = records.get(predecessor_id)
         if not predecessor:
             raise ValueError("The proposed record no longer exists.")
+        predecessor_context = _safe_review_context(predecessor.get("_raw", {}).get("review_context"))
+        if _curator_authority_role(predecessor) == "contextual_example" and {item["role"] for item in predecessor_context} != {"customer", "agent"}:
+            raise ValueError("This contextual proposal has no unambiguous customer and agent review context.")
         draft_data = proposal.get("replacement_draft") if isinstance(proposal.get("replacement_draft"), dict) else {}
         instruction_by_resolution = {
             "create_merged_draft": "Create a staff-reviewed merged rule for the referenced records. Do not activate it until the separate approval gate confirms the business rule.",
@@ -4654,11 +4834,13 @@ def resolve_knowledge_curator_proposal(proposal_id: str, resolution: str, select
             "review_source": "knowledge-curator",
             "curator_proposal_id": proposal_id,
             "curator_fingerprint": proposal.get("fingerprint"),
+            "review_context": predecessor_context,
         }
         _upsert_learned_information_entry(entry)
         proposal["status"] = "accepted"
         proposal["draft_entry_id"] = entry_id
         proposal["updated_at"] = now_text
+        _record_curator_lifecycle(state, proposal_id, "draft_created", actor="owner", at=now_text)
         _save_curator_state(state)
         return dict(proposal)
 
@@ -4747,24 +4929,30 @@ def preview_sms_pair_learnings(db: Session, limit: int = 50) -> Dict[str, Any]:
     for message, account_key in messages:
         by_thread.setdefault(message.thread_id, []).append((message, account_key))
 
-    pairs: List[Dict[str, str]] = []
+    pairs: List[Dict[str, Any]] = []
     for thread_messages in by_thread.values():
         ordered = sorted(thread_messages, key=lambda item: (item[0].at, item[0].id))
         for index, (reply, account_key) in enumerate(ordered):
             if reply.role != "agent":
                 continue
-            preceding = next((
-                candidate for candidate, _ in reversed(ordered[:index])
-                if candidate.role == "customer" and candidate.text.strip()
-            ), None)
-            if not preceding:
+            fragments: List[Message] = []
+            for candidate, _ in reversed(ordered[:index]):
+                if candidate.role != "customer":
+                    break
+                if candidate.text.strip():
+                    fragments.append(candidate)
+            fragments.reverse()
+            if not fragments:
                 continue
+            customer_turn = "\n".join(item.text.strip() for item in fragments)
+            review_context = bounded_review_context([*fragments, reply])
             pairs.append({
                 "id": reply.id,
                 "account_key": account_key if account_key in FIRST_CONTACT_ACCOUNT_KEYS else "primary",
-                "customer": preceding.text.strip()[:1200],
+                "customer": customer_turn[:1200],
                 "reply": reply.text.strip()[:1600],
                 "at": reply.at.isoformat() + "Z",
+                "review_context": review_context,
             })
     pairs = sorted(pairs, key=lambda pair: pair["at"], reverse=True)[:limit]
     if not pairs:
@@ -4804,6 +4992,7 @@ def preview_sms_pair_learnings(db: Session, limit: int = 50) -> Dict[str, Any]:
         output = {
             "id": pair["id"], "account_key": pair["account_key"], "customer": pair["customer"], "reply": pair["reply"],
             "reason": str(result.get("reason", "No reusable guidance identified.")).strip()[:500],
+            "review_context": pair["review_context"],
         }
         fields = {key: str(result.get(key, "")).strip()[:1200] for key in ("topic", "applies_when", "instruction", "example_reply")}
         if result.get("disposition") == "candidate" and all(fields[key] for key in ("topic", "applies_when", "instruction")) and not any(has_unsafe_literal_learning_detail(value) for value in fields.values()):
@@ -4875,6 +5064,7 @@ def save_sms_pair_learning_candidates(candidates: List[Dict[str, str]]) -> Dict[
             "review_status": "pending",
             "retrieval_enabled": False,
             "review_source": "sms-pair-template",
+            "review_context": _safe_review_context(candidate.get("review_context")),
         })
         if not persisted:
             skipped += 1
@@ -4899,6 +5089,11 @@ def save_edited_draft_learning(db: Session, thread: Thread, draft: Message) -> O
     if not customer_message:
         return None
     now = datetime.utcnow().isoformat() + "Z"
+    review_context = bounded_review_context(
+        db.query(Message).filter(Message.thread_id == thread.id, Message.at <= draft.at).order_by(
+            Message.at.asc(), Message.id.asc()
+        ).all()
+    )
     entry = {
         "id": f"edited-draft-{draft.id}",
         "type": "staff_edited_draft",
@@ -4923,6 +5118,7 @@ def save_edited_draft_learning(db: Session, thread: Thread, draft: Message) -> O
         "review_status": "pending",
         "retrieval_enabled": False,
         "review_source": "staff-edited-reply",
+        "review_context": review_context,
     }
     entry.update(
         classify_knowledge_entries([entry]).get(
@@ -5696,11 +5892,15 @@ class SmsLearningCandidateInput(BaseModel):
     applies_when: str = Field(min_length=1, max_length=1200)
     instruction: str = Field(min_length=1, max_length=1200)
     example_reply: str = Field(default="", max_length=1200)
+    review_context: List[Dict[str, str]] = Field(default_factory=list, max_length=REVIEW_CONTEXT_MAX_MESSAGES)
 
     @model_validator(mode="after")
     def clean_candidate(self):
         for field_name in ("id", "topic", "applies_when", "instruction", "example_reply"):
             setattr(self, field_name, str(getattr(self, field_name)).strip())
+        self.review_context = _safe_review_context(self.review_context)
+        if {item["role"] for item in self.review_context} != {"customer", "agent"}:
+            raise ValueError("Chronological customer and agent context is required.")
         return self
 
 
@@ -6723,6 +6923,73 @@ def explicitly_requested_service(message: str, services: List[Dict[str, Any]]) -
     return None
 
 
+def information_item_key(value: str) -> str:
+    """Create a stable, non-secret key for one missing business-information item."""
+    words = re.findall(r"[a-z0-9]+", (value or "").casefold())[:12]
+    return "_".join(words)[:120] or "unspecified_information"
+
+
+def parse_information_handoff(value: str) -> Dict[str, str]:
+    """Parse the structured handoff contract, retaining legacy output safely."""
+    raw = (value or "").strip()
+    fields: Dict[str, str] = {}
+    for part in raw.split(";"):
+        if "=" in part:
+            key, item = part.split("=", 1)
+            fields[key.strip().casefold()] = item.strip()
+    question = fields.get("question") or raw or "Business guidance is required."
+    missing_item = information_item_key(fields.get("missing_item") or question)
+    scope = fields.get("scope", "thread").casefold()
+    return {
+        "missing_item": missing_item,
+        "question": question[:500],
+        "resolution_scope": scope if scope in {"thread", "account"} else "thread",
+    }
+
+
+def scoped_information_events(db: Session, thread: Thread) -> List[tuple[ThreadEvent, Dict[str, Any]]]:
+    """Return requests visible to this exact thread/account without crossing SMS lines."""
+    rows = db.query(ThreadEvent, Thread.sms_account_key).join(Thread, Thread.id == ThreadEvent.thread_id).filter(
+        ThreadEvent.type.in_(["information-request", "catch-up-handoff"]),
+        or_(ThreadEvent.thread_id == thread.id, Thread.sms_account_key == thread.sms_account_key),
+    ).order_by(ThreadEvent.at.asc(), ThreadEvent.id.asc()).all()
+    output: List[tuple[ThreadEvent, Dict[str, Any]]] = []
+    for event_item, account_key in rows:
+        try:
+            meta = json.loads(event_item.meta or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        scope = str(meta.get("resolution_scope") or "thread")
+        if event_item.thread_id != thread.id and (scope != "account" or account_key != thread.sms_account_key):
+            continue
+        output.append((event_item, meta))
+    return output
+
+
+def resolved_information_context(db: Session, thread: Thread) -> str:
+    """Expose previously resolved scoped facts to generation so they are not requested again."""
+    known: Dict[str, str] = {}
+    for _, meta in scoped_information_events(db, thread):
+        if meta.get("status") != "resolved":
+            continue
+        key = information_item_key(str(meta.get("missing_item") or meta.get("reason") or ""))
+        summary = str(meta.get("knowledge_summary") or "").strip()
+        if key and summary:
+            known[key] = summary[:1000]
+    if not known:
+        return ""
+    return "\n".join(f"- {key}: {summary}" for key, summary in sorted(known.items()))
+
+
+def information_request_exists(db: Session, thread: Thread, missing_item: str) -> bool:
+    key = information_item_key(missing_item)
+    return any(
+        information_item_key(str(meta.get("missing_item") or meta.get("reason") or "")) == key
+        and meta.get("status") in {"pending", "resolved"}
+        for _, meta in scoped_information_events(db, thread)
+    )
+
+
 def validated_reschedule_target(
     db: Session,
     thread: Thread,
@@ -6925,7 +7192,7 @@ def identical_ai_reply_exists_for_customer_turn(
         return False
     prior_replies = db.query(Message.text).filter(
         Message.thread_id == thread_id,
-        Message.role == "system",
+        Message.role.in_(["agent", "system", "draft"]),
         Message.at >= received_at,
     ).all()
     return any(normalized_reply_fingerprint(item.text) == fingerprint for item in prior_replies)
@@ -8416,7 +8683,15 @@ def run_sms_reply_logic(
                 instructions += (
                     "\n\nCatch-up review: create a draft only. If the available conversation, "
                     "business context, or calendar does not support a confident answer, output "
-                    "exactly [[HANDOFF: concise reason]] instead of a customer-facing holding message."
+                    "exactly [[HANDOFF: missing_item=stable short key; question=one precise question for the owner; "
+                    "scope=thread or account]] instead of a customer-facing holding message. Ask for one missing "
+                    "item only. Use account scope only for durable guidance that applies to this SMS line."
+                )
+            known_information = resolved_information_context(db, thread)
+            if known_information:
+                instructions += (
+                    "\n\nAlready resolved information for this exact conversation or SMS account is authoritative "
+                    "for avoiding repeat handoffs. Do not request any of these items again:\n" + known_information
                 )
             outbound_instruction_reference = instructions
 
@@ -8943,11 +9218,7 @@ def run_sms_reply_logic(
     duplicate_unchanged_state = identical_ai_reply_exists_for_unchanged_state(
         db, thread, assistant_reply,
     )
-    if (
-        not TRAINING_MODE_ENABLED
-        and not draft_only
-        and (duplicate_same_turn or duplicate_unchanged_state)
-    ):
+    if duplicate_same_turn or (not TRAINING_MODE_ENABLED and not draft_only and duplicate_unchanged_state):
         db.add(ThreadEvent(
             id=str(uuid.uuid4()),
             thread_id=thread_id,
@@ -8971,7 +9242,8 @@ def run_sms_reply_logic(
         re.IGNORECASE,
     )
     if catch_up_handoff:
-        reason = (catch_up_handoff.group(1) or "Human guidance requested").strip()
+        handoff = parse_information_handoff(catch_up_handoff.group(1) or "Human guidance requested")
+        reason = handoff["question"]
         thread.state = "needs-review"
         thread.pending_slots = None
         slots_presented = False
@@ -8979,18 +9251,27 @@ def run_sms_reply_logic(
             Message.thread_id == thread.id,
             Message.role == "customer",
         ).order_by(Message.at.desc(), Message.id.desc()).first()
-        db.add(ThreadEvent(
-            id=str(uuid.uuid4()),
-            thread_id=thread.id,
-            type="information-request",
-            agent_id=None,
-            meta=json.dumps({
-                "reason": reason,
-                "status": "pending",
-                "customer_message_id": latest_customer_message.id if latest_customer_message else None,
-            }),
-            at=datetime.utcnow(),
-        ))
+        if not information_request_exists(db, thread, handoff["missing_item"]):
+            db.add(ThreadEvent(
+                id=str(uuid.uuid4()),
+                thread_id=thread.id,
+                type="information-request",
+                agent_id=None,
+                meta=json.dumps({
+                    "reason": reason,
+                    "missing_item": handoff["missing_item"],
+                    "resolution_scope": handoff["resolution_scope"],
+                    "status": "pending",
+                    "customer_message_id": latest_customer_message.id if latest_customer_message else None,
+                }),
+                at=datetime.utcnow(),
+            ))
+        else:
+            db.add(ThreadEvent(
+                id=str(uuid.uuid4()), thread_id=thread.id, type="ai-reply-cancelled", agent_id=None,
+                meta=json.dumps({"reason": "information-item-already-requested-or-resolved", "message_id": latest_customer_message.id if latest_customer_message else None}),
+                at=datetime.utcnow(),
+            ))
     elif TRAINING_MODE_ENABLED or draft_only:
         reply_at_naive = datetime.utcnow()
         draft_message = Message(
@@ -9012,6 +9293,7 @@ def run_sms_reply_logic(
             meta=json.dumps({
                 "message_id": draft_message.id,
                 "customer_message_id": source_message.id if source_message else None,
+                "review_context": bounded_review_context(history_msgs),
                 **({"source": "catch-up"} if draft_only else {}),
             }),
             at=reply_at_naive,
@@ -9070,13 +9352,16 @@ def run_sms_reply_logic(
         if dispatch_sms:
             # Genuine carrier webhooks are dispatched. The internal simulator
             # displays the stored reply and must never send a real SMS.
-            dispatch_result = mobilemessage_service.send_sms(
-                thread.customer_phone,
-                assistant_reply,
-                idempotency_key=system_message.id,
-                account_key=thread.sms_account_key,
-            )
-            delivery_failure = mobilemessage_service.delivery_error(dispatch_result)
+            try:
+                dispatch_result = mobilemessage_service.send_sms(
+                    thread.customer_phone,
+                    assistant_reply,
+                    idempotency_key=system_message.id,
+                    account_key=thread.sms_account_key,
+                )
+                delivery_failure = mobilemessage_service.delivery_error(dispatch_result)
+            except Exception as exc:
+                delivery_failure = f"SMS gateway error: {type(exc).__name__}"
 
         if delivery_failure:
             system_message.role = "draft"
@@ -9089,6 +9374,7 @@ def run_sms_reply_logic(
                 meta=json.dumps({
                     "message_id": system_message.id,
                     "customer_message_id": source_message.id if source_message else None,
+                    "review_context": bounded_review_context(history_msgs),
                     "source": "sms-delivery-failed",
                     "reason": delivery_failure[:500],
                 }),
@@ -11266,6 +11552,21 @@ def _manual_reply_response(message: Message, duplicate: bool = False) -> Dict[st
     }
 
 
+def draft_source_customer_id(db: Session, draft: Message) -> Optional[str]:
+    events = db.query(ThreadEvent).filter(
+        ThreadEvent.thread_id == draft.thread_id,
+        ThreadEvent.type == "draft-created",
+    ).order_by(ThreadEvent.at.desc(), ThreadEvent.id.desc()).all()
+    for event_item in events:
+        try:
+            meta = json.loads(event_item.meta or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if meta.get("message_id") == draft.id:
+            return str(meta.get("customer_message_id") or "") or None
+    return None
+
+
 @app.post("/api/threads/{thread_id}/reply")
 def reply_thread(thread_id: str, payload: ReplyInput, db: Session = Depends(get_db)):
     # Serialise manual gateway dispatches. This closes the race where a frozen
@@ -11328,13 +11629,16 @@ def reply_thread(thread_id: str, payload: ReplyInput, db: Session = Depends(get_
             provider_message_id=request_marker,
             at=now,
         )
-        dispatch_result = mobilemessage_service.send_sms(
-            thread.customer_phone,
-            payload.text,
-            idempotency_key=agent_message.id,
-            account_key=thread.sms_account_key,
-        )
-        delivery_failure = mobilemessage_service.delivery_error(dispatch_result)
+        try:
+            dispatch_result = mobilemessage_service.send_sms(
+                thread.customer_phone,
+                payload.text,
+                idempotency_key=agent_message.id,
+                account_key=thread.sms_account_key,
+            )
+            delivery_failure = mobilemessage_service.delivery_error(dispatch_result)
+        except Exception as exc:
+            delivery_failure = f"SMS gateway error: {type(exc).__name__}"
         if delivery_failure:
             raise HTTPException(status_code=502, detail=f"SMS was not sent. {delivery_failure[:500]}")
 
@@ -11375,6 +11679,10 @@ def respond_to_information_request(
         request_meta = json.loads(request_event.meta or "{}")
     except (TypeError, json.JSONDecodeError):
         request_meta = {}
+    request_meta.setdefault("missing_item", information_item_key(str(request_meta.get("reason") or "Business guidance")))
+    # Legacy handoffs created reusable line guidance. New structured requests
+    # always carry an explicit scope.
+    request_meta.setdefault("resolution_scope", "account")
 
     customer_message = None
     customer_message_id = request_meta.get("customer_message_id")
@@ -11400,7 +11708,7 @@ def respond_to_information_request(
     )
     reply_text = generated["customer_reply"]
     outbound = Message(
-        id=str(uuid.uuid4()),
+        id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"assistant-ui:information-request:{request_event.id}")),
         thread_id=thread.id,
         role="system",
         text=reply_text,
@@ -11415,16 +11723,24 @@ def respond_to_information_request(
         payload.information,
         generated["knowledge_summary"],
         thread.sms_account_key,
+        bounded_review_context([
+            *db.query(Message).filter(Message.thread_id == thread.id).order_by(Message.at.asc(), Message.id.asc()).all(),
+            outbound,
+        ]),
+        str(request_meta.get("resolution_scope") or "thread"),
     )
 
     if not thread.customer_phone.startswith("locanto_"):
-        dispatch_result = mobilemessage_service.send_sms(
-            thread.customer_phone,
-            reply_text,
-            idempotency_key=outbound.id,
-            account_key=thread.sms_account_key,
-        )
-        delivery_failure = mobilemessage_service.delivery_error(dispatch_result)
+        try:
+            dispatch_result = mobilemessage_service.send_sms(
+                thread.customer_phone,
+                reply_text,
+                idempotency_key=outbound.id,
+                account_key=thread.sms_account_key,
+            )
+            delivery_failure = mobilemessage_service.delivery_error(dispatch_result)
+        except Exception as exc:
+            delivery_failure = f"SMS gateway error: {type(exc).__name__}"
         if delivery_failure:
             raise HTTPException(status_code=502, detail=f"SMS was not sent. {delivery_failure[:500]}")
     request_meta.update({
@@ -16448,6 +16764,10 @@ def approve_draft_message(message_id: str, db: Session = Depends(get_db)):
         if suppress_arrival_customer_turn(db, thread):
             db.commit()
             raise HTTPException(status_code=409, detail="Draft send suppressed because the newest customer turn is an arrival.")
+        source_customer_id = draft_source_customer_id(db, msg)
+        newest_customer = latest_customer_message(db, thread.id)
+        if source_customer_id and newest_customer and newest_customer.id != source_customer_id:
+            raise HTTPException(status_code=409, detail="This draft belongs to an older customer turn. Discard it and review the newest messages.")
 
         edited_events = db.query(ThreadEvent).filter(
             ThreadEvent.thread_id == thread.id,
@@ -16884,6 +17204,16 @@ def close_knowledge_curator_after_approved_edit_endpoint(proposal_id: str, paylo
         if not record_id:
             raise ValueError("record_id is required.")
         return {"status": "success", "proposal": close_knowledge_curator_after_approved_edit(proposal_id, record_id)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Knowledge curator proposal not found.")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.delete("/api/settings/knowledge-curator/proposals/{proposal_id}")
+def discard_knowledge_curator_proposal_endpoint(proposal_id: str):
+    try:
+        return {"status": "success", "proposal": discard_knowledge_curator_proposal(proposal_id)}
     except KeyError:
         raise HTTPException(status_code=404, detail="Knowledge curator proposal not found.")
     except ValueError as exc:

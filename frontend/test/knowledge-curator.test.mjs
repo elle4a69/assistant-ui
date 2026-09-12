@@ -113,4 +113,11 @@ test('curator client uses the protected settings API and explicit state transiti
   assert.match(apiSource, /safe_repairs_completed/);
   assert.match(apiSource, /interval_seconds/);
   assert.match(apiSource, /'manual' \| 'automatic'/);
+  assert.match(apiSource, /method: 'DELETE'/);
+  assert.match(apiSource, /lifecycle_events/);
+  assert.match(apiSource, /waiting_review/);
+  assert.match(panelSource, /Discard low-quality item/);
+  assert.match(panelSource, /Chronological customer and agent context/);
+  assert.match(panelSource, /state\.metrics\.actionable/);
+  assert.match(settingsSource, /discardKnowledgeCuratorProposal\(proposal\.id\)/);
 });
