@@ -13,10 +13,15 @@ const { applyVariableTokenAtSelection } = await import(
 );
 
 function target(value, selectionStart, selectionEnd, apply) {
-  return { element: { value, selectionStart, selectionEnd }, apply };
+  return {
+    element: { value, selectionStart: 0, selectionEnd: 0 },
+    apply,
+    selectionStart,
+    selectionEnd,
+  };
 }
 
-test('booking confirmation focus replaces its selection without changing the previous prompt', () => {
+test('booking confirmation replaces its tracked selection without changing the previous prompt', () => {
   let prompt = 'Previous prompt';
   let confirmation = 'Hi selected text!';
   let activeTarget = target(prompt, 8, 8, value => { prompt = value; });
@@ -27,10 +32,12 @@ test('booking confirmation focus replaces its selection without changing the pre
   assert.equal(confirmation, 'Hi {name}!');
   assert.equal(prompt, 'Previous prompt');
   assert.equal(caret, 9);
-  assert.match(settingsSource, /aria-label="Booking SMS confirmation template"[\s\S]*?onFocus=\{rememberVariableTarget\(setSmsTemplate\)\}/);
+  assert.equal(activeTarget.selectionStart, 9);
+  assert.equal(activeTarget.selectionEnd, 9);
+  assert.match(settingsSource, /aria-label="Booking SMS confirmation template"[\s\S]*?onFocus=\{rememberVariableTarget\(setSmsTemplate\)\}[\s\S]*?onSelect=\{rememberVariableTarget\(setSmsTemplate\)\}/);
 });
 
-test('booking reminder focus inserts at its caret without changing the previous prompt', () => {
+test('booking reminder inserts at its tracked caret without changing the previous prompt', () => {
   let prompt = 'Previous prompt';
   let reminder = 'Reminder: tomorrow';
   let activeTarget = target(prompt, 8, 8, value => { prompt = value; });
@@ -41,5 +48,12 @@ test('booking reminder focus inserts at its caret without changing the previous 
   assert.equal(reminder, 'Reminder: {time}tomorrow');
   assert.equal(prompt, 'Previous prompt');
   assert.equal(caret, 16);
-  assert.match(settingsSource, /aria-label="Booking reminder template"[\s\S]*?onFocus=\{rememberVariableTarget\(\(value\) => setBookingReminder\(current => \(\{ \.\.\.current, template: value \}\)\)\)\}/);
+  assert.equal(activeTarget.selectionStart, 16);
+  assert.equal(activeTarget.selectionEnd, 16);
+  assert.match(settingsSource, /aria-label="Booking reminder template"[\s\S]*?onFocus=\{rememberVariableTarget\(\(value\) => setBookingReminder\(current => \(\{ \.\.\.current, template: value \}\)\)\)\}[\s\S]*?onSelect=\{rememberVariableTarget\(\(value\) => setBookingReminder\(current => \(\{ \.\.\.current, template: value \}\)\)\)\}/);
+});
+
+test('existing shared prompt editors continue to track focus and selection', () => {
+  assert.match(settingsSource, /value=\{systemPrompt\}[\s\S]*?onFocus=\{rememberVariableTarget\(setSystemPrompt\)\}[\s\S]*?onSelect=\{rememberVariableTarget\(setSystemPrompt\)\}/);
+  assert.match(settingsSource, /value=\{userPrompt\}[\s\S]*?onFocus=\{rememberVariableTarget\(setUserPrompt\)\}[\s\S]*?onSelect=\{rememberVariableTarget\(setUserPrompt\)\}/);
 });

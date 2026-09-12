@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import KnowledgeCuratorPanel from './KnowledgeCuratorPanel';
 import {
   getSettings,
@@ -514,19 +514,29 @@ export default function SettingsView() {
     setBusinessVariables((current) => current.filter((_, itemIndex) => itemIndex !== index));
   };
 
-  const [variableInsertTarget, setVariableInsertTarget] = useState<VariableInsertTarget | null>(null);
+  const variableInsertTarget = useRef<VariableInsertTarget | null>(null);
 
   const rememberVariableTarget = (apply: (value: string) => void) => (
-    event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>
-  ) => setVariableInsertTarget({ element: event.currentTarget, apply });
+    event: React.SyntheticEvent<HTMLInputElement | HTMLTextAreaElement>
+  ) => {
+    const element = event.currentTarget;
+    const selectionStart = element.selectionStart ?? element.value.length;
+    variableInsertTarget.current = {
+      element,
+      apply,
+      selectionStart,
+      selectionEnd: element.selectionEnd ?? selectionStart,
+    };
+  };
 
   const insertVariableToken = (token: string) => {
-    if (!variableInsertTarget) {
+    const target = variableInsertTarget.current;
+    if (!target) {
       triggerBanner('error', 'Tap in a prompt or text field first, then tap the variable.');
       return;
     }
-    const { element } = variableInsertTarget;
-    const nextCaret = applyVariableTokenAtSelection(variableInsertTarget, token);
+    const { element } = target;
+    const nextCaret = applyVariableTokenAtSelection(target, token);
     setCopiedVariableToken(token);
     window.setTimeout(() => setCopiedVariableToken(null), 1800);
     window.requestAnimationFrame(() => {
@@ -1844,6 +1854,7 @@ export default function SettingsView() {
                         <textarea
                           value={profile.userPrompt}
                           onFocus={rememberVariableTarget((value) => updateLineProfile(key, 'userPrompt', value))}
+                          onSelect={rememberVariableTarget((value) => updateLineProfile(key, 'userPrompt', value))}
                           onChange={(event) => updateLineProfile(key, 'userPrompt', event.target.value)}
                           rows={6}
                           placeholder="Leave blank to use the shared user template prompt."
@@ -1891,6 +1902,7 @@ export default function SettingsView() {
                   <textarea
                     value={systemPrompt}
                     onFocus={rememberVariableTarget(setSystemPrompt)}
+                    onSelect={rememberVariableTarget(setSystemPrompt)}
                     onChange={(e) => setSystemPrompt(e.target.value)}
                     rows={8}
                     className="w-full text-xs font-mono bg-slate-900 text-slate-200 border border-slate-805 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"
@@ -1906,6 +1918,7 @@ export default function SettingsView() {
                   <textarea
                     value={userPrompt}
                     onFocus={rememberVariableTarget(setUserPrompt)}
+                    onSelect={rememberVariableTarget(setUserPrompt)}
                     onChange={(e) => setUserPrompt(e.target.value)}
                     rows={4}
                     className="w-full text-xs font-mono bg-slate-900 text-slate-200 border border-slate-805 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"
@@ -2218,6 +2231,7 @@ export default function SettingsView() {
                       aria-label="Booking SMS confirmation template"
                       value={smsTemplate}
                       onFocus={rememberVariableTarget(setSmsTemplate)}
+                      onSelect={rememberVariableTarget(setSmsTemplate)}
                       onChange={(e) => setSmsTemplate(e.target.value)}
                       rows={2}
                       className="flex-1 font-mono text-[11px] p-2.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500"
@@ -2255,6 +2269,7 @@ export default function SettingsView() {
                     aria-label="Booking reminder template"
                     value={bookingReminder.template}
                     onFocus={rememberVariableTarget((value) => setBookingReminder(current => ({ ...current, template: value })))}
+                    onSelect={rememberVariableTarget((value) => setBookingReminder(current => ({ ...current, template: value })))}
                     onChange={event => setBookingReminder(current => ({ ...current, template: event.target.value }))}
                     rows={3}
                     className="w-full font-mono text-[11px] p-2.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500"
