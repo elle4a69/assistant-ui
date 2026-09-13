@@ -207,7 +207,7 @@ def test_coding_dispatch_follows_durable_commit_and_preserves_fallback(queued_ac
         assert payload["immediate_worker_requested_at"]
 
 
-def test_deployment_proposal_stays_pending_until_later_exact_confirmation(queued_actions, monkeypatch):
+def test_deployment_proposal_stays_pending_until_later_affirmative_confirmation(queued_actions, monkeypatch):
     import uuid
 
     main, db, factory = queued_actions
@@ -235,41 +235,38 @@ def test_deployment_proposal_stays_pending_until_later_exact_confirmation(queued
             calls.append(action.id)
 
     monkeypatch.setattr(client, "dispatch_workflow", dispatch)
-    proposed = main._operations_propose_code_deployment(db, task_id, "Checks passed.")
+    proposed = main._operations_propose_code_deployment(db, task_id, "Checks passed.", "proposal-turn")
     action_id = proposed["action_id"]
-    phrase = f"deploy {action_id}"
     assert proposed == {
         "status": "pending_confirmation",
         "action_id": action_id,
         "task_id": task_id,
-        "confirmation_phrase": phrase,
+        "confirmation_phrase": "yes / proceed / go ahead / deploy it",
         "reviewed_commit": "b" * 40,
         "deployment_state": "pending",
         "next_step": (
-            "The owner must type the exact confirmation phrase in a later message to queue this deployment; "
+            "The owner must send a short affirmative confirmation in a later typed message to queue this deployment; "
             "no worker, main change or production release has been started."
         ),
     }
     assert calls == []
     assert db.get(main.OperationsAction, action_id).status == "pending"
 
-    wrong = main._operations_execute_code_deployment(db, action_id, "Deploy it")
-    wrong_case = main._operations_execute_code_deployment(db, action_id, phrase.upper())
+    wrong = main._operations_execute_code_deployment(db, action_id, "Not yet", "later-turn")
     same_turn = main.execute_operations_tool(
-        db, "execute_code_deployment", {"action_id": action_id}, "Checks passed."
+        db, "execute_code_deployment", {"action_id": action_id}, "Proceed", "proposal-turn"
     )
     assert wrong["status"] == "rejected"
-    assert wrong_case["status"] == "rejected"
     assert same_turn["status"] == "rejected"
     assert calls == []
     assert db.get(main.OperationsAction, action_id).status == "pending"
 
-    queued = main._operations_execute_code_deployment(db, action_id, phrase)
+    queued = main._operations_execute_code_deployment(db, action_id, "Go ahead, please.", "confirmation-turn")
     assert queued["status"] == "deployment_queued"
     assert calls == [action_id]
     assert db.get(main.OperationsAction, action_id).status == "queued"
 
-    repeated_execution = main._operations_execute_code_deployment(db, action_id, phrase)
+    repeated_execution = main._operations_execute_code_deployment(db, action_id, "Yes", "another-turn")
     assert repeated_execution["status"] == "already_queued"
     assert repeated_execution["deployment_state"] == "queued"
     assert calls == [action_id]

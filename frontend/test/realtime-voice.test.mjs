@@ -95,6 +95,6 @@ test('Coding Agent and Operations settings share persistent full-duplex voice co
   assert.match(apiSource, /operations-chat\/realtime\/turns/);
   assert.doesNotMatch(settingsSource, /Voice is not added to persistent text history/);
   assert.match(settingsSource, /proposal stays pending and never releases automatically/);
-  assert.match(agentSource, /proposal remains pending until you type its exact confirmation phrase in a later message/);
+  assert.match(agentSource, /proposal remains pending until you reply yes, proceed, go ahead or deploy it in a later typed message/);
   assert.match(agentSource, /release is never automatic/);
 });
