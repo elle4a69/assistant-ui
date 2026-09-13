@@ -16,6 +16,7 @@ os.makedirs(TMP_DIR, exist_ok=True)
 import uuid
 import secrets
 import string
+import unicodedata
 import json
 import shutil
 import logging
@@ -12167,7 +12168,8 @@ def operations_ai_instructions(
                 "The task starts from current main, runs relevant checks, and pushes only a review branch. Check the task "
                 "instead of starting duplicates. After a completed task, inspect its result and code changes, then use "
                 "propose_code_deployment to create one pending deployment proposal. It never releases automatically: "
-                "tell the owner to send the returned exact phrase in a later typed message before the audited GitHub "
+                "tell the owner to send a short affirmative reply such as 'yes', 'proceed', 'go ahead' or 'deploy it' "
+                "in a later typed message before the audited GitHub "
                 "fast-forward, Fly deployment and health check can be queued. "
                 "When the owner asks to cancel a queued task, use cancel_coding_task immediately after confirming it is "
                 "the matching unclaimed task; never cancel a claimed or running task. "
@@ -12188,9 +12190,11 @@ def operations_ai_instructions(
             "current live request clearly asks for implementation; and create non-executing audited proposals. Before "
             "starting coding work, anonymise the engineering defect and never include customer data or message text. "
             "Speech transcription is approximate, so voice can never execute a runtime setting change or production "
-            "deployment. Those protected actions require the owner to type the exact confirmation in the persistent "
+            "deployment. Those protected actions require the owner to type a confirmation in the persistent "
             "conversation. When a tool is needed, call it without a spoken preamble and give one spoken answer after "
-            "the tool results. Use tools sequentially and do not start duplicate work. "
+            "the tool results. Never announce a response label or status word such as 'Answer', 'Response', 'Assistant', "
+            "'Checking', 'Working' or 'Done'; begin directly with the natural answer. Use tools sequentially and do not "
+            "start duplicate work. "
         )
     else:
         capability_rule = (
@@ -12573,8 +12577,8 @@ OPERATIONS_TOOL_SCHEMAS = [
         "name": "propose_code_deployment",
         "description": (
             "Review a completed, committed coding task and create one audited pending production deployment proposal. "
-            "This never queues a worker, changes main or deploys. Return the exact phrase the owner must type in a later "
-            "message to authorize the GitHub-worker fast-forward, Fly deployment and health check."
+            "This never queues a worker, changes main or deploys. Ask the owner for a short affirmative reply in a later "
+            "typed message to authorize the GitHub-worker fast-forward, Fly deployment and health check."
         ),
         "parameters": {
             "type": "object",
@@ -12591,9 +12595,10 @@ OPERATIONS_TOOL_SCHEMAS = [
         "type": "function",
         "name": "execute_code_deployment",
         "description": (
-            "Queue one pending code deployment only when the owner's latest separately typed message exactly matches "
-            "the confirmation phrase returned by its earlier proposal. This is the sole pending-to-queued transition; "
-            "repeat execution is idempotent and never dispatches a second worker."
+            "Queue one pending code deployment only when the owner's latest separately typed message is a short, "
+            "unambiguous affirmative confirmation of its earlier proposal, such as yes, proceed, go ahead or deploy it. "
+            "A proposal and its confirmation can never occur in the same owner turn. This is the sole pending-to-queued "
+            "transition; repeat execution is idempotent and never dispatches a second worker."
         ),
         "parameters": {
             "type": "object",
@@ -14491,7 +14496,12 @@ def _operations_deployment_status(db: Session, limit: int) -> Dict[str, Any]:
     }
 
 
-def _operations_propose_code_deployment(db: Session, task_id: str, reason: str) -> Dict[str, Any]:
+def _operations_propose_code_deployment(
+    db: Session,
+    task_id: str,
+    reason: str,
+    request_id: str = "",
+) -> Dict[str, Any]:
     if not operations_code_access_available():
         return {"status": "rejected", "reason": "The GitHub-hosted coding runner is not available."}
     if not operations_deployment_enabled():
@@ -14522,11 +14532,11 @@ def _operations_propose_code_deployment(db: Session, task_id: str, reason: str) 
                     return {
                         "status": "pending_confirmation",
                         "action_id": candidate.id,
-                        "confirmation_phrase": f"deploy {candidate.id}",
+                        "confirmation_phrase": "yes / proceed / go ahead / deploy it",
                         "reviewed_commit": candidate_payload.get("commit_sha"),
                         "deployment_state": candidate.status,
                         "next_step": (
-                            "The owner must type the exact confirmation phrase in a later message to queue this "
+                            "The owner must send a short affirmative confirmation in a later typed message to queue this "
                             "deployment; no release has been started."
                         ),
                     }
@@ -14557,6 +14567,7 @@ def _operations_propose_code_deployment(db: Session, task_id: str, reason: str) 
                 "verification": task_payload.get("verification"),
                 "change_summary": task_payload.get("change_summary"),
                 "reviewed_at": datetime.utcnow().isoformat() + "Z",
+                "proposal_request_id": str(request_id or "")[:100] or None,
             }),
             reason=reason,
             status="pending",
@@ -14568,30 +14579,62 @@ def _operations_propose_code_deployment(db: Session, task_id: str, reason: str) 
         "status": "pending_confirmation",
         "action_id": action.id,
         "task_id": task_id,
-        "confirmation_phrase": f"deploy {action.id}",
+        "confirmation_phrase": "yes / proceed / go ahead / deploy it",
         "reviewed_commit": task_payload.get("commit_sha"),
         "deployment_state": "pending",
         "next_step": (
-            "The owner must type the exact confirmation phrase in a later message to queue this deployment; "
+            "The owner must send a short affirmative confirmation in a later typed message to queue this deployment; "
             "no worker, main change or production release has been started."
         ),
     }
+
+
+_OPERATIONS_DEPLOYMENT_CONFIRMATIONS = {
+    "approve",
+    "approve it",
+    "approved",
+    "confirm",
+    "confirmed",
+    "deploy",
+    "deploy it",
+    "deploy it please",
+    "do it",
+    "do it please",
+    "go ahead",
+    "go ahead please",
+    "okay",
+    "okay proceed",
+    "ok",
+    "ok proceed",
+    "proceed",
+    "proceed please",
+    "sure",
+    "yes",
+    "yes please",
+    "yeah",
+    "yeah please",
+    "yep",
+    "yep please",
+}
+
+
+def _is_affirmative_deployment_confirmation(message: str, action_id: str) -> bool:
+    """Accept a bounded natural confirmation without weakening action identity."""
+
+    normalized = unicodedata.normalize("NFKC", str(message or "")).casefold().strip()
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized).strip()
+    exact_phrase = re.sub(r"[^a-z0-9]+", " ", f"deploy {action_id}".casefold()).strip()
+    return normalized == exact_phrase or normalized in _OPERATIONS_DEPLOYMENT_CONFIRMATIONS
 
 
 def _operations_execute_code_deployment(
     db: Session,
     action_id: str,
     current_user_message: str,
+    request_id: str = "",
 ) -> Dict[str, Any]:
     if not operations_code_access_available():
         return {"status": "rejected", "reason": "The GitHub-hosted coding runner is not available."}
-    required_phrase = f"deploy {action_id}"
-    if current_user_message.strip() != required_phrase:
-        return {
-            "status": "rejected",
-            "reason": "The owner's latest message did not exactly match the deployment confirmation phrase.",
-            "required_confirmation_phrase": required_phrase,
-        }
     with _operations_code_deployment_lock:
         action = db.query(OperationsAction).filter(
             OperationsAction.id == action_id,
@@ -14607,6 +14650,22 @@ def _operations_execute_code_deployment(
             }
         if not action or action.status != "pending":
             return {"status": "rejected", "reason": "That deployment proposal is unavailable or already handled."}
+        payload = _operations_action_payload(action)
+        current_request_id = str(request_id or "")[:100]
+        if current_request_id and payload.get("proposal_request_id") == current_request_id:
+            return {
+                "status": "rejected",
+                "reason": "Deployment confirmation must arrive in a later typed owner message.",
+            }
+        if not _is_affirmative_deployment_confirmation(current_user_message, action_id):
+            return {
+                "status": "rejected",
+                "reason": (
+                    "The owner's latest message was not a short, unambiguous deployment confirmation. "
+                    "Reply yes, proceed, go ahead or deploy it."
+                ),
+                "accepted_confirmation": "yes / proceed / go ahead / deploy it",
+            }
         other_running = db.query(OperationsAction).filter(
             OperationsAction.action_type == "code_deployment",
             OperationsAction.status.in_(["queued", "running"]),
@@ -14615,7 +14674,6 @@ def _operations_execute_code_deployment(
         if other_running:
             return {"status": "deployment_busy", "reason": "Another deployment is already running."}
         try:
-            payload = _operations_action_payload(action)
             branch = str(payload.get("branch") or "")
             expected_commit = str(payload.get("commit_sha") or "").casefold()
             if not branch or not re.fullmatch(r"[0-9a-f]{40}", expected_commit):
@@ -14679,6 +14737,7 @@ def execute_operations_tool(
     tool_name: str,
     arguments: Dict[str, Any],
     current_user_message: str,
+    request_id: str = "",
 ) -> Dict[str, Any]:
     """Execute only explicitly allowlisted Operations AI tools."""
     if tool_name == "inspect_system_status":
@@ -14797,12 +14856,14 @@ def execute_operations_tool(
             db,
             str(arguments.get("task_id", "")).strip(),
             str(arguments.get("reason", "")),
+            request_id,
         )
     if tool_name == "execute_code_deployment":
         return _operations_execute_code_deployment(
             db,
             str(arguments.get("action_id", "")).strip(),
             current_user_message,
+            request_id,
         )
     if tool_name == "propose_runtime_change":
         action_type = str(arguments.get("action", ""))
@@ -15822,7 +15883,7 @@ def _agent_execute_action(
                     lock_timeout_seconds=1,
                 )
             else:
-                result = execute_operations_tool(db, tool_name, tool_arguments, objective)
+                result = execute_operations_tool(db, tool_name, tool_arguments, objective, run_id)
         finally:
             with contextlib.suppress(Exception):
                 db.close()
@@ -16356,7 +16417,7 @@ def send_operations_chat_message(payload: OperationsChatInput, db: Session = Dep
                     arguments = json.loads(item.arguments or "{}")
                 except (TypeError, json.JSONDecodeError):
                     arguments = {}
-                result = execute_operations_tool(db, item.name, arguments, content)
+                result = execute_operations_tool(db, item.name, arguments, content, str(user_message.id))
                 model_input.append({
                     "type": "function_call_output",
                     "call_id": item.call_id,
@@ -16372,6 +16433,11 @@ def send_operations_chat_message(payload: OperationsChatInput, db: Session = Dep
             )
     except Exception as exc:
         print(f"Operations AI request failed: {type(exc).__name__}")
+        if is_openai_quota_exhausted(exc):
+            raise HTTPException(
+                status_code=402,
+                detail="OpenAI API credits or billing must be restored before the Operations AI can respond.",
+            ) from exc
         raise HTTPException(status_code=502, detail="The operations AI could not answer right now.") from exc
     if not reply:
         raise HTTPException(status_code=502, detail="The operations AI returned an empty answer.")

@@ -142,7 +142,28 @@ def test_operations_chat_instructions_start_a_task_from_an_owner_described_fault
         if item.get("name") in {"propose_code_deployment", "execute_code_deployment"}
     }
     assert "never queues a worker, changes main or deploys" in deployment_tools["propose_code_deployment"]
-    assert "latest separately typed message" in deployment_tools["execute_code_deployment"]
+    assert "short, unambiguous affirmative confirmation" in deployment_tools["execute_code_deployment"]
+    assert "same owner turn" in deployment_tools["execute_code_deployment"]
+
+
+def test_operations_chat_reports_exhausted_api_credits_clearly(monkeypatch):
+    class QuotaError(Exception):
+        code = "insufficient_quota"
+        body = {"error": {"code": "insufficient_quota"}}
+
+    class FailingResponses:
+        def create(self, **_kwargs):
+            raise QuotaError()
+
+    monkeypatch.setattr(main, "openai_client", type("Client", (), {"responses": FailingResponses()})())
+    db = make_db()
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        main.send_operations_chat_message(OperationsChatInput(message="Check the system"), db)
+
+    assert exc_info.value.status_code == 402
+    assert "credits or billing must be restored" in exc_info.value.detail
+    db.close()
 
 
 def test_operations_runtime_change_requires_exact_separate_confirmation(tmp_path, monkeypatch):
@@ -309,6 +330,10 @@ def test_completed_code_deployment_requires_later_owner_confirmation(monkeypatch
     monkeypatch.setattr(main, "AUTH_PASSWORD", "configured-admin-password")
     monkeypatch.setenv("OPS_AGENT_CODE_MODE", "github")
     monkeypatch.setenv("OPS_AGENT_ALLOW_DEPLOY", "true")
+    monkeypatch.setattr(main, "_operations_request_immediate_worker", lambda: {
+        "worker_request_status": "requested",
+        "worker_request_message": "The deployment worker was requested.",
+    })
     db = make_db()
     task = main.OperationsAction(
         action_type="coding_task",
@@ -325,6 +350,7 @@ def test_completed_code_deployment_requires_later_owner_confirmation(monkeypatch
         "propose_code_deployment",
         {"task_id": task.id, "reason": "The implementation and focused checks passed."},
         "Deploy it",
+        "proposal-turn",
     )
     second_task = main.OperationsAction(
         action_type="coding_task",
@@ -342,14 +368,54 @@ def test_completed_code_deployment_requires_later_owner_confirmation(monkeypatch
         "Deploy the second one",
     )
     assert proposed["status"] == "pending_confirmation"
-    assert proposed["confirmation_phrase"] == f'deploy {proposed["action_id"]}'
+    assert proposed["confirmation_phrase"] == "yes / proceed / go ahead / deploy it"
     assert proposed["reviewed_commit"] == "b" * 40
-    assert "later message" in proposed["next_step"]
+    assert "later typed message" in proposed["next_step"]
     assert busy["status"] == "deployment_busy"
     assert busy["action_id"] == proposed["action_id"]
     deployment = db.query(main.OperationsAction).filter(main.OperationsAction.id == proposed["action_id"]).one()
     assert deployment.status == "pending"
+    same_turn = main.execute_operations_tool(
+        db,
+        "execute_code_deployment",
+        {"action_id": proposed["action_id"]},
+        "Proceed",
+        "proposal-turn",
+    )
+    ambiguous = main.execute_operations_tool(
+        db,
+        "execute_code_deployment",
+        {"action_id": proposed["action_id"]},
+        "Can you explain what will happen?",
+        "later-question-turn",
+    )
+    confirmed = main.execute_operations_tool(
+        db,
+        "execute_code_deployment",
+        {"action_id": proposed["action_id"]},
+        "Proceed, please.",
+        "later-confirmation-turn",
+    )
+    assert same_turn["status"] == "rejected"
+    assert "later typed owner message" in same_turn["reason"]
+    assert ambiguous["status"] == "rejected"
+    assert confirmed["status"] == "deployment_queued"
+    assert deployment.status == "queued"
     db.close()
+
+
+@pytest.mark.parametrize("message", [
+    "yes", "Yes, please.", "PROCEED", "go ahead", "Deploy it!", "approved", "okay",
+])
+def test_natural_deployment_confirmation_phrases(message):
+    assert main._is_affirmative_deployment_confirmation(message, "action-123") is True
+
+
+@pytest.mark.parametrize("message", [
+    "no", "not yet", "what will happen?", "proceed with the explanation", "maybe", "cancel it",
+])
+def test_ambiguous_or_negative_deployment_messages_are_not_confirmation(message):
+    assert main._is_affirmative_deployment_confirmation(message, "action-123") is False
 
 
 def test_completed_github_run_becomes_reviewable_task(monkeypatch):
@@ -846,6 +912,8 @@ def test_realtime_session_uses_server_key_and_current_voice_model(monkeypatch):
     assert "execute_runtime_change" not in main.OPERATIONS_VOICE_TOOL_NAMES
     assert b'Check the earlier repair' in request.data
     assert b'voice exchange is saved' in request.data
+    assert b"Never announce a response label" in request.data
+    assert b"'Answer'" in request.data
     assert b'protected-test-key' not in request.data
     assert captured["timeout"] == 20
 
