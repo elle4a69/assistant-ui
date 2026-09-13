@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timedelta
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -240,6 +241,124 @@ def test_catch_up_endpoint_sends_one_reply_for_recent_message(monkeypatch):
         "outcome": "complete",
         "remaining": 0,
     }
+    db.close()
+
+
+def test_catch_up_does_not_recover_global_ai_miss_while_ai_remains_disabled(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.utcnow()
+    make_thread(db, "still-disabled", "+3006")
+    add_message(db, "still-disabled-customer", "still-disabled", "customer", now)
+    db.add(ThreadEvent(
+        id="still-disabled-missed",
+        thread_id="still-disabled",
+        type="ai-reply-missed",
+        agent_id=None,
+        meta='{"message_id":"still-disabled-customer","reason":"global-ai-off"}',
+        at=now,
+    ))
+    db.commit()
+    monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", False)
+    monkeypatch.setattr(
+        main,
+        "run_sms_reply_with_catch_up",
+        lambda *_args, **_kwargs: pytest.fail("disabled AI must not recover a missed turn"),
+    )
+
+    with pytest.raises(main.HTTPException) as error:
+        catch_up_missed_messages(db)
+
+    assert error.value.status_code == 409
+    assert db.query(Message).filter_by(thread_id="still-disabled", role="system").count() == 0
+    db.close()
+
+
+def test_catch_up_does_not_duplicate_an_already_answered_missed_turn(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.utcnow()
+    make_thread(db, "already-answered", "+3007")
+    add_message(db, "answered-missed-customer", "already-answered", "customer", now)
+    add_message(db, "existing-answer", "already-answered", "system", now + timedelta(seconds=1))
+    db.add(ThreadEvent(
+        id="answered-missed-event",
+        thread_id="already-answered",
+        type="ai-reply-missed",
+        agent_id=None,
+        meta='{"message_id":"answered-missed-customer","reason":"global-ai-off"}',
+        at=now,
+    ))
+    db.commit()
+    monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
+    monkeypatch.setattr(
+        main,
+        "run_sms_reply_with_catch_up",
+        lambda *_args, **_kwargs: pytest.fail("an answered turn must not be retried"),
+    )
+
+    assert catch_up_missed_messages(db) == {
+        "processed": False,
+        "outcome": "complete",
+        "remaining": 0,
+    }
+    assert db.query(Message).filter_by(thread_id="already-answered").count() == 2
+    db.close()
+
+
+@pytest.mark.parametrize("with_event", [False, True])
+def test_catch_up_permanently_excludes_arrival_turns(monkeypatch, with_event):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.utcnow()
+    make_thread(db, "arrival-catch-up", "+3008")
+    add_message(db, "arrival-fragment-one", "arrival-catch-up", "customer", now)
+    db.get(Message, "arrival-fragment-one").text = "Hello"
+    add_message(
+        db, "arrival-fragment-two", "arrival-catch-up", "customer",
+        now + timedelta(seconds=1),
+    )
+    db.get(Message, "arrival-fragment-two").text = (
+        "A normal-looking follow-up" if with_event else "Outside, which door should I use?"
+    )
+    db.add(ThreadEvent(
+        id="arrival-catch-up-missed",
+        thread_id="arrival-catch-up",
+        type="ai-reply-missed",
+        agent_id=None,
+        meta='{"message_id":"arrival-fragment-two","reason":"global-ai-off"}',
+        at=now + timedelta(seconds=1),
+    ))
+    if with_event:
+        db.add(ThreadEvent(
+            id="arrival-link-signal",
+            thread_id="arrival-catch-up",
+            type="customer-arrived",
+            agent_id=None,
+            meta='{"arrival_session_id":"arrival-session","detection_method":"arrival-link"}',
+            at=now + timedelta(seconds=2),
+        ))
+    db.commit()
+    monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
+    monkeypatch.setattr(
+        main,
+        "run_sms_reply_with_catch_up",
+        lambda *_args, **_kwargs: pytest.fail("arrival turns must never reach AI catch-up"),
+    )
+
+    for _ in range(2):
+        assert catch_up_missed_messages(db) == {
+            "processed": False,
+            "outcome": "complete",
+            "remaining": 0,
+        }
+    assert db.query(Message).filter(
+        Message.thread_id == "arrival-catch-up",
+        Message.role.in_(["agent", "system", "draft"]),
+    ).count() == 0
     db.close()
 
 

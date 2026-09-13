@@ -7418,6 +7418,49 @@ def newest_customer_turn(db: Session, thread_id: str) -> tuple[Optional[Message]
     return messages[newest_index], fragments
 
 
+def customer_turn_has_arrival_signal(
+    db: Session,
+    thread_id: str,
+    expected_message_id: Optional[str] = None,
+) -> bool:
+    """Recognize text or durable arrival signals attached to the current turn."""
+    newest, fragments = newest_customer_turn(db, thread_id)
+    if (
+        not newest
+        or not fragments
+        or (expected_message_id is not None and newest.id != expected_message_id)
+    ):
+        return False
+
+    combined_text = "\n".join(
+        fragment.text.strip() for fragment in fragments if fragment.text.strip()
+    )
+    if is_clear_customer_arrival(combined_text):
+        return True
+
+    fragment_ids = {fragment.id for fragment in fragments}
+    turn_started_at = fragments[0].at
+    arrival_events = db.query(ThreadEvent).filter(
+        ThreadEvent.thread_id == thread_id,
+        ThreadEvent.type.in_(["customer-arrived", ARRIVAL_SUPPRESSION_EVENT_TYPE]),
+        ThreadEvent.at >= turn_started_at,
+    ).all()
+    for event in arrival_events:
+        try:
+            meta = json.loads(event.meta or "{}")
+        except (TypeError, json.JSONDecodeError):
+            meta = {}
+        if event.type == "customer-arrived":
+            source_message_id = meta.get("source_message_id")
+            if source_message_id is None or source_message_id in fragment_ids:
+                return True
+        elif fragment_ids.intersection(meta.get("fragment_message_ids") or []):
+            return True
+        elif meta.get("source_message_id") in fragment_ids:
+            return True
+    return False
+
+
 def suppress_arrival_customer_turn(db: Session, thread: Thread) -> bool:
     """Persist and enforce the highest-precedence, turn-scoped silence decision.
 
@@ -7431,7 +7474,7 @@ def suppress_arrival_customer_turn(db: Session, thread: Thread) -> bool:
         return False
     combined_text = "\n".join(fragment.text.strip() for fragment in fragments if fragment.text.strip())
     if not is_clear_customer_arrival(combined_text):
-        return False
+        return customer_turn_has_arrival_signal(db, thread.id, newest.id)
 
     existing = db.query(ThreadEvent).filter(
         ThreadEvent.thread_id == thread.id,
@@ -9483,7 +9526,12 @@ def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
     settling_cutoff = datetime.utcnow() - timedelta(minutes=3)
     candidates = []
     for thread, latest in rows:
-        if is_contact_blocked(db, thread.sms_account_key, thread.customer_phone):
+        if (
+            is_contact_blocked(db, thread.sms_account_key, thread.customer_phone)
+            or not account_allows_conversational_ai(thread.sms_account_key)
+            or automatic_customer_turn_already_handled(db, latest)
+            or customer_turn_has_arrival_signal(db, thread.id, latest.id)
+        ):
             continue
         # Do not turn historical inbound messages into fresh catch-up work.
         if latest.at < catch_up_after:
@@ -10558,6 +10606,7 @@ def newest_eligible_customer_turn(
         or (thread.state == "taken-over" and has_active_explicit_takeover(db, thread_id))
         or human_replied_after(db, thread_id, customer_message.at)
         or automatic_customer_turn_already_handled(db, customer_message)
+        or customer_turn_has_arrival_signal(db, thread_id, customer_message.id)
     ):
         return None
     return customer_message
@@ -10626,6 +10675,11 @@ def run_sms_reply_with_catch_up(
             ),
         ).order_by(Message.at.desc(), Message.id.desc()).first()
         if current_source and current_source.id in attempted_message_ids:
+            return result
+
+        thread = db.query(Thread).filter(Thread.id == thread_id).first()
+        if thread and suppress_arrival_customer_turn(db, thread):
+            db.commit()
             return result
 
         eligible_before = newest_eligible_customer_turn(db, thread_id)
