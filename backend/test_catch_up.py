@@ -320,6 +320,111 @@ def test_historical_global_ai_off_fragments_replay_newest_combined_turn_once(mon
     db.close()
 
 
+def test_historical_generation_failure_replays_latest_turn_once_with_full_context(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.utcnow()
+    failed_at = now - timedelta(days=30)
+    make_thread(db, "historical-failure", "+3010", state="needs-review")
+    add_message(db, "earlier-customer", "historical-failure", "customer", failed_at)
+    add_message(
+        db, "latest-customer", "historical-failure", "customer",
+        failed_at + timedelta(seconds=1),
+    )
+    db.get(Message, "earlier-customer").text = "Could I book tomorrow"
+    db.get(Message, "latest-customer").text = "after lunch?"
+    db.add(ThreadEvent(
+        id="historical-generation-failure",
+        thread_id="historical-failure",
+        type="ai-reply-failed",
+        agent_id=None,
+        meta=json.dumps({
+            "message_id": "latest-customer",
+            "reason": "AI response unavailable; nothing was created or sent",
+        }),
+        at=failed_at + timedelta(seconds=2),
+    ))
+    db.commit()
+
+    calls = []
+
+    def reply_once(reply_db, thread_id, body, provider_message_id, received_at, **_options):
+        history = reply_db.query(Message).filter_by(thread_id=thread_id).order_by(
+            Message.at.asc(), Message.id.asc(),
+        ).all()
+        assert main.current_customer_burst(history, body) == (
+            "Could I book tomorrow\nafter lunch?"
+        )
+        calls.append((thread_id, body, provider_message_id, received_at))
+        reply_db.add(Message(
+            id="recovered-failure-reply", thread_id=thread_id,
+            role="system", text="Yes, we can help.", at=now,
+        ))
+        reply_db.add(ThreadEvent(
+            id="recovered-failure-event", thread_id=thread_id,
+            type="auto-reply-sent", agent_id=None,
+            meta=json.dumps({"source_message_id": "latest-customer"}), at=now,
+        ))
+        reply_db.commit()
+        return False, False
+
+    monkeypatch.setattr(main, "run_sms_reply_logic", reply_once)
+    monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
+    monkeypatch.setattr(main, "load_message_ui_settings", lambda: {
+        "showMessageAvatars": True, "catchUpLookbackDays": 1,
+    })
+
+    assert catch_up_missed_messages(db) == {
+        "processed": True, "threadId": "historical-failure",
+        "outcome": "sent", "remaining": 0,
+    }
+    assert calls == [(
+        "historical-failure", "after lunch?", "catch-up",
+        failed_at + timedelta(seconds=1),
+    )]
+    assert catch_up_missed_messages(db) == {
+        "processed": False, "outcome": "complete", "remaining": 0,
+    }
+    assert len(calls) == 1
+    db.close()
+
+
+def test_catch_up_skips_active_and_already_attempted_recovery_work(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.utcnow() - timedelta(days=5)
+    for suffix in ("active", "attempted"):
+        make_thread(db, suffix, f"+302{int(suffix == 'attempted')}", state="needs-review")
+        add_message(db, f"{suffix}-customer", suffix, "customer", now)
+        db.add(ThreadEvent(
+            id=f"{suffix}-failure", thread_id=suffix, type="ai-reply-failed",
+            agent_id=None,
+            meta=json.dumps({
+                "message_id": f"{suffix}-customer",
+                "reason": "AI response unavailable; nothing was created or sent",
+            }),
+            at=now + timedelta(seconds=1),
+        ))
+    db.add(ThreadEvent(
+        id="attempted-recovery", thread_id="attempted",
+        type=main.AI_REPLY_RECOVERY_ATTEMPTED_EVENT_TYPE, agent_id=None,
+        meta=json.dumps({"customer_message_id": "attempted-customer"}),
+        at=now + timedelta(seconds=2),
+    ))
+    db.commit()
+    monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
+
+    lock = main.SMS_REPLY_THREAD_LOCKS["active"]
+    lock.acquire()
+    try:
+        assert find_oldest_catch_up_candidate(db) is None
+    finally:
+        lock.release()
+    db.close()
+
+
 def test_catch_up_does_not_recover_global_ai_miss_while_ai_remains_disabled(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

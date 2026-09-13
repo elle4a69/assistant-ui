@@ -7442,7 +7442,11 @@ def customer_turn_has_arrival_signal(
     turn_started_at = fragments[0].at
     arrival_events = db.query(ThreadEvent).filter(
         ThreadEvent.thread_id == thread_id,
-        ThreadEvent.type.in_(["customer-arrived", ARRIVAL_SUPPRESSION_EVENT_TYPE]),
+        ThreadEvent.type.in_([
+            "customer-arrived",
+            "customer-arrival-acknowledged",
+            ARRIVAL_SUPPRESSION_EVENT_TYPE,
+        ]),
         ThreadEvent.at >= turn_started_at,
     ).all()
     for event in arrival_events:
@@ -7450,7 +7454,7 @@ def customer_turn_has_arrival_signal(
             meta = json.loads(event.meta or "{}")
         except (TypeError, json.JSONDecodeError):
             meta = {}
-        if event.type == "customer-arrived":
+        if event.type in {"customer-arrived", "customer-arrival-acknowledged"}:
             source_message_id = meta.get("source_message_id")
             if source_message_id is None or source_message_id in fragment_ids:
                 return True
@@ -9467,8 +9471,21 @@ def has_active_explicit_takeover(db: Session, thread_id: str) -> bool:
     return bool(latest_control and latest_control.type == "takeover")
 
 
+AI_REPLY_RECOVERY_ATTEMPTED_EVENT_TYPE = "ai-reply-recovery-attempted"
+AI_RESPONSE_UNAVAILABLE_REASON = "AI response unavailable; nothing was created or sent"
+
+
+def is_recoverable_ai_reply_failure(meta: Dict[str, Any]) -> bool:
+    """Retry unavailable generation, but never a rejected unsafe response."""
+    reason = str(meta.get("reason") or "")
+    return (
+        reason == AI_RESPONSE_UNAVAILABLE_REASON
+        or reason.startswith("Automatic reply failed safely:")
+    )
+
+
 def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
-    """Return unanswered recent turns plus durable global-AI-off misses."""
+    """Return each thread's latest safe unresolved turn, including durable failures."""
     ranked_messages = db.query(
         Message.id.label("message_id"),
         Message.thread_id.label("thread_id"),
@@ -9487,7 +9504,7 @@ def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
         ranked_messages.c.row_number == 1,
         Message.role == "customer",
         Thread.auto_reply_enabled.is_(True),
-        Thread.state.in_(["auto-reply", "resolved", "taken-over"]),
+        Thread.state.in_(["auto-reply", "resolved", "taken-over", "needs-review"]),
     ).all()
     if not rows:
         return []
@@ -9498,12 +9515,16 @@ def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
         ThreadEvent.type.in_([
             "takeover",
             "ai-reply-missed",
+            "ai-reply-failed",
+            AI_REPLY_RECOVERY_ATTEMPTED_EVENT_TYPE,
             *TAKEOVER_RELEASE_EVENT_TYPES,
         ]),
     ).all()
     latest_control_events: Dict[str, ThreadEvent] = {}
     cleared_events: Dict[str, List[datetime]] = {}
     explicitly_missed: set[str] = set()
+    explicitly_failed: set[str] = set()
+    recovery_attempted: set[str] = set()
     for event_item in events:
         if event_item.type == "takeover" or event_item.type in TAKEOVER_RELEASE_EVENT_TYPES:
             current = latest_control_events.get(event_item.thread_id)
@@ -9519,6 +9540,22 @@ def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
             message_id = missed_meta.get("message_id")
             if message_id and missed_meta.get("reason") == "global-ai-off":
                 explicitly_missed.add(message_id)
+        elif event_item.type == "ai-reply-failed":
+            try:
+                failed_meta = json.loads(event_item.meta or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            message_id = failed_meta.get("message_id")
+            if message_id and is_recoverable_ai_reply_failure(failed_meta):
+                explicitly_failed.add(message_id)
+        elif event_item.type == AI_REPLY_RECOVERY_ATTEMPTED_EVENT_TYPE:
+            try:
+                recovery_meta = json.loads(event_item.meta or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            message_id = recovery_meta.get("customer_message_id")
+            if message_id:
+                recovery_attempted.add(message_id)
 
     catch_up_after = datetime.utcnow() - timedelta(
         days=load_message_ui_settings()["catchUpLookbackDays"]
@@ -9526,19 +9563,29 @@ def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
     settling_cutoff = datetime.utcnow() - timedelta(minutes=3)
     candidates = []
     for thread, latest in rows:
+        recoverable_failure = latest.id in explicitly_failed and latest.id not in recovery_attempted
         if (
             is_contact_blocked(db, thread.sms_account_key, thread.customer_phone)
             or not account_allows_conversational_ai(thread.sms_account_key)
-            or automatic_customer_turn_already_handled(db, latest)
+            or automatic_customer_turn_already_handled(
+                db, latest, allow_recoverable_failure=recoverable_failure,
+            )
             or customer_turn_has_arrival_signal(db, thread.id, latest.id)
+            or SMS_REPLY_THREAD_LOCKS[thread.id].locked()
         ):
+            continue
+        if thread.state == "needs-review" and not recoverable_failure:
             continue
         # The lookback limits discovery of otherwise-unmarked unanswered turns.
         # A global-AI-off event is a durable replay request, so it must survive
         # settings-window changes and deployments until that exact turn reaches
         # a terminal reply/review path. Only the newest message can own the
         # combined consecutive customer burst.
-        if latest.at < catch_up_after and latest.id not in explicitly_missed:
+        if (
+            latest.at < catch_up_after
+            and latest.id not in explicitly_missed
+            and not recoverable_failure
+        ):
             continue
         # A taken-over state is genuine only when an operator explicitly used
         # Take over. Draft approval/discard/cleanup historically set the same
@@ -10563,6 +10610,7 @@ SMS_REPLY_THREAD_LOCKS: Dict[str, threading.Lock] = defaultdict(threading.Lock)
 def automatic_customer_turn_already_handled(
     db: Session,
     customer_message: Message,
+    allow_recoverable_failure: bool = False,
 ) -> bool:
     """Keep duplicate queued jobs from retrying a turn that reached a terminal path."""
     later_reply = db.query(Message.id).filter(
@@ -10578,12 +10626,19 @@ def automatic_customer_turn_already_handled(
         ThreadEvent.type.in_([
             "ai-reply-failed", "information-request", "draft-created", "auto-reply-sent",
             "booking_decision", ARRIVAL_SUPPRESSION_EVENT_TYPE,
+            AI_REPLY_RECOVERY_ATTEMPTED_EVENT_TYPE,
         ]),
     ).all()
     for event_item in terminal_events:
         try:
             meta = json.loads(event_item.meta or "{}")
         except (TypeError, json.JSONDecodeError):
+            continue
+        if (
+            event_item.type == "ai-reply-failed"
+            and allow_recoverable_failure
+            and is_recoverable_ai_reply_failure(meta)
+        ):
             continue
         if customer_message.id in {
             meta.get("message_id"), meta.get("customer_message_id"), meta.get("source_message_id"),
@@ -10595,6 +10650,7 @@ def automatic_customer_turn_already_handled(
 def newest_eligible_customer_turn(
     db: Session,
     thread_id: str,
+    allow_recoverable_failure: bool = False,
 ) -> Optional[Message]:
     """Return the current unresolved turn only while automatic handling is still safe."""
     db.expire_all()
@@ -10609,7 +10665,10 @@ def newest_eligible_customer_turn(
         or not account_allows_conversational_ai(thread.sms_account_key)
         or (thread.state == "taken-over" and has_active_explicit_takeover(db, thread_id))
         or human_replied_after(db, thread_id, customer_message.at)
-        or automatic_customer_turn_already_handled(db, customer_message)
+        or automatic_customer_turn_already_handled(
+            db, customer_message,
+            allow_recoverable_failure=allow_recoverable_failure,
+        )
         or customer_turn_has_arrival_signal(db, thread_id, customer_message.id)
     ):
         return None
@@ -10657,6 +10716,7 @@ def run_sms_reply_with_catch_up(
     provider_message_id: str,
     received_at_naive: datetime,
     catch_exceptions: bool = True,
+    retry_recoverable_failure: bool = False,
     **reply_options: Any,
 ) -> tuple[bool, bool]:
     """Follow superseded work to the newest safe turn once, under the thread lock."""
@@ -10686,9 +10746,15 @@ def run_sms_reply_with_catch_up(
             db.commit()
             return result
 
-        eligible_before = newest_eligible_customer_turn(db, thread_id)
+        eligible_before = newest_eligible_customer_turn(
+            db, thread_id,
+            allow_recoverable_failure=retry_recoverable_failure,
+        )
         if current_source and eligible_before and current_source.id == eligible_before.id:
-            if automatic_customer_turn_already_handled(db, current_source):
+            if automatic_customer_turn_already_handled(
+                db, current_source,
+                allow_recoverable_failure=retry_recoverable_failure,
+            ):
                 return result
         elif not eligible_before:
             return result
@@ -10707,7 +10773,10 @@ def run_sms_reply_with_catch_up(
         except Exception as exc:
             failed_message_id = current_source.id if current_source else None
             db.rollback()
-            newest_after_error = newest_eligible_customer_turn(db, thread_id)
+            newest_after_error = newest_eligible_customer_turn(
+                db, thread_id,
+                allow_recoverable_failure=retry_recoverable_failure,
+            )
             if newest_after_error and newest_after_error.id != failed_message_id:
                 current_body = newest_after_error.text
                 current_provider_id = newest_after_error.provider_message_id or "catch-up"
@@ -10724,8 +10793,13 @@ def run_sms_reply_with_catch_up(
                 )
             return result
 
-        newest_after = newest_eligible_customer_turn(db, thread_id)
+        newest_after = newest_eligible_customer_turn(
+            db, thread_id,
+            allow_recoverable_failure=retry_recoverable_failure,
+        )
         if newest_after and current_source and newest_after.id == current_source.id:
+            if automatic_customer_turn_already_handled(db, current_source):
+                return result
             mark_automatic_turn_needs_review(
                 db,
                 thread_id,
@@ -11336,9 +11410,19 @@ def catch_up_missed_messages(db: Session = Depends(get_db)):
                 customer_message.provider_message_id or "catch-up",
                 customer_message.at,
                 catch_exceptions=False,
+                retry_recoverable_failure=True,
                 dispatch_sms=True,
                 draft_only=False,
             )
+            db.add(ThreadEvent(
+                id=str(uuid.uuid4()),
+                thread_id=thread_id,
+                type=AI_REPLY_RECOVERY_ATTEMPTED_EVENT_TYPE,
+                agent_id=None,
+                meta=json.dumps({"customer_message_id": customer_message.id}),
+                at=datetime.utcnow(),
+            ))
+            db.commit()
     except Exception as exc:
         db.rollback()
         thread = db.query(Thread).filter(Thread.id == thread_id).first()
