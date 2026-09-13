@@ -1,10 +1,13 @@
+import base64
 import json
 from datetime import datetime, timedelta
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 import main
 from main import Base, Message, ReplyInput, Thread, ThreadEvent, WebhookSMSInput
@@ -133,7 +136,7 @@ def test_fragmented_arrival_with_follow_up_suppresses_ai_delayed_and_retry_paths
     db.close()
 
 
-def test_arrival_blocks_fixed_response_manual_reply_and_existing_draft_send(monkeypatch):
+def test_arrival_blocks_automatic_replies_but_allows_manual_reply(monkeypatch):
     db = make_db()
     thread = add_thread(db, "all-outbound-paths")
     now = datetime.utcnow()
@@ -147,28 +150,99 @@ def test_arrival_blocks_fixed_response_manual_reply_and_existing_draft_send(monk
     )
     db.add_all([arrival, draft])
     db.commit()
+    dispatched = []
     monkeypatch.setattr(
         main.mobilemessage_service,
         "send_sms",
-        lambda *_args, **_kwargs: pytest.fail("no customer-facing path may dispatch"),
+        lambda *args, **kwargs: dispatched.append((args, kwargs)) or {},
     )
+    monkeypatch.setattr(main.mobilemessage_service, "delivery_error", lambda _result: None)
 
     main.send_first_contact_auto_reply(
         db, thread, arrival, {"message": "Fixed hello", "cooldownDays": 30}, True,
     )
-    with pytest.raises(HTTPException) as manual_error:
-        main.reply_thread(thread.id, ReplyInput(agentId="tester", text="Manual reply"), db)
+    manual_reply = main.reply_thread(
+        thread.id,
+        ReplyInput(agentId="tester", text="Manual reply", clientRequestId="arrival-manual-reply"),
+        db,
+    )
     with pytest.raises(HTTPException) as approval_error:
         main.approve_draft_message(draft.id, db)
 
-    assert manual_error.value.status_code == 409
+    assert manual_reply["role"] == "agent"
+    assert manual_reply["text"] == "Manual reply"
+    assert len(dispatched) == 1
+    assert dispatched[0][0][:2] == (thread.customer_phone, "Manual reply")
     assert approval_error.value.status_code == 409
     assert db.get(Message, draft.id).role == "draft"
-    assert len(outbound_messages(db, thread.id)) == 1  # only the pre-existing stale draft
+    assert len(outbound_messages(db, thread.id)) == 2  # the stale draft and manual reply
     assert db.query(ThreadEvent).filter_by(
         thread_id=thread.id, type=main.ARRIVAL_SUPPRESSION_EVENT_TYPE,
     ).count() == 1
     db.close()
+
+
+def test_authenticated_operator_can_send_manual_reply_to_arrival(monkeypatch):
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    testing_session = sessionmaker(bind=engine)
+
+    def override_db():
+        with testing_session() as db:
+            yield db
+
+    main.app.dependency_overrides[main.get_db] = override_db
+    monkeypatch.setattr(main, "AUTH_USERNAME", "arrival-operator")
+    monkeypatch.setattr(main, "AUTH_PASSWORD", "arrival-test-password")
+    dispatched = []
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "send_sms",
+        lambda *args, **kwargs: dispatched.append((args, kwargs)) or {},
+    )
+    monkeypatch.setattr(main.mobilemessage_service, "delivery_error", lambda _result: None)
+
+    try:
+        with testing_session() as db:
+            thread = add_thread(db, "authenticated-arrival")
+            db.add(Message(
+                id="authenticated-arrival-message",
+                thread_id=thread.id,
+                role="customer",
+                text="I'm outside now",
+                at=datetime.utcnow(),
+            ))
+            db.commit()
+            assert main.suppress_arrival_customer_turn(db, thread) is True
+            db.commit()
+
+        credentials = base64.b64encode(
+            b"arrival-operator:arrival-test-password",
+        ).decode()
+        response = TestClient(main.app).post(
+            "/api/threads/authenticated-arrival/reply",
+            headers={"Authorization": f"Basic {credentials}"},
+            json={
+                "agentId": "arrival-operator",
+                "text": "Thanks, I'll let you in.",
+                "clientRequestId": "authenticated-arrival-send",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["text"] == "Thanks, I'll let you in."
+        assert len(dispatched) == 1
+        with testing_session() as db:
+            assert db.query(Message).filter_by(
+                thread_id="authenticated-arrival", role="agent",
+            ).one().text == "Thanks, I'll let you in."
+    finally:
+        main.app.dependency_overrides.clear()
+        engine.dispose()
 
 
 def test_newest_non_arrival_turn_remains_eligible_after_historical_arrival(monkeypatch):

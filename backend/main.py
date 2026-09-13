@@ -11719,9 +11719,6 @@ def reply_thread(thread_id: str, payload: ReplyInput, db: Session = Depends(get_
         thread = db.query(Thread).filter(Thread.id == thread_id).first()
         if not thread:
             raise HTTPException(status_code=404, detail="Thread not found")
-        if suppress_arrival_customer_turn(db, thread):
-            db.commit()
-            raise HTTPException(status_code=409, detail="Reply suppressed because the newest customer turn is an arrival.")
 
         request_marker = f"manual-reply:{payload.clientRequestId}" if payload.clientRequestId else None
         if request_marker:
