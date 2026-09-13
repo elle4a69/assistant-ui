@@ -244,6 +244,82 @@ def test_catch_up_endpoint_sends_one_reply_for_recent_message(monkeypatch):
     db.close()
 
 
+def test_historical_global_ai_off_fragments_replay_newest_combined_turn_once(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.utcnow()
+    missed_at = now - timedelta(days=30)
+    make_thread(db, "historical-miss", "+3009", state="auto-reply")
+    add_message(db, "historical-fragment-one", "historical-miss", "customer", missed_at)
+    add_message(
+        db, "historical-fragment-two", "historical-miss", "customer",
+        missed_at + timedelta(seconds=2),
+    )
+    db.get(Message, "historical-fragment-one").text = "Could I book tomorrow"
+    db.get(Message, "historical-fragment-two").text = "in the afternoon?"
+    db.add_all([
+        ThreadEvent(
+            id="historical-missed-one", thread_id="historical-miss",
+            type="ai-reply-missed", agent_id=None,
+            meta='{"message_id":"historical-fragment-one","reason":"global-ai-off"}',
+            at=missed_at,
+        ),
+        ThreadEvent(
+            id="historical-missed-two", thread_id="historical-miss",
+            type="ai-reply-missed", agent_id=None,
+            meta='{"message_id":"historical-fragment-two","reason":"global-ai-off"}',
+            at=missed_at + timedelta(seconds=2),
+        ),
+    ])
+    db.commit()
+
+    calls = []
+
+    def reply_once(
+        reply_db, thread_id, body, provider_message_id, received_at, **_options,
+    ):
+        history = reply_db.query(Message).filter_by(thread_id=thread_id).order_by(
+            Message.at.asc(), Message.id.asc(),
+        ).all()
+        assert main.current_customer_burst(history, body) == (
+            "Could I book tomorrow\nin the afternoon?"
+        )
+        calls.append((thread_id, body, provider_message_id, received_at))
+        reply_db.add(Message(
+            id="historical-reply", thread_id=thread_id, role="system",
+            text="Combined reply", at=now,
+        ))
+        reply_db.add(ThreadEvent(
+            id="historical-reply-event", thread_id=thread_id,
+            type="auto-reply-sent", agent_id=None,
+            meta=json.dumps({"source_message_id": "historical-fragment-two"}),
+            at=now,
+        ))
+        reply_db.commit()
+        return False, False
+
+    monkeypatch.setattr(main, "run_sms_reply_logic", reply_once)
+    monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
+    monkeypatch.setattr(main, "load_message_ui_settings", lambda: {
+        "showMessageAvatars": True, "catchUpLookbackDays": 1,
+    })
+
+    assert catch_up_missed_messages(db) == {
+        "processed": True, "threadId": "historical-miss",
+        "outcome": "sent", "remaining": 0,
+    }
+    assert calls == [(
+        "historical-miss", "in the afternoon?", "catch-up",
+        missed_at + timedelta(seconds=2),
+    )]
+    assert catch_up_missed_messages(db) == {
+        "processed": False, "outcome": "complete", "remaining": 0,
+    }
+    assert len(calls) == 1
+    db.close()
+
+
 def test_catch_up_does_not_recover_global_ai_miss_while_ai_remains_disabled(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -313,7 +389,7 @@ def test_catch_up_permanently_excludes_arrival_turns(monkeypatch, with_event):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     db = sessionmaker(bind=engine)()
-    now = datetime.utcnow()
+    now = datetime.utcnow() - timedelta(days=30)
     make_thread(db, "arrival-catch-up", "+3008")
     add_message(db, "arrival-fragment-one", "arrival-catch-up", "customer", now)
     db.get(Message, "arrival-fragment-one").text = "Hello"
@@ -343,6 +419,9 @@ def test_catch_up_permanently_excludes_arrival_turns(monkeypatch, with_event):
         ))
     db.commit()
     monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
+    monkeypatch.setattr(main, "load_message_ui_settings", lambda: {
+        "showMessageAvatars": True, "catchUpLookbackDays": 1,
+    })
     monkeypatch.setattr(
         main,
         "run_sms_reply_with_catch_up",

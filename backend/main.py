@@ -9468,7 +9468,7 @@ def has_active_explicit_takeover(db: Session, thread_id: str) -> bool:
 
 
 def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
-    """Return unanswered conversations inside the configured catch-up window."""
+    """Return unanswered recent turns plus durable global-AI-off misses."""
     ranked_messages = db.query(
         Message.id.label("message_id"),
         Message.thread_id.label("thread_id"),
@@ -9517,7 +9517,7 @@ def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
             except (TypeError, json.JSONDecodeError):
                 continue
             message_id = missed_meta.get("message_id")
-            if message_id:
+            if message_id and missed_meta.get("reason") == "global-ai-off":
                 explicitly_missed.add(message_id)
 
     catch_up_after = datetime.utcnow() - timedelta(
@@ -9533,8 +9533,12 @@ def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
             or customer_turn_has_arrival_signal(db, thread.id, latest.id)
         ):
             continue
-        # Do not turn historical inbound messages into fresh catch-up work.
-        if latest.at < catch_up_after:
+        # The lookback limits discovery of otherwise-unmarked unanswered turns.
+        # A global-AI-off event is a durable replay request, so it must survive
+        # settings-window changes and deployments until that exact turn reaches
+        # a terminal reply/review path. Only the newest message can own the
+        # combined consecutive customer burst.
+        if latest.at < catch_up_after and latest.id not in explicitly_missed:
             continue
         # A taken-over state is genuine only when an operator explicitly used
         # Take over. Draft approval/discard/cleanup historically set the same
