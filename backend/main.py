@@ -7993,6 +7993,8 @@ def booking_slots_from_tool_result(result: Dict[str, Any]) -> List[Dict[str, Any
     candidates = result.get("slots")
     if candidates is None and result.get("next_available"):
         candidates = [result["next_available"]]
+    if candidates is None and result.get("available") is True and result.get("exact_slot"):
+        candidates = [result["exact_slot"]]
     if not isinstance(candidates, list):
         return []
     return [
