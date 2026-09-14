@@ -5613,6 +5613,32 @@ def match_qa_rule(message_text: str) -> Optional[str]:
             print(f"Failed to read QA rules: {e}")
     return None
 
+
+ANONYMOUS_IMAGE_REQUEST_REPLY = (
+    "More pics of what you’ll see of me if you’re gonna fuck me.\n"
+    "https://photos.app.goo.gl/psLy5uo9aLgQeF7A9"
+)
+IMAGE_REQUEST_NOUN = r"(?:pics?|pictures?|photos?|images?|gallery)"
+IMAGE_REQUEST_PATTERNS = (
+    rf"\b(?:can|could|would|will|may)\s+(?:i|we|you|u)\s+(?:please\s+)?(?:see|view|get|have|send|show|share)\b.{{0,40}}\b{IMAGE_REQUEST_NOUN}\b",
+    rf"\b(?:do|have)\s+(?:you|u)\s+(?:have|got)\b.{{0,30}}\b{IMAGE_REQUEST_NOUN}\b",
+    rf"\b(?:send|show|share)\s+(?:me|us)\b.{{0,30}}\b{IMAGE_REQUEST_NOUN}\b",
+    rf"\b(?:got|have)\s+(?:any|more|other|new|recent|extra)\s+{IMAGE_REQUEST_NOUN}\b",
+    rf"\b(?:any|more|some|other|new|recent|extra)\s+{IMAGE_REQUEST_NOUN}\b",
+    rf"\b(?:where|how)\b.{{0,30}}\b(?:see|view|find|get)\b.{{0,30}}\b{IMAGE_REQUEST_NOUN}\b",
+    rf"\b{IMAGE_REQUEST_NOUN}\s*(?:please|pls|\?)\s*$",
+    r"\b(?:can|could|may)\s+i\s+see\s+what\s+you\s+look\s+like\b",
+)
+
+
+def match_account_response_rule(account_key: str, message_text: str) -> Optional[str]:
+    """Return a fixed response only for an intent configured on this SMS line."""
+    if account_key != "secondary" or not message_text:
+        return None
+    if any(re.search(pattern, message_text, re.IGNORECASE) for pattern in IMAGE_REQUEST_PATTERNS):
+        return ANONYMOUS_IMAGE_REQUEST_REPLY
+    return None
+
 FIRST_CONTACT_AUTORESPONDER_PATH = os.path.join(DATA_DIR, "first_contact_autoresponder.json")
 FIRST_CONTACT_AUTORESPONDER_DEFAULT = {
     "enabled": False,
@@ -8606,7 +8632,10 @@ def run_sms_reply_logic(
     # Keep response handling fail-closed even before a Q&A or model branch runs.
     # Catch-up calls this function directly, so every path must have a defined
     # reply value for the validation and failure handling below.
-    assistant_reply: Optional[str] = precomputed_reply
+    account_response_rule_reply = match_account_response_rule(
+        thread.sms_account_key, effective_body,
+    )
+    assistant_reply: Optional[str] = account_response_rule_reply or precomputed_reply
     if assistant_reply is None and thread.sms_account_key == "primary":
         assistant_reply = match_qa_rule(effective_body)
     rejected_reply_reason: Optional[str] = None
@@ -9226,16 +9255,21 @@ def run_sms_reply_logic(
         db.commit()
         return booking_confirmed, slots_presented
             
-    assistant_reply = sanitize_outgoing_urls(assistant_reply)
-    assistant_reply = suppress_unrequested_payment_details(
-        assistant_reply or "",
-        effective_body,
-    )
-    assistant_reply = suppress_recently_sent_links(
-        assistant_reply or "",
-        history_msgs,
-        effective_body,
-    )
+    if account_response_rule_reply:
+        # Account-scoped fixed responses are trusted, exact customer-facing copy.
+        # In particular, do not strip their configured link as a repeated URL.
+        assistant_reply = account_response_rule_reply
+    else:
+        assistant_reply = sanitize_outgoing_urls(assistant_reply)
+        assistant_reply = suppress_unrequested_payment_details(
+            assistant_reply or "",
+            effective_body,
+        )
+        assistant_reply = suppress_recently_sent_links(
+            assistant_reply or "",
+            history_msgs,
+            effective_body,
+        )
 
     if not assistant_reply:
         thread.state = "needs-review"
@@ -9266,7 +9300,12 @@ def run_sms_reply_logic(
     duplicate_unchanged_state = identical_ai_reply_exists_for_unchanged_state(
         db, thread, assistant_reply,
     )
-    if duplicate_same_turn or (not TRAINING_MODE_ENABLED and not draft_only and duplicate_unchanged_state):
+    if duplicate_same_turn or (
+        not account_response_rule_reply
+        and not TRAINING_MODE_ENABLED
+        and not draft_only
+        and duplicate_unchanged_state
+    ):
         db.add(ThreadEvent(
             id=str(uuid.uuid4()),
             thread_id=thread_id,
