@@ -782,6 +782,70 @@ def test_assistant_uses_immediate_booking_tool_and_no_form_or_confirmation_tool(
     assert 'assistant_reply = f"All booked for' not in source
 
 
+@pytest.mark.parametrize("account_key", ["primary", "secondary"])
+def test_exact_time_lookup_can_complete_sms_booking(tmp_path, monkeypatch, account_key):
+    service = {"id": "service", "name": "Service", "duration": 30, "price": 100}
+    for key, filename in (("primary", "line_1_services.json"), ("secondary", "line_2_services.json")):
+        (tmp_path / filename).write_text(json.dumps([service] if key == account_key else []), encoding="utf-8")
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "load_working_hours", lambda: [
+        {"day": day, "enabled": True, "open": "00:00", "close": "23:59"}
+        for day in main.DAY_NAMES
+    ])
+    calendar = FakeCalendar()
+    monkeypatch.setattr(main, "calendar_service", calendar)
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
+    start = (current_business_time() + timedelta(days=2)).replace(
+        hour=14, minute=0, second=0, microsecond=0,
+    )
+
+    class ExactSlotSuite:
+        def execute(self, tool_name, arguments):
+            assert tool_name == "check_exact_time"
+            assert arguments == {"service_id": "service", "start_time": start.isoformat()}
+            return {
+                "status": "ok", "service_id": "service", "available": True,
+                "exact_slot": {
+                    "service_id": "service", "start_time": start.isoformat(),
+                    "end_time": (start + timedelta(minutes=30)).isoformat(),
+                },
+                "nearest_before": None, "nearest_after": None,
+            }
+
+    monkeypatch.setattr(main, "get_booking_tool_suite", lambda key: ExactSlotSuite())
+    db = make_db()
+    thread = add_thread(db)
+    thread.sms_account_key = account_key
+    customer = Message(
+        id=f"exact-booking-{account_key}", thread_id=thread.id, role="customer",
+        text="Book Service at 2pm. My name is Example Customer.",
+        provider_message_id=f"exact-provider-{account_key}", at=main.datetime.utcnow(),
+    )
+    db.add(customer)
+    db.commit()
+    client = SequenceClient([
+        FakeResponse(output=[FakeFunctionCall(
+            "check_exact_time", {"service_id": "service", "start_time": start.isoformat()}, "exact-call",
+        )]),
+        FakeResponse(output=[FakeFunctionCall("propose_booking", {
+            "service_id": "service", "start_time": start.isoformat(),
+            "customer_name": "Example Customer", "notes": None,
+        }, "booking-call")]),
+        FakeResponse(output_text="All good, see you then."),
+    ])
+    monkeypatch.setattr(main, "openai_client", client)
+
+    booked, _ = run_sms_reply_logic(
+        db, thread.id, customer.text, customer.provider_message_id,
+        customer.at, dispatch_sms=False,
+    )
+
+    assert booked is True
+    assert len(calendar.created) == 1
+    assert calendar.created[0]["sms_account_key"] == account_key
+    db.close()
+
+
 def test_secondary_confirmation_is_retried_as_a_required_booking_tool_call(tmp_path, monkeypatch):
     service = {"id": "service", "name": "Service", "duration": 30, "price": 100}
     (tmp_path / "services.json").write_text(json.dumps([service]), encoding="utf-8")
