@@ -116,8 +116,14 @@ test('curator client uses the protected settings API and explicit state transiti
   assert.match(apiSource, /method: 'DELETE'/);
   assert.match(apiSource, /lifecycle_events/);
   assert.match(apiSource, /waiting_review/);
-  assert.match(panelSource, /Discard low-quality item/);
+  assert.match(panelSource, /Delete question/);
+  assert.match(panelSource, /Deleting question…/);
+  assert.match(panelSource, /role="status" aria-live="polite"/);
   assert.match(panelSource, /Chronological customer and agent context/);
   assert.match(panelSource, /state\.metrics\.actionable/);
   assert.match(settingsSource, /discardKnowledgeCuratorProposal\(proposal\.id\)/);
+  assert.match(settingsSource, /if \(!window\.confirm\('Delete this Curator question\?/);
+  assert.match(settingsSource, /proposals: current\.proposals\.map/);
+  assert.match(settingsSource, /Curator question could not be deleted\. Nothing changed/);
+  assert.match(settingsSource, /role=\{banner\.type === 'error' \? 'alert' : 'status'\}/);
 });

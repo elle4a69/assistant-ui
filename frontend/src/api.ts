@@ -1077,7 +1077,7 @@ export async function transitionKnowledgeCuratorProposal(id: string, transition:
 
 export async function discardKnowledgeCuratorProposal(id: string): Promise<KnowledgeCuratorProposal> {
   const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator/proposals/${encodeURIComponent(id)}`, { method: 'DELETE' });
-  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Curator item could not be discarded.');
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Curator question could not be deleted. Nothing changed.');
   return (await response.json()).proposal;
 }
 

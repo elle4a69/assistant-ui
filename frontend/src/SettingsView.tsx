@@ -201,6 +201,7 @@ export default function SettingsView() {
   });
   const [runningKnowledgeAudit, setRunningKnowledgeAudit] = useState(false);
   const [updatingCuratorProposalId, setUpdatingCuratorProposalId] = useState<string | null>(null);
+  const [deletingCuratorProposalId, setDeletingCuratorProposalId] = useState<string | null>(null);
   const [knowledgeCuratorLoadStatus, setKnowledgeCuratorLoadStatus] = useState<'loading' | 'ready' | 'error'>('loading');
 
   // Modal states for File Editor & Moderation
@@ -876,17 +877,29 @@ export default function SettingsView() {
   };
 
   const handleDiscardCuratorProposal = async (proposal: KnowledgeCuratorProposal) => {
-    if (!window.confirm('Discard this Curator item and any inactive draft it created? Approved guidance will not be changed.')) return;
+    if (!window.confirm('Delete this Curator question? Any inactive draft it created will also be deleted. Approved guidance will not be changed.')) return;
     setUpdatingCuratorProposalId(proposal.id);
+    setDeletingCuratorProposalId(proposal.id);
     try {
-      await discardKnowledgeCuratorProposal(proposal.id);
-      setLearnedEntries(await listLearnedInformation());
-      await refreshKnowledgeCurator();
-      triggerBanner('success', 'Curator item discarded. No approved guidance was changed.');
+      const deleted = await discardKnowledgeCuratorProposal(proposal.id);
+      setKnowledgeCurator(current => ({
+        ...current,
+        proposals: current.proposals.map(item => item.id === deleted.id ? deleted : item),
+        metrics: {
+          ...current.metrics,
+          waiting_review: Math.max(0, current.metrics.waiting_review - 1),
+          discarded: current.metrics.discarded + 1,
+        },
+      }));
+      if (proposal.draft_entry_id) {
+        setLearnedEntries(current => current.filter(item => item.id !== proposal.draft_entry_id));
+      }
+      triggerBanner('success', 'Curator question deleted. No approved guidance was changed.');
     } catch (err) {
-      triggerBanner('error', err instanceof Error ? err.message : 'The Curator item could not be discarded.');
+      triggerBanner('error', err instanceof Error ? err.message : 'The Curator question could not be deleted. Nothing changed.');
     } finally {
       setUpdatingCuratorProposalId(null);
+      setDeletingCuratorProposalId(null);
     }
   };
 
@@ -1425,6 +1438,8 @@ export default function SettingsView() {
         {/* Banner Alert */}
         {banner && (
           <div
+            role={banner.type === 'error' ? 'alert' : 'status'}
+            aria-live={banner.type === 'error' ? 'assertive' : 'polite'}
             className={`p-3.5 rounded-lg border text-xs font-semibold flex items-center gap-2.5 shadow-sm transition-all duration-355 ${
               banner.type === 'success'
                 ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
@@ -2035,6 +2050,7 @@ export default function SettingsView() {
                   loadStatus={knowledgeCuratorLoadStatus}
                   running={runningKnowledgeAudit}
                   updatingId={updatingCuratorProposalId}
+                  deletingId={deletingCuratorProposalId}
                   lineLabels={{ primary: lineProfiles.primary.displayName || 'Line 1', secondary: lineProfiles.secondary.displayName || 'Line 2' }}
                   editableRecordIds={new Set(learnedEntries.map(entry => entry.id))}
                   onRun={handleRunKnowledgeAudit}

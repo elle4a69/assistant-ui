@@ -596,6 +596,24 @@ def test_discard_removes_only_inactive_curator_draft_and_records_audit(tmp_path,
     assert state["lifecycle_events"][0]["action"] == "discarded"
 
 
+def test_delete_curator_question_endpoint_persists_and_handles_missing_question(tmp_path, monkeypatch):
+    curator_paths(tmp_path, monkeypatch, [record("price", text="The service costs $100.")])
+    proposal = next(item for item in main.run_knowledge_curator()["proposals"] if item["finding_type"] == "literal_dynamic_authority")
+    monkeypatch.setattr(main, "AUTH_PASSWORD", "curator-admin-password")
+    client = TestClient(main.app)
+    expires = int(datetime.now().timestamp()) + 300
+    client.cookies.set(main.AUTH_COOKIE_NAME, main._admin_session_token(expires))
+
+    response = client.delete(f"/api/settings/knowledge-curator/proposals/{proposal['id']}")
+
+    assert response.status_code == 200
+    assert response.json()["proposal"]["status"] == "discarded"
+    state = client.get("/api/settings/knowledge-curator").json()
+    assert state["metrics"]["waiting_review"] == 0
+    assert state["metrics"]["discarded"] == 1
+    assert client.delete("/api/settings/knowledge-curator/proposals/missing-question").status_code == 404
+
+
 def test_stale_unresolved_curator_item_expires_without_changing_approved_knowledge(tmp_path, monkeypatch):
     _, data = curator_paths(tmp_path, monkeypatch, [record("price", text="The service costs $100.")])
     proposal = next(item for item in main.run_knowledge_curator()["proposals"] if item["finding_type"] == "literal_dynamic_authority")

@@ -193,6 +193,7 @@ type Props = {
   loadStatus: 'loading' | 'ready' | 'error';
   running: boolean;
   updatingId: string | null;
+  deletingId: string | null;
   lineLabels: Record<'primary' | 'secondary', string>;
   editableRecordIds: Set<string>;
   onRun: () => void;
@@ -201,7 +202,7 @@ type Props = {
   onEditRecord: (proposalId: string, recordId: string) => void;
 };
 
-export default function KnowledgeCuratorPanel({ state, loadStatus, running, updatingId, lineLabels, editableRecordIds, onRun, onResolve, onDiscard, onEditRecord }: Props) {
+export default function KnowledgeCuratorPanel({ state, loadStatus, running, updatingId, deletingId, lineLabels, editableRecordIds, onRun, onResolve, onDiscard, onEditRecord }: Props) {
   const latest = state.runs[0];
   const findings = state.proposals.filter(item => item.status === 'proposed' || item.status === 'accepted');
 
@@ -240,6 +241,7 @@ export default function KnowledgeCuratorPanel({ state, loadStatus, running, upda
           const copy = CURATOR_FINDING_COPY[proposal.finding_type] || fallbackCopy;
           const records = (proposal.record_previews || []).filter(record => record.reference_status === 'current');
           const busy = updatingId === proposal.id;
+          const deleting = deletingId === proposal.id;
           const changed = proposal.actionable === false;
           const alreadyPrepared = proposal.status === 'accepted';
           return <article key={proposal.id} className="rounded-lg border border-violet-200 bg-white p-3 sm:p-4" aria-labelledby={`curator-finding-${proposal.id}`}>
@@ -284,7 +286,8 @@ export default function KnowledgeCuratorPanel({ state, loadStatus, running, upda
                 </button>)}
                 {busy && <p role="status" className="col-span-full text-xs font-semibold text-violet-800">Saving your choice…</p>}
               </div>}
-            <button type="button" onClick={() => onDiscard(proposal)} disabled={busy} className="mt-3 min-h-11 rounded-lg border border-rose-200 bg-white px-3 py-2 text-xs font-bold text-rose-800 hover:bg-rose-50 disabled:opacity-50">Discard low-quality item</button>
+            <button type="button" onClick={() => onDiscard(proposal)} disabled={busy} aria-label={deleting ? 'Deleting this Curator question' : 'Delete this Curator question'} className="mt-3 min-h-11 rounded-lg border border-rose-200 bg-white px-3 py-2 text-xs font-bold text-rose-800 hover:bg-rose-50 disabled:opacity-50">{deleting ? 'Deleting question…' : 'Delete question'}</button>
+            {deleting && <p role="status" aria-live="polite" className="mt-2 text-xs font-semibold text-rose-800">Deleting this question…</p>}
           </article>;
         })}
       </div>}
