@@ -157,6 +157,8 @@ export default function SettingsView() {
   const [hasGoogleCreds, setHasGoogleCreds] = useState(false);
   const [showMessageAvatars, setShowMessageAvatars] = useState(true);
   const [savingMessageDisplay, setSavingMessageDisplay] = useState(false);
+  const [incomingMessageSoundEnabled, setIncomingMessageSoundEnabled] = useState(false);
+  const [savingIncomingMessageSound, setSavingIncomingMessageSound] = useState(false);
   const [exportingMessages, setExportingMessages] = useState(false);
   const [clearingPendingDrafts, setClearingPendingDrafts] = useState(false);
   const [clearingReviewTags, setClearingReviewTags] = useState(false);
@@ -300,6 +302,7 @@ export default function SettingsView() {
       setUserPrompt(settingsData.userPrompt);
       setHasGoogleCreds(settingsData.hasGoogleCredentials);
       setShowMessageAvatars(settingsData.showMessageAvatars !== false);
+      setIncomingMessageSoundEnabled(settingsData.incomingMessageSoundEnabled === true);
       setCatchUpLookbackDays(settingsData.catchUpLookbackDays ?? 3);
       setSettingsConnectionError(false);
 
@@ -536,6 +539,31 @@ export default function SettingsView() {
       element.focus();
       element.setSelectionRange(nextCaret, nextCaret);
     });
+  };
+
+  const handleIncomingMessageSoundToggle = async () => {
+    const nextValue = !incomingMessageSoundEnabled;
+    if (nextValue) {
+      try {
+        await unlockIncomingAlarmAudio();
+      } catch (error) {
+        console.error(error);
+        triggerBanner('error', 'This browser could not enable audio. Check its sound permissions.');
+        return;
+      }
+    }
+    setIncomingMessageSoundEnabled(nextValue);
+    setSavingIncomingMessageSound(true);
+    try {
+      await updateSettings({ incomingMessageSoundEnabled: nextValue });
+      triggerBanner('success', `Incoming message sound ${nextValue ? 'enabled' : 'disabled'}.`);
+    } catch (error) {
+      console.error(error);
+      setIncomingMessageSoundEnabled(!nextValue);
+      triggerBanner('error', 'Failed to update incoming message sound.');
+    } finally {
+      setSavingIncomingMessageSound(false);
+    }
   };
 
   const handleUnblockContact = async (contact: BlockedContact) => {
@@ -1530,6 +1558,27 @@ export default function SettingsView() {
                   className={`relative h-6 w-11 shrink-0 rounded-full border-none p-0 transition-colors cursor-pointer disabled:opacity-50 ${showMessageAvatars ? 'bg-indigo-600' : 'bg-slate-300'}`}
                 >
                   <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${showMessageAvatars ? 'translate-x-5' : 'translate-x-0'}`} />
+                </button>
+              </div>
+
+              <div className="p-4 flex items-center justify-between gap-4 border-b border-slate-100">
+                <div className="flex items-center gap-3 min-w-0">
+                  <Volume2 className="w-4 h-4 text-indigo-600 shrink-0" />
+                  <div className="min-w-0">
+                    <p id="incoming-message-sound-label" className="text-xs font-bold text-slate-800">Incoming message sound</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Play a short sound when a new inbound SMS arrives while this portal is open.</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={incomingMessageSoundEnabled}
+                  aria-labelledby="incoming-message-sound-label"
+                  disabled={savingIncomingMessageSound}
+                  onClick={handleIncomingMessageSoundToggle}
+                  className={`relative h-6 w-11 shrink-0 rounded-full border-none p-0 transition-colors cursor-pointer disabled:opacity-50 ${incomingMessageSoundEnabled ? 'bg-indigo-600' : 'bg-slate-300'}`}
+                >
+                  <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${incomingMessageSoundEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
                 </button>
               </div>
 

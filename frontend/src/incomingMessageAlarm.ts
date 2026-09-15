@@ -15,6 +15,43 @@ export interface IncomingAlarmSettings {
 let audioContext: AudioContext | null = null;
 let activeSirens: Array<{ stop: () => void }> = [];
 
+export type IncomingSmsSnapshot = Record<string, string>;
+
+export function processIncomingSmsSnapshot(
+  threads: ThreadListItem[],
+  previous: IncomingSmsSnapshot | null,
+): { snapshot: IncomingSmsSnapshot; hasNewInboundMessage: boolean } {
+  // Retain missing threads so a temporarily incomplete poll cannot make an old
+  // customer message look new when that thread returns.
+  const snapshot: IncomingSmsSnapshot = { ...(previous || {}) };
+  let hasNewInboundMessage = false;
+
+  threads.forEach((thread) => {
+    const marker = JSON.stringify([
+      thread.lastMessageAt || '',
+      thread.lastMessageRole || '',
+      thread.lastMessageText || '',
+    ]);
+    if (
+      previous
+      && previous[thread.id] !== undefined
+      && previous[thread.id] !== marker
+      && thread.lastMessageRole === 'customer'
+    ) {
+      hasNewInboundMessage = true;
+    } else if (
+      previous
+      && previous[thread.id] === undefined
+      && thread.lastMessageRole === 'customer'
+    ) {
+      hasNewInboundMessage = true;
+    }
+    snapshot[thread.id] = marker;
+  });
+
+  return { snapshot, hasNewInboundMessage };
+}
+
 export function getIncomingAlarmSettings(): IncomingAlarmSettings {
   const savedVolume = Number.parseInt(localStorage.getItem(VOLUME_KEY) || '65', 10);
   return {
@@ -48,6 +85,30 @@ export async function unlockIncomingAlarmAudio() {
 
 export function getArrivalSoundEnabled(): boolean {
   return getIncomingAlarmSettings().enabled;
+}
+
+export async function playIncomingMessageSound() {
+  const context = getAudioContext();
+  if (context.state === 'suspended') await context.resume();
+
+  const now = context.currentTime;
+  const gain = context.createGain();
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.linearRampToValueAtTime(0.12, now + 0.015);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.36);
+  gain.connect(context.destination);
+
+  const oscillator = context.createOscillator();
+  oscillator.type = 'sine';
+  oscillator.frequency.setValueAtTime(660, now);
+  oscillator.frequency.setValueAtTime(880, now + 0.14);
+  oscillator.connect(gain);
+  oscillator.start(now);
+  oscillator.stop(now + 0.37);
+  oscillator.addEventListener('ended', () => {
+    oscillator.disconnect();
+    gain.disconnect();
+  }, { once: true });
 }
 
 export function setArrivalSoundEnabled(enabled: boolean) {

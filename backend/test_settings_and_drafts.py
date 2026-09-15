@@ -56,12 +56,26 @@ def test_avatar_setting_can_be_saved_as_false(monkeypatch, tmp_path):
     assert result == {"status": "success"}
     assert main.load_message_ui_settings() == {
         "showMessageAvatars": False,
+        "incomingMessageSoundEnabled": False,
         "catchUpLookbackDays": main.DEFAULT_CATCH_UP_LOOKBACK_DAYS,
     }
     assert json.loads(settings_path.read_text(encoding="utf-8")) == {
         "showMessageAvatars": False,
+        "incomingMessageSoundEnabled": False,
         "catchUpLookbackDays": main.DEFAULT_CATCH_UP_LOOKBACK_DAYS,
     }
+
+
+def test_incoming_message_sound_setting_persists_and_defaults_off(monkeypatch, tmp_path):
+    settings_path = tmp_path / "message_ui_settings.json"
+    monkeypatch.setattr(main, "MESSAGE_UI_SETTINGS_PATH", str(settings_path))
+
+    assert main.load_message_ui_settings()["incomingMessageSoundEnabled"] is False
+
+    result = main.update_settings(SettingsUpdateInput(incomingMessageSoundEnabled=True))
+
+    assert result == {"status": "success"}
+    assert main.load_message_ui_settings()["incomingMessageSoundEnabled"] is True
 
 
 def test_legacy_first_contact_settings_migrate_to_tori_only(monkeypatch, tmp_path):

@@ -1,4 +1,4 @@
-import { Component, lazy, Suspense, useState, useEffect, type ErrorInfo, type FormEvent, type ReactNode } from 'react'
+import { Component, lazy, Suspense, useState, useEffect, useRef, type ErrorInfo, type FormEvent, type ReactNode } from 'react'
 import SmsTriageDashboard from './SmsTriageDashboard'
 import SmsClientView from './SmsClientView'
 import SettingsView from './SettingsView'
@@ -8,8 +8,8 @@ import MobileInboxView from './MobileInboxView'
 import BootcampView from './BootcampView'
 import ArrivalClientView from './ArrivalClientView'
 import ArrivalProviderView from './ArrivalProviderView'
-import { getAdminAuthStatus, listArrivalSessions, listBookings, listThreads, loginAdmin, logoutAdmin, type ArrivalSession, type CalendarBooking } from './api'
-import { mergeArrivalAlertQueue, playBookingAlarm, processArrivalSessionSnapshot, processArrivalThreadSnapshot, processBookingSnapshot, rememberDismissedBooking, stopIncomingAlarm, unlockIncomingAlarmAudio } from './incomingMessageAlarm'
+import { getAdminAuthStatus, getSettings, listArrivalSessions, listBookings, listThreads, loginAdmin, logoutAdmin, type ArrivalSession, type CalendarBooking } from './api'
+import { mergeArrivalAlertQueue, playBookingAlarm, playIncomingMessageSound, processArrivalSessionSnapshot, processArrivalThreadSnapshot, processBookingSnapshot, processIncomingSmsSnapshot, rememberDismissedBooking, stopIncomingAlarm, unlockIncomingAlarmAudio, type IncomingSmsSnapshot } from './incomingMessageAlarm'
 import { UserCheck, Smartphone, Settings, Calendar, MessagesSquare, CalendarCheck, Bot, DoorOpen, LogOut, LockKeyhole, BellRing, SquareTerminal } from 'lucide-react'
 
 const AgentConsole = lazy(() => import('./AgentConsole'))
@@ -50,6 +50,8 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(getThreadIdFromUrl());
   const [newBookingAlert, setNewBookingAlert] = useState<CalendarBooking | null>(null);
   const [customerArrivalAlerts, setCustomerArrivalAlerts] = useState<ArrivalSession[]>([]);
+  const incomingMessageSoundEnabledRef = useRef(false);
+  const incomingSmsSnapshotRef = useRef<IncomingSmsSnapshot | null>(null);
 
   const [view, setView] = useState<'agent' | 'runner' | 'customer' | 'settings' | 'booking' | 'bookings' | 'chat' | 'bootcamp' | 'arrival' | 'arrivals'>(
     initialPath === '/arrival' ? 'arrival'
@@ -105,6 +107,22 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
     if (isStandaloneBooking || isStandaloneArrival) return;
 
     let active = true;
+    let soundSettingChangedLocally = false;
+    const handleIncomingMessageSoundSetting = (event: Event) => {
+      const detail = (event as CustomEvent<{ enabled?: boolean }>).detail;
+      if (typeof detail?.enabled === 'boolean') {
+        soundSettingChangedLocally = true;
+        incomingMessageSoundEnabledRef.current = detail.enabled;
+      }
+    };
+    window.addEventListener('incoming-message-sound-setting-changed', handleIncomingMessageSoundSetting);
+    void getSettings().then(settings => {
+      if (active && !soundSettingChangedLocally) {
+        incomingMessageSoundEnabledRef.current = settings.incomingMessageSoundEnabled === true;
+      }
+    }).catch(error => {
+      console.warn('Incoming message sound setting could not be loaded:', error);
+    });
     const unlockAudio = () => {
       void unlockIncomingAlarmAudio().catch(() => {
         // Browsers can still decline audio until a later user interaction.
@@ -120,6 +138,13 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
           listArrivalSessions(),
           listBookings(),
         ]);
+        const incomingSmsResult = processIncomingSmsSnapshot(threads, incomingSmsSnapshotRef.current);
+        incomingSmsSnapshotRef.current = incomingSmsResult.snapshot;
+        if (incomingSmsResult.hasNewInboundMessage && incomingMessageSoundEnabledRef.current) {
+          void playIncomingMessageSound().catch((error) => {
+            console.warn('Incoming message sound was blocked by the browser:', error);
+          });
+        }
         processArrivalThreadSnapshot(threads);
         const dueArrivals = processArrivalSessionSnapshot(arrivalSessions);
         setCustomerArrivalAlerts(current => (
@@ -162,6 +187,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
       active = false;
       window.removeEventListener('pointerdown', unlockAudio);
       window.removeEventListener('keydown', unlockAudio);
+      window.removeEventListener('incoming-message-sound-setting-changed', handleIncomingMessageSoundSetting);
     };
   }, [isStandaloneBooking, isStandaloneArrival]);
 

@@ -599,6 +599,7 @@ export interface SystemSettings {
   autoReplyGlobalEnabled?: boolean;
   trainingModeEnabled?: boolean;
   showMessageAvatars?: boolean;
+  incomingMessageSoundEnabled?: boolean;
   catchUpLookbackDays?: number;
 }
 
@@ -949,7 +950,7 @@ export async function downloadMessagesCsv(): Promise<{ blob: Blob; filename: str
   return { blob: await response.blob(), filename };
 }
 
-export async function updateSettings(settings: { openaiApiKey?: string; systemPrompt?: string; userPrompt?: string; autoReplyGlobalEnabled?: boolean; trainingModeEnabled?: boolean; showMessageAvatars?: boolean; catchUpLookbackDays?: number }): Promise<{ status: string }> {
+export async function updateSettings(settings: { openaiApiKey?: string; systemPrompt?: string; userPrompt?: string; autoReplyGlobalEnabled?: boolean; trainingModeEnabled?: boolean; showMessageAvatars?: boolean; incomingMessageSoundEnabled?: boolean; catchUpLookbackDays?: number }): Promise<{ status: string }> {
   const response = await apiFetch(`${API_BASE}/api/settings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -962,6 +963,11 @@ export async function updateSettings(settings: { openaiApiKey?: string; systemPr
   if (typeof settings.showMessageAvatars === 'boolean') {
     window.dispatchEvent(new CustomEvent('message-avatar-setting-changed', {
       detail: { showMessageAvatars: settings.showMessageAvatars },
+    }));
+  }
+  if (typeof settings.incomingMessageSoundEnabled === 'boolean') {
+    window.dispatchEvent(new CustomEvent('incoming-message-sound-setting-changed', {
+      detail: { enabled: settings.incomingMessageSoundEnabled },
     }));
   }
   return result;

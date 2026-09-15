@@ -12028,6 +12028,7 @@ class SettingsUpdateInput(BaseModel):
     autoReplyGlobalEnabled: Optional[bool] = None
     trainingModeEnabled: Optional[bool] = None
     showMessageAvatars: Optional[bool] = None
+    incomingMessageSoundEnabled: Optional[bool] = None
     catchUpLookbackDays: Optional[int] = Field(default=None, ge=1, le=30)
 
 
@@ -12068,6 +12069,7 @@ _quick_replies_lock = threading.Lock()
 def load_message_ui_settings() -> Dict[str, Any]:
     defaults = {
         "showMessageAvatars": True,
+        "incomingMessageSoundEnabled": False,
         "catchUpLookbackDays": DEFAULT_CATCH_UP_LOOKBACK_DAYS,
     }
     if not os.path.exists(MESSAGE_UI_SETTINGS_PATH):
@@ -12082,6 +12084,7 @@ def load_message_ui_settings() -> Dict[str, Any]:
                 lookback_days = DEFAULT_CATCH_UP_LOOKBACK_DAYS
             return {
                 "showMessageAvatars": bool(saved.get("showMessageAvatars", True)),
+                "incomingMessageSoundEnabled": bool(saved.get("incomingMessageSoundEnabled", False)),
                 "catchUpLookbackDays": min(30, max(1, lookback_days)),
             }
     except Exception:
@@ -16806,6 +16809,7 @@ def get_settings():
         "autoReplyGlobalEnabled": AUTO_REPLY_GLOBAL_ENABLED,
         "trainingModeEnabled": TRAINING_MODE_ENABLED,
         "showMessageAvatars": load_message_ui_settings()["showMessageAvatars"],
+        "incomingMessageSoundEnabled": load_message_ui_settings()["incomingMessageSoundEnabled"],
         "catchUpLookbackDays": load_message_ui_settings()["catchUpLookbackDays"],
     }
 
@@ -16846,12 +16850,18 @@ def update_settings(payload: SettingsUpdateInput):
         except Exception as e:
             print(f"Failed to save training mode state: {e}")
 
-    if payload.showMessageAvatars is not None or payload.catchUpLookbackDays is not None:
+    if (
+        payload.showMessageAvatars is not None
+        or payload.incomingMessageSoundEnabled is not None
+        or payload.catchUpLookbackDays is not None
+    ):
         try:
             os.makedirs(os.path.dirname(MESSAGE_UI_SETTINGS_PATH), exist_ok=True)
             message_ui_settings = load_message_ui_settings()
             if payload.showMessageAvatars is not None:
                 message_ui_settings["showMessageAvatars"] = payload.showMessageAvatars
+            if payload.incomingMessageSoundEnabled is not None:
+                message_ui_settings["incomingMessageSoundEnabled"] = payload.incomingMessageSoundEnabled
             if payload.catchUpLookbackDays is not None:
                 message_ui_settings["catchUpLookbackDays"] = payload.catchUpLookbackDays
             with open(MESSAGE_UI_SETTINGS_PATH, "w", encoding="utf-8") as handle:
