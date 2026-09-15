@@ -67,14 +67,16 @@ jobs:
             committer_email=$(git show -s --format='%ce' "$sha")
             [ "$committer_email" = "operations-ai@users.noreply.github.com" ] || continue
             committed_at=$(git show -s --format='%cI' "$sha")
-            python3 - "$committed_at" "$AUTONOMY_ACTIVATED_AT" <<'PY'
+            if ! python3 - "$committed_at" "$AUTONOMY_ACTIVATED_AT" <<'PY'
           import datetime as dt
           import sys
           commit = dt.datetime.fromisoformat(sys.argv[1].replace('Z', '+00:00'))
           gate = dt.datetime.fromisoformat(sys.argv[2].replace('Z', '+00:00'))
           raise SystemExit(0 if commit >= gate else 1)
           PY
-            [ "$?" = "0" ] || continue
+            then
+              continue
+            fi
 
             if [ -z "$selected_time" ] || [[ "$committed_at" > "$selected_time" ]]; then
               selected_ref="$ref"
