@@ -9,8 +9,10 @@ class FakeAudioContext {
   destination = {};
   resumeCalls = 0;
   oscillators = [];
+  actions = [];
 
   async resume() {
+    this.actions.push('resume');
     this.resumeCalls += 1;
     if (!this.keepSuspended) this.state = 'running';
   }
@@ -33,7 +35,7 @@ class FakeAudioContext {
       frequency: { setValueAtTime() {} },
       connect() {},
       disconnect() {},
-      start: () => { oscillator.started = true; },
+      start: () => { oscillator.started = true; this.actions.push('start'); },
       stop: () => { oscillator.stopped = true; },
       addEventListener() {},
       started: false,
@@ -48,6 +50,8 @@ const audioContext = new FakeAudioContext();
 globalThis.window = { AudioContext: class { constructor() { return audioContext; } } };
 
 const source = await readFile(new URL('../src/incomingMessageAlarm.ts', import.meta.url), 'utf8');
+const settingsSource = await readFile(new URL('../src/SettingsView.tsx', import.meta.url), 'utf8');
+const appSource = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
 const transpiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 },
 }).outputText;
@@ -102,13 +106,25 @@ test('a new customer thread appearing after baseline is inbound', () => {
   );
 });
 
+test('audio starts blocked and cannot be unlocked without a trusted gesture', async () => {
+  assert.equal(alarm.getIncomingAlarmAudioState(), 'blocked');
+  await assert.rejects(
+    alarm.unlockIncomingAlarmAudio({ isTrusted: false }),
+    /real tap or key press/,
+  );
+  assert.equal(audioContext.resumeCalls, 0);
+  assert.equal(alarm.getIncomingAlarmAudioState(), 'blocked');
+});
+
 test('a user gesture resumes and primes browser audio for later inbound alerts', async () => {
-  await alarm.unlockIncomingAlarmAudio();
+  await alarm.unlockIncomingAlarmAudio({ isTrusted: true });
   assert.equal(audioContext.state, 'running');
+  assert.equal(alarm.getIncomingAlarmAudioState(), 'enabled');
   assert.equal(audioContext.resumeCalls, 1);
   assert.equal(audioContext.oscillators.length, 1);
   assert.equal(audioContext.oscillators[0].started, true);
   assert.equal(audioContext.oscillators[0].stopped, true);
+  assert.deepEqual(audioContext.actions.slice(0, 2), ['start', 'resume']);
 
   await alarm.playIncomingMessageSound();
   assert.equal(audioContext.oscillators.length, 2);
@@ -119,8 +135,35 @@ test('audio unlock reports browsers that resolve resume without allowing playbac
   audioContext.state = 'suspended';
   audioContext.keepSuspended = true;
   await assert.rejects(
-    alarm.unlockIncomingAlarmAudio(),
+    alarm.unlockIncomingAlarmAudio({ isTrusted: true }),
     /has not allowed sound/,
   );
   audioContext.keepSuspended = false;
+});
+
+test('a blocked inbound alert retries once after unlock and is not duplicated', async () => {
+  let playCalls = 0;
+  let blocked = true;
+  const player = alarm.createIncomingMessageSoundPlayer(async () => {
+    playCalls += 1;
+    if (blocked) throw new Error('gesture required');
+  });
+
+  await assert.rejects(player.notify(), /gesture required/);
+  assert.equal(player.hasPending(), true);
+  blocked = false;
+  await player.retry();
+  await player.retry();
+
+  assert.equal(playCalls, 2);
+  assert.equal(player.hasPending(), false);
+});
+
+test('settings distinguish the saved preference from gesture-blocked playback', () => {
+  assert.match(settingsSource, /incomingMessageAudioState !== 'enabled'/);
+  assert.match(settingsSource, /this device needs a tap to enable playback/);
+  assert.match(settingsSource, /role="status"/);
+  assert.match(settingsSource, /aria-describedby=\{incomingMessageSoundEnabled/);
+  assert.doesNotMatch(appSource, /sound permission|permission was granted/i);
+  assert.doesNotMatch(appSource, /addEventListener\('pointerdown', unlockAudio/);
 });

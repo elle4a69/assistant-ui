@@ -16,6 +16,15 @@ let audioContext: AudioContext | null = null;
 let audioContextPrimed = false;
 let activeSirens: Array<{ stop: () => void }> = [];
 
+export type IncomingAlarmAudioState = 'blocked' | 'enabled' | 'unsupported';
+
+export function getIncomingAlarmAudioState(): IncomingAlarmAudioState {
+  if (audioContextPrimed && audioContext?.state === 'running') return 'enabled';
+  const AudioContextConstructor = window.AudioContext
+    || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  return AudioContextConstructor ? 'blocked' : 'unsupported';
+}
+
 export type IncomingSmsSnapshot = Record<string, string>;
 
 export function processIncomingSmsSnapshot(
@@ -86,12 +95,16 @@ async function resumeAudioContext(context: AudioContext) {
   }
 }
 
-export async function unlockIncomingAlarmAudio() {
+export async function unlockIncomingAlarmAudio(gesture?: Pick<Event, 'isTrusted'>) {
+  const hasActiveBrowserGesture = typeof navigator !== 'undefined'
+    && navigator.userActivation?.isActive === true;
+  if (!gesture?.isTrusted && !hasActiveBrowserGesture) {
+    throw new Error('Sound can only be enabled by a real tap or key press.');
+  }
   const context = getAudioContext();
-  await resumeAudioContext(context);
 
-  // Starting a silent source from the gesture is required by WebKit-based
-  // browsers before later sounds may start outside the gesture handler.
+  // Queue the silent source synchronously while the gesture is active. WebKit
+  // may consume user activation before the promise returned by resume settles.
   if (!audioContextPrimed) {
     const gain = context.createGain();
     gain.gain.setValueAtTime(0, context.currentTime);
@@ -104,7 +117,11 @@ export async function unlockIncomingAlarmAudio() {
     }, { once: true });
     oscillator.start(context.currentTime);
     oscillator.stop(context.currentTime + 0.01);
-    audioContextPrimed = true;
+  }
+  await resumeAudioContext(context);
+  audioContextPrimed = true;
+  if (typeof window.dispatchEvent === 'function') {
+    window.dispatchEvent(new Event('incoming-message-audio-unlocked'));
   }
 }
 
@@ -134,6 +151,32 @@ export async function playIncomingMessageSound() {
     oscillator.disconnect();
     gain.disconnect();
   }, { once: true });
+}
+
+export function createIncomingMessageSoundPlayer(
+  play: () => Promise<void> = playIncomingMessageSound,
+) {
+  let pending = false;
+  let inFlight: Promise<void> | null = null;
+
+  const flush = () => {
+    if (!pending) return Promise.resolve();
+    if (inFlight) return inFlight;
+    inFlight = play()
+      .then(() => { pending = false; })
+      .finally(() => { inFlight = null; });
+    return inFlight;
+  };
+
+  return {
+    notify() {
+      pending = true;
+      return flush();
+    },
+    retry: flush,
+    clear() { pending = false; },
+    hasPending() { return pending; },
+  };
 }
 
 export function setArrivalSoundEnabled(enabled: boolean) {
