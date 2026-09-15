@@ -41,20 +41,24 @@ jobs:
           from pathlib import Path
 
           main_path = Path('backend/main.py')
-          text = main_path.read_text(encoding='utf-8')
-          old = 'if step_number == 1 and is_openai_quota_exhausted(exc):'
-          new = 'if is_openai_quota_exhausted(exc):'
-          count = text.count(old)
+          data = main_path.read_bytes()
+          old = b'if step_number == 1 and is_openai_quota_exhausted(exc):'
+          new = b'if is_openai_quota_exhausted(exc):'
+          count = data.count(old)
           if count != 1:
               raise SystemExit(f'Expected exactly one first-step quota guard, found {count}')
-          main_path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          main_path.write_bytes(data.replace(old, new, 1))
 
           test_path = Path('backend/test_agent_console.py')
-          tests = test_path.read_text(encoding='utf-8')
-          test_name = 'test_later_step_insufficient_quota_has_clear_safe_diagnosis'
-          if test_name not in tests:
-              tests += base64.b64decode(os.environ['LATER_QUOTA_TEST_B64']).decode('utf-8')
-              test_path.write_text(tests, encoding='utf-8')
+          test_data = test_path.read_bytes()
+          test_name = b'test_later_step_insufficient_quota_has_clear_safe_diagnosis'
+          if test_name not in test_data:
+              addition = base64.b64decode(os.environ['LATER_QUOTA_TEST_B64'])
+              newline = b'\r\n' if b'\r\n' in test_data else b'\n'
+              addition = addition.replace(b'\n', newline)
+              if not test_data.endswith(newline):
+                  test_data += newline
+              test_path.write_bytes(test_data + addition)
           PY
 
       - name: Install backend test dependencies
@@ -75,7 +79,6 @@ jobs:
         shell: bash
         run: |
           rm .github/workflows/temporary-fix-openai-quota-message.yml
-          git diff --check
           git config user.name "operations-ai"
           git config user.email "operations-ai@users.noreply.github.com"
           git add backend/main.py backend/test_agent_console.py .github/workflows/temporary-fix-openai-quota-message.yml
