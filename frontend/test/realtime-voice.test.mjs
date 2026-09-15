@@ -96,6 +96,6 @@ test('Coding Agent and Operations settings share persistent full-duplex voice co
   assert.doesNotMatch(settingsSource, /Voice is not added to persistent text history/);
   assert.match(settingsSource, /routine end-to-end lifecycle/);
   assert.match(settingsSource, /protected\/destructive action/);
-  assert.match(agentSource, /proposal remains pending until you reply yes, proceed, go ahead or deploy it in a later typed message/);
-  assert.match(agentSource, /release is never automatic/);
+  assert.match(agentSource, /eligible work can be promoted and deployed automatically/);
+  assert.match(agentSource, /Protected or destructive operations still require fresh approval/);
 });
