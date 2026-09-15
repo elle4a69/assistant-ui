@@ -450,7 +450,7 @@ export default function AgentConsole() {
             </div>
             <div>
               <h1 className="text-base font-black">Operations Coding Agent</h1>
-              <p className="mt-0.5 text-[11px] text-slate-400">A persistent conversation with live evidence, durable memory and reviewed cloud coding.</p>
+              <p className="mt-0.5 text-[11px] text-slate-400">A persistent conversation with live evidence, durable memory and autonomous verified cloud coding.</p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -519,7 +519,7 @@ export default function AgentConsole() {
                 </div>
                 <h2 className="text-sm font-black text-white">Tell me the outcome you want</h2>
                 <p className="mt-2 text-xs leading-relaxed text-slate-400">
-                  I can investigate the live system, inspect source, research current technical issues, remember durable lessons and run reviewed coding work.
+                  I can investigate the live system, inspect source, research current technical issues, remember durable lessons and carry authorised coding work through verification and deployment.
                 </p>
               </div>
             ) : (
@@ -615,7 +615,7 @@ export default function AgentConsole() {
           <div ref={terminalHostRef} className="h-[300px] min-h-[240px] w-full bg-slate-950 p-2" aria-label="Live coding agent work log" />
           <div className="flex items-start gap-2 border-t border-slate-800 bg-slate-900 px-4 py-3 text-[10px] leading-relaxed text-slate-400">
             <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
-            <p>The work log is monitor-only. Code stays on an isolated review branch, and a deployment proposal remains pending until you reply yes, proceed, go ahead or deploy it in a later typed message; release is never automatic.</p>
+            <p>The work log is monitor-only. Authorised coding stays isolated until independently verified, then eligible work can be promoted and deployed automatically. Protected or destructive operations still require fresh approval.</p>
           </div>
         </section>
 
