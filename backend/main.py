@@ -16090,7 +16090,7 @@ async def _run_agent_console(run_id: str, objective: str, max_steps: int) -> Non
                     timeout=model_timeout,
                 )
             except Exception as exc:
-                if step_number == 1 and is_openai_quota_exhausted(exc):
+                if is_openai_quota_exhausted(exc):
                     quota_message = "OpenAI API credits or billing must be restored before the Operations Coding Agent can run."
                     await asyncio.to_thread(
                         _finish_agent_run,

@@ -1128,3 +1128,32 @@ def test_step_limit_defaults_to_50_and_caps_configuration(monkeypatch):
 
     monkeypatch.setenv("OPS_AGENT_MAX_STEPS", "invalid")
     assert main.agent_console_max_steps() == 50
+
+
+def test_later_step_insufficient_quota_has_clear_safe_diagnosis(isolated_agent_database, monkeypatch):
+    run_id = create_agent_run(isolated_agent_database, objective="Test later provider quota failure")
+    calls = 0
+
+    def model_step(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return AgentStep(
+                thought="Recording one safe progress artefact.",
+                action="write_file",
+                arguments='{"path":"notes/progress.txt","content":"checked"}',
+            )
+        raise StructuredProviderError("insufficient_quota")
+
+    monkeypatch.setattr(main, "_agent_model_step", model_step)
+    asyncio.run(main._run_agent_console(run_id, "Run a safe check", 5))
+    db = isolated_agent_database()
+    try:
+        run = db.query(main.OperationsAgentRun).filter_by(id=run_id).one()
+        assert run.status == "failed"
+        assert run.step_count == 1
+        assert run.error == "openai_quota_exhausted"
+        assert "credits or billing must be restored" in run.final_summary
+        assert "bounded execution error" not in run.final_summary
+    finally:
+        db.close()
