@@ -31,9 +31,13 @@ jobs:
           python-version: '3.11'
 
       - name: Patch quota handling and regression coverage
+        env:
+          LATER_QUOTA_TEST_B64: CmRlZiB0ZXN0X2xhdGVyX3N0ZXBfaW5zdWZmaWNpZW50X3F1b3RhX2hhc19jbGVhcl9zYWZlX2RpYWdub3Npcyhpc29sYXRlZF9hZ2VudF9kYXRhYmFzZSwgbW9ua2V5cGF0Y2gpOgogICAgcnVuX2lkID0gY3JlYXRlX2FnZW50X3J1bihpc29sYXRlZF9hZ2VudF9kYXRhYmFzZSwgb2JqZWN0aXZlPSJUZXN0IGxhdGVyIHByb3ZpZGVyIHF1b3RhIGZhaWx1cmUiKQogICAgY2FsbHMgPSAwCgogICAgZGVmIG1vZGVsX3N0ZXAoKl9hcmdzLCAqKl9rd2FyZ3MpOgogICAgICAgIG5vbmxvY2FsIGNhbGxzCiAgICAgICAgY2FsbHMgKz0gMQogICAgICAgIGlmIGNhbGxzID09IDE6CiAgICAgICAgICAgIHJldHVybiBBZ2VudFN0ZXAoCiAgICAgICAgICAgICAgICB0aG91Z2h0PSJSZWNvcmRpbmcgb25lIHNhZmUgcHJvZ3Jlc3MgYXJ0ZWZhY3QuIiwKICAgICAgICAgICAgICAgIGFjdGlvbj0id3JpdGVfZmlsZSIsCiAgICAgICAgICAgICAgICBhcmd1bWVudHM9J3sicGF0aCI6Im5vdGVzL3Byb2dyZXNzLnR4dCIsImNvbnRlbnQiOiJjaGVja2VkIn0nLAogICAgICAgICAgICApCiAgICAgICAgcmFpc2UgU3RydWN0dXJlZFByb3ZpZGVyRXJyb3IoImluc3VmZmljaWVudF9xdW90YSIpCgogICAgbW9ua2V5cGF0Y2guc2V0YXR0cihtYWluLCAiX2FnZW50X21vZGVsX3N0ZXAiLCBtb2RlbF9zdGVwKQogICAgYXN5bmNpby5ydW4obWFpbi5fcnVuX2FnZW50X2NvbnNvbGUocnVuX2lkLCAiUnVuIGEgc2FmZSBjaGVjayIsIDUpKQogICAgZGIgPSBpc29sYXRlZF9hZ2VudF9kYXRhYmFzZSgpCiAgICB0cnk6CiAgICAgICAgcnVuID0gZGIucXVlcnkobWFpbi5PcGVyYXRpb25zQWdlbnRSdW4pLmZpbHRlcl9ieShpZD1ydW5faWQpLm9uZSgpCiAgICAgICAgYXNzZXJ0IHJ1bi5zdGF0dXMgPT0gImZhaWxlZCIKICAgICAgICBhc3NlcnQgcnVuLnN0ZXBfY291bnQgPT0gMQogICAgICAgIGFzc2VydCBydW4uZXJyb3IgPT0gIm9wZW5haV9xdW90YV9leGhhdXN0ZWQiCiAgICAgICAgYXNzZXJ0ICJjcmVkaXRzIG9yIGJpbGxpbmcgbXVzdCBiZSByZXN0b3JlZCIgaW4gcnVuLmZpbmFsX3N1bW1hcnkKICAgICAgICBhc3NlcnQgImJvdW5kZWQgZXhlY3V0aW9uIGVycm9yIiBub3QgaW4gcnVuLmZpbmFsX3N1bW1hcnkKICAgIGZpbmFsbHk6CiAgICAgICAgZGIuY2xvc2UoKQo=
         shell: bash
         run: |
           python - <<'PY'
+          import base64
+          import os
           from pathlib import Path
 
           main_path = Path('backend/main.py')
@@ -49,37 +53,7 @@ jobs:
           tests = test_path.read_text(encoding='utf-8')
           test_name = 'test_later_step_insufficient_quota_has_clear_safe_diagnosis'
           if test_name not in tests:
-              tests += r'''
-
-
-def test_later_step_insufficient_quota_has_clear_safe_diagnosis(isolated_agent_database, monkeypatch):
-    run_id = create_agent_run(isolated_agent_database, objective="Test later provider quota failure")
-    calls = 0
-
-    def model_step(*_args, **_kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return AgentStep(
-                thought="Recording one safe progress artefact.",
-                action="write_file",
-                arguments='{"path":"notes/progress.txt","content":"checked"}',
-            )
-        raise StructuredProviderError("insufficient_quota")
-
-    monkeypatch.setattr(main, "_agent_model_step", model_step)
-    asyncio.run(main._run_agent_console(run_id, "Run a safe check", 5))
-    db = isolated_agent_database()
-    try:
-        run = db.query(main.OperationsAgentRun).filter_by(id=run_id).one()
-        assert run.status == "failed"
-        assert run.step_count == 1
-        assert run.error == "openai_quota_exhausted"
-        assert "credits or billing must be restored" in run.final_summary
-        assert "bounded execution error" not in run.final_summary
-    finally:
-        db.close()
-'''
+              tests += base64.b64decode(os.environ['LATER_QUOTA_TEST_B64']).decode('utf-8')
               test_path.write_text(tests, encoding='utf-8')
           PY
 
