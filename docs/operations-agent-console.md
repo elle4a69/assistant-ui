@@ -8,14 +8,33 @@ the browser can reconnect and replay an existing run without resubmitting it.
 ## Execution boundary
 
 The Fly web process does not expose a shell. `run_terminal_command` is a
-structured virtual command with an explicit, reviewed read-only allowlist.
-Adding a tool to the wider Operations AI never grants it to this autonomous
-loop. The virtual commands use local bounded operational evidence; source reads
-use the separately bounded GitHub reader. One explicit queue command can start
-an isolated GitHub coding task that writes and tests a review branch only. Web
-research, runtime/deployment proposals, changing main, runtime settings, and
-production deployment remain outside this loop in their existing audited,
-owner-confirmed workflows.
+structured virtual command with an explicit, reviewed allowlist. Adding a tool
+to the wider Operations AI never grants it to this autonomous loop. The virtual
+commands use local bounded operational evidence; source reads use the separately
+bounded GitHub reader.
+
+A clear owner request to fix or implement authorises the routine end-to-end
+engineering lifecycle for that objective. The console can start an isolated
+GitHub coding task, follow it through implementation and self-repair, then rely
+on the trusted autonomous promotion workflow to independently validate eligible
+review-branch output, fast-forward the exact verified commit to `main`, dispatch
+the normal Fly deployment and preserve the audit trail. The agent should follow
+that same operation through deployment verification rather than asking for a
+second routine approval.
+
+Autonomous promotion is deliberately narrow. A candidate must be a fresh
+`ops/task-*` review commit produced by the Operations coding identity, have
+exactly the current `main` commit as its single parent, pass bounded-path checks,
+contain no workflow or credential-shaped changes and pass the independent
+backend and frontend checks again. Stale, conflicting, protected or otherwise
+ineligible work is not promoted.
+
+Fresh owner authority is still required for protected or destructive work that
+falls outside the routine coding lifecycle, including credential or secret
+changes, destructive data operations, irreversible migrations, force-push or
+history rewriting, deleting production resources and major infrastructure
+replacement. Those boundaries must not be bypassed through the coding worker or
+promotion workflow.
 
 Coding-task submissions reject customer phone numbers, email addresses,
 credentials and secret-shaped values. Objectives must describe the defect with
@@ -41,7 +60,7 @@ writable through the console.
 - Clients start with a UUID request ID or attach to a persisted run ID with an
   event-sequence cursor. Request IDs make reconnect/retry idempotent.
 - The browser can explicitly cancel a run. Disconnecting the browser does not
-  deploy code or promote a review branch.
+  cancel the cloud coding worker or grant authority for a protected operation.
 
 ## Limits and privacy
 
