@@ -153,10 +153,10 @@ export default function OperationsAIChat() {
         </div>
       )}
 
-      <div className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-3 text-[10px] leading-relaxed text-amber-900">
-        <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+      <div className="flex items-start gap-2 border-b border-emerald-200 bg-emerald-50 px-4 py-3 text-[10px] leading-relaxed text-emerald-900">
+        <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" />
         <p>
-          Text and realtime voice share this persistent conversation, memory and audited tools. A deployment proposal stays pending and never releases automatically; production deployment requires a short affirmative reply such as yes, proceed, go ahead or deploy it in a later typed message.
+          Text and realtime voice share this persistent conversation, memory and audited tools. A clear fix or implementation request authorises the routine end-to-end lifecycle: investigate, code, test, self-repair, independently verify, promote and deploy. The agent only stops for a genuine blocker or a protected/destructive action that needs fresh approval.
         </p>
       </div>
 
