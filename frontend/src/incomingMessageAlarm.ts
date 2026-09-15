@@ -13,6 +13,7 @@ export interface IncomingAlarmSettings {
 }
 
 let audioContext: AudioContext | null = null;
+let audioContextPrimed = false;
 let activeSirens: Array<{ stop: () => void }> = [];
 
 export type IncomingSmsSnapshot = Record<string, string>;
@@ -78,9 +79,33 @@ function getAudioContext(): AudioContext {
   return audioContext;
 }
 
+async function resumeAudioContext(context: AudioContext) {
+  if (context.state === 'suspended') await context.resume();
+  if (context.state !== 'running') {
+    throw new Error('This browser has not allowed sound for this tab.');
+  }
+}
+
 export async function unlockIncomingAlarmAudio() {
   const context = getAudioContext();
-  if (context.state === 'suspended') await context.resume();
+  await resumeAudioContext(context);
+
+  // Starting a silent source from the gesture is required by WebKit-based
+  // browsers before later sounds may start outside the gesture handler.
+  if (!audioContextPrimed) {
+    const gain = context.createGain();
+    gain.gain.setValueAtTime(0, context.currentTime);
+    gain.connect(context.destination);
+    const oscillator = context.createOscillator();
+    oscillator.connect(gain);
+    oscillator.addEventListener('ended', () => {
+      oscillator.disconnect();
+      gain.disconnect();
+    }, { once: true });
+    oscillator.start(context.currentTime);
+    oscillator.stop(context.currentTime + 0.01);
+    audioContextPrimed = true;
+  }
 }
 
 export function getArrivalSoundEnabled(): boolean {
@@ -89,7 +114,7 @@ export function getArrivalSoundEnabled(): boolean {
 
 export async function playIncomingMessageSound() {
   const context = getAudioContext();
-  if (context.state === 'suspended') await context.resume();
+  await resumeAudioContext(context);
 
   const now = context.currentTime;
   const gain = context.createGain();

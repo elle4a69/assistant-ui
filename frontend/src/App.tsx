@@ -50,6 +50,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(getThreadIdFromUrl());
   const [newBookingAlert, setNewBookingAlert] = useState<CalendarBooking | null>(null);
   const [customerArrivalAlerts, setCustomerArrivalAlerts] = useState<ArrivalSession[]>([]);
+  const [incomingSoundError, setIncomingSoundError] = useState<string | null>(null);
   const incomingMessageSoundEnabledRef = useRef(false);
   const incomingSmsSnapshotRef = useRef<IncomingSmsSnapshot | null>(null);
 
@@ -113,6 +114,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
       if (typeof detail?.enabled === 'boolean') {
         soundSettingChangedLocally = true;
         incomingMessageSoundEnabledRef.current = detail.enabled;
+        setIncomingSoundError(null);
       }
     };
     window.addEventListener('incoming-message-sound-setting-changed', handleIncomingMessageSoundSetting);
@@ -124,12 +126,16 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
       console.warn('Incoming message sound setting could not be loaded:', error);
     });
     const unlockAudio = () => {
-      void unlockIncomingAlarmAudio().catch(() => {
-        // Browsers can still decline audio until a later user interaction.
+      void unlockIncomingAlarmAudio().then(() => {
+        setIncomingSoundError(null);
+      }).catch(() => {
+        if (incomingMessageSoundEnabledRef.current) {
+          setIncomingSoundError('Incoming message sound is blocked by this browser. Check this tab\'s sound permission, then tap Enable sound.');
+        }
       });
     };
-    window.addEventListener('pointerdown', unlockAudio, { once: true });
-    window.addEventListener('keydown', unlockAudio, { once: true });
+    window.addEventListener('pointerdown', unlockAudio);
+    window.addEventListener('keydown', unlockAudio);
 
     const pollOnce = async () => {
       try {
@@ -143,6 +149,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
         if (incomingSmsResult.hasNewInboundMessage && incomingMessageSoundEnabledRef.current) {
           void playIncomingMessageSound().catch((error) => {
             console.warn('Incoming message sound was blocked by the browser:', error);
+            setIncomingSoundError('A new message arrived, but its sound was blocked. Check this tab\'s sound permission, then tap Enable sound.');
           });
         }
         processArrivalThreadSnapshot(threads);
@@ -250,6 +257,16 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
       '',
       `/chat?thread=${encodeURIComponent(arrival.threadId)}&arrival=${encodeURIComponent(arrival.id)}`,
     );
+  };
+
+  const retryIncomingSound = async () => {
+    try {
+      await unlockIncomingAlarmAudio();
+      setIncomingSoundError(null);
+    } catch (error) {
+      console.warn('Incoming message sound could not be enabled:', error);
+      setIncomingSoundError('Sound is still blocked. Allow sound for this site in your browser settings, then try again.');
+    }
   };
 
   return (
@@ -388,6 +405,14 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
         {view === 'arrival' && <ArrivalClientView />}
         {view === 'arrivals' && <ArrivalProviderView />}
       </main>
+
+      {incomingSoundError && !isStandalone && (
+        <div className="fixed left-3 right-3 top-3 z-[100] mx-auto flex max-w-xl items-center gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs font-bold text-amber-950 shadow-xl sm:top-16" role="alert" aria-live="assertive">
+          <BellRing className="h-5 w-5 shrink-0 text-amber-600" />
+          <span className="flex-1">{incomingSoundError}</span>
+          <button type="button" onClick={() => void retryIncomingSound()} className="shrink-0 rounded-lg bg-amber-600 px-3 py-2 text-white">Enable sound</button>
+        </div>
+      )}
 
       {/* Mobile Bottom Navigation Bar (the final row of the full-height app) */}
       {!isStandalone && (

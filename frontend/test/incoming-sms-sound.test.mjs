@@ -3,6 +3,50 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import ts from 'typescript';
 
+class FakeAudioContext {
+  state = 'suspended';
+  currentTime = 10;
+  destination = {};
+  resumeCalls = 0;
+  oscillators = [];
+
+  async resume() {
+    this.resumeCalls += 1;
+    if (!this.keepSuspended) this.state = 'running';
+  }
+
+  createGain() {
+    return {
+      gain: {
+        setValueAtTime() {},
+        linearRampToValueAtTime() {},
+        exponentialRampToValueAtTime() {},
+      },
+      connect() {},
+      disconnect() {},
+    };
+  }
+
+  createOscillator() {
+    const oscillator = {
+      type: 'sine',
+      frequency: { setValueAtTime() {} },
+      connect() {},
+      disconnect() {},
+      start: () => { oscillator.started = true; },
+      stop: () => { oscillator.stopped = true; },
+      addEventListener() {},
+      started: false,
+      stopped: false,
+    };
+    this.oscillators.push(oscillator);
+    return oscillator;
+  }
+}
+
+const audioContext = new FakeAudioContext();
+globalThis.window = { AudioContext: class { constructor() { return audioContext; } } };
+
 const source = await readFile(new URL('../src/incomingMessageAlarm.ts', import.meta.url), 'utf8');
 const transpiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 },
@@ -56,4 +100,27 @@ test('a new customer thread appearing after baseline is inbound', () => {
     alarm.processIncomingSmsSnapshot([thread('new-thread')], baseline.snapshot).hasNewInboundMessage,
     true,
   );
+});
+
+test('a user gesture resumes and primes browser audio for later inbound alerts', async () => {
+  await alarm.unlockIncomingAlarmAudio();
+  assert.equal(audioContext.state, 'running');
+  assert.equal(audioContext.resumeCalls, 1);
+  assert.equal(audioContext.oscillators.length, 1);
+  assert.equal(audioContext.oscillators[0].started, true);
+  assert.equal(audioContext.oscillators[0].stopped, true);
+
+  await alarm.playIncomingMessageSound();
+  assert.equal(audioContext.oscillators.length, 2);
+  assert.equal(audioContext.oscillators[1].started, true);
+});
+
+test('audio unlock reports browsers that resolve resume without allowing playback', async () => {
+  audioContext.state = 'suspended';
+  audioContext.keepSuspended = true;
+  await assert.rejects(
+    alarm.unlockIncomingAlarmAudio(),
+    /has not allowed sound/,
+  );
+  audioContext.keepSuspended = false;
 });
