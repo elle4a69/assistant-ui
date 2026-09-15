@@ -1,0 +1,116 @@
+name: Temporary OpenAI quota message repair
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/temporary-fix-openai-quota-message.yml
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: temporary-openai-quota-message-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Patch quota handling and regression coverage
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          main_path = Path('backend/main.py')
+          text = main_path.read_text(encoding='utf-8')
+          old = 'if step_number == 1 and is_openai_quota_exhausted(exc):'
+          new = 'if is_openai_quota_exhausted(exc):'
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f'Expected exactly one first-step quota guard, found {count}')
+          main_path.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          test_path = Path('backend/test_agent_console.py')
+          tests = test_path.read_text(encoding='utf-8')
+          test_name = 'test_later_step_insufficient_quota_has_clear_safe_diagnosis'
+          if test_name not in tests:
+              tests += r'''
+
+
+def test_later_step_insufficient_quota_has_clear_safe_diagnosis(isolated_agent_database, monkeypatch):
+    run_id = create_agent_run(isolated_agent_database, objective="Test later provider quota failure")
+    calls = 0
+
+    def model_step(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return AgentStep(
+                thought="Recording one safe progress artefact.",
+                action="write_file",
+                arguments='{"path":"notes/progress.txt","content":"checked"}',
+            )
+        raise StructuredProviderError("insufficient_quota")
+
+    monkeypatch.setattr(main, "_agent_model_step", model_step)
+    asyncio.run(main._run_agent_console(run_id, "Run a safe check", 5))
+    db = isolated_agent_database()
+    try:
+        run = db.query(main.OperationsAgentRun).filter_by(id=run_id).one()
+        assert run.status == "failed"
+        assert run.step_count == 1
+        assert run.error == "openai_quota_exhausted"
+        assert "credits or billing must be restored" in run.final_summary
+        assert "bounded execution error" not in run.final_summary
+    finally:
+        db.close()
+'''
+              test_path.write_text(tests, encoding='utf-8')
+          PY
+
+      - name: Install backend test dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt pytest
+
+      - name: Run quota regression tests
+        shell: bash
+        run: |
+          python -m pytest \
+            backend/test_agent_console.py::test_step_zero_insufficient_quota_has_clear_safe_diagnosis \
+            backend/test_agent_console.py::test_later_step_insufficient_quota_has_clear_safe_diagnosis \
+            -q
+
+      - name: Commit repair and remove temporary workflow
+        shell: bash
+        run: |
+          rm .github/workflows/temporary-fix-openai-quota-message.yml
+          git diff --check
+          git config user.name "operations-ai"
+          git config user.email "operations-ai@users.noreply.github.com"
+          git add backend/main.py backend/test_agent_console.py .github/workflows/temporary-fix-openai-quota-message.yml
+          git commit -m "fix: report OpenAI credit exhaustion clearly"
+          git push origin HEAD:main
+
+      - name: Dispatch production deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh workflow run fly.yml --ref main
