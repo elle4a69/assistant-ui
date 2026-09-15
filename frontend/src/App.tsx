@@ -9,7 +9,7 @@ import BootcampView from './BootcampView'
 import ArrivalClientView from './ArrivalClientView'
 import ArrivalProviderView from './ArrivalProviderView'
 import { getAdminAuthStatus, getSettings, listArrivalSessions, listBookings, listThreads, loginAdmin, logoutAdmin, type ArrivalSession, type CalendarBooking } from './api'
-import { mergeArrivalAlertQueue, playBookingAlarm, playIncomingMessageSound, processArrivalSessionSnapshot, processArrivalThreadSnapshot, processBookingSnapshot, processIncomingSmsSnapshot, rememberDismissedBooking, stopIncomingAlarm, unlockIncomingAlarmAudio, type IncomingSmsSnapshot } from './incomingMessageAlarm'
+import { createIncomingMessageSoundPlayer, mergeArrivalAlertQueue, playBookingAlarm, processArrivalSessionSnapshot, processArrivalThreadSnapshot, processBookingSnapshot, processIncomingSmsSnapshot, rememberDismissedBooking, stopIncomingAlarm, unlockIncomingAlarmAudio, type IncomingSmsSnapshot } from './incomingMessageAlarm'
 import { UserCheck, Smartphone, Settings, Calendar, MessagesSquare, CalendarCheck, Bot, DoorOpen, LogOut, LockKeyhole, BellRing, SquareTerminal } from 'lucide-react'
 
 const AgentConsole = lazy(() => import('./AgentConsole'))
@@ -53,6 +53,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
   const [incomingSoundError, setIncomingSoundError] = useState<string | null>(null);
   const incomingMessageSoundEnabledRef = useRef(false);
   const incomingSmsSnapshotRef = useRef<IncomingSmsSnapshot | null>(null);
+  const incomingMessageSoundPlayerRef = useRef(createIncomingMessageSoundPlayer());
 
   const [view, setView] = useState<'agent' | 'runner' | 'customer' | 'settings' | 'booking' | 'bookings' | 'chat' | 'bootcamp' | 'arrival' | 'arrivals'>(
     initialPath === '/arrival' ? 'arrival'
@@ -114,6 +115,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
       if (typeof detail?.enabled === 'boolean') {
         soundSettingChangedLocally = true;
         incomingMessageSoundEnabledRef.current = detail.enabled;
+        if (!detail.enabled) incomingMessageSoundPlayerRef.current.clear();
         setIncomingSoundError(null);
       }
     };
@@ -125,17 +127,16 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
     }).catch(error => {
       console.warn('Incoming message sound setting could not be loaded:', error);
     });
-    const unlockAudio = () => {
-      void unlockIncomingAlarmAudio().then(() => {
+    const retryPendingSound = () => {
+      if (!incomingMessageSoundEnabledRef.current) return;
+      void incomingMessageSoundPlayerRef.current.retry().then(() => {
         setIncomingSoundError(null);
-      }).catch(() => {
-        if (incomingMessageSoundEnabledRef.current) {
-          setIncomingSoundError('Incoming message sound is blocked by this browser. Check this tab\'s sound permission, then tap Enable sound.');
-        }
+      }).catch((error) => {
+        console.warn('Pending incoming message sound could not play:', error);
+        setIncomingSoundError('Incoming message sound is still unavailable. Tap Enable sound to try again.');
       });
     };
-    window.addEventListener('pointerdown', unlockAudio);
-    window.addEventListener('keydown', unlockAudio);
+    window.addEventListener('incoming-message-audio-unlocked', retryPendingSound);
 
     const pollOnce = async () => {
       try {
@@ -147,9 +148,9 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
         const incomingSmsResult = processIncomingSmsSnapshot(threads, incomingSmsSnapshotRef.current);
         incomingSmsSnapshotRef.current = incomingSmsResult.snapshot;
         if (incomingSmsResult.hasNewInboundMessage && incomingMessageSoundEnabledRef.current) {
-          void playIncomingMessageSound().catch((error) => {
+          void incomingMessageSoundPlayerRef.current.notify().catch((error) => {
             console.warn('Incoming message sound was blocked by the browser:', error);
-            setIncomingSoundError('A new message arrived, but its sound was blocked. Check this tab\'s sound permission, then tap Enable sound.');
+            setIncomingSoundError('A new message arrived, but sound needs a tap before it can play. Tap Enable sound to hear future alerts.');
           });
         }
         processArrivalThreadSnapshot(threads);
@@ -192,8 +193,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
 
     return () => {
       active = false;
-      window.removeEventListener('pointerdown', unlockAudio);
-      window.removeEventListener('keydown', unlockAudio);
+      window.removeEventListener('incoming-message-audio-unlocked', retryPendingSound);
       window.removeEventListener('incoming-message-sound-setting-changed', handleIncomingMessageSoundSetting);
     };
   }, [isStandaloneBooking, isStandaloneArrival]);
@@ -259,13 +259,14 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
     );
   };
 
-  const retryIncomingSound = async () => {
+  const retryIncomingSound = async (event: React.MouseEvent<HTMLButtonElement>) => {
     try {
-      await unlockIncomingAlarmAudio();
+      await unlockIncomingAlarmAudio(event.nativeEvent);
+      await incomingMessageSoundPlayerRef.current.retry();
       setIncomingSoundError(null);
     } catch (error) {
       console.warn('Incoming message sound could not be enabled:', error);
-      setIncomingSoundError('Sound is still blocked. Allow sound for this site in your browser settings, then try again.');
+      setIncomingSoundError('Sound is still unavailable. Tap Enable sound to try again.');
     }
   };
 
@@ -410,7 +411,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
         <div className="fixed left-3 right-3 top-3 z-[100] mx-auto flex max-w-xl items-center gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs font-bold text-amber-950 shadow-xl sm:top-16" role="alert" aria-live="assertive">
           <BellRing className="h-5 w-5 shrink-0 text-amber-600" />
           <span className="flex-1">{incomingSoundError}</span>
-          <button type="button" onClick={() => void retryIncomingSound()} className="shrink-0 rounded-lg bg-amber-600 px-3 py-2 text-white">Enable sound</button>
+          <button type="button" onClick={(event) => void retryIncomingSound(event)} className="shrink-0 rounded-lg bg-amber-600 px-3 py-2 text-white">Enable sound</button>
         </div>
       )}
 

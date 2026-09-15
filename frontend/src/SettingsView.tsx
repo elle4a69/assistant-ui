@@ -98,6 +98,7 @@ import {
   Ban,
 } from 'lucide-react';
 import {
+  getIncomingAlarmAudioState,
   getIncomingAlarmSettings,
   playAirRaidSiren,
   setIncomingAlarmEnabled,
@@ -158,6 +159,7 @@ export default function SettingsView() {
   const [showMessageAvatars, setShowMessageAvatars] = useState(true);
   const [savingMessageDisplay, setSavingMessageDisplay] = useState(false);
   const [incomingMessageSoundEnabled, setIncomingMessageSoundEnabled] = useState(false);
+  const [incomingMessageAudioState, setIncomingMessageAudioState] = useState(getIncomingAlarmAudioState);
   const [savingIncomingMessageSound, setSavingIncomingMessageSound] = useState(false);
   const [exportingMessages, setExportingMessages] = useState(false);
   const [clearingPendingDrafts, setClearingPendingDrafts] = useState(false);
@@ -291,6 +293,12 @@ export default function SettingsView() {
     setBanner({ type, message });
     setTimeout(() => setBanner(null), 5000);
   };
+
+  useEffect(() => {
+    const handleAudioUnlocked = () => setIncomingMessageAudioState('enabled');
+    window.addEventListener('incoming-message-audio-unlocked', handleAudioUnlocked);
+    return () => window.removeEventListener('incoming-message-audio-unlocked', handleAudioUnlocked);
+  }, []);
 
   // Fetch initial data — load independently so one failure doesn't blank everything
   const loadAllSettings = useCallback(async () => {
@@ -541,14 +549,16 @@ export default function SettingsView() {
     });
   };
 
-  const handleIncomingMessageSoundToggle = async () => {
+  const handleIncomingMessageSoundToggle = async (event: React.MouseEvent<HTMLButtonElement>) => {
     const nextValue = !incomingMessageSoundEnabled;
     if (nextValue) {
       try {
-        await unlockIncomingAlarmAudio();
+        await unlockIncomingAlarmAudio(event.nativeEvent);
+        setIncomingMessageAudioState('enabled');
       } catch (error) {
         console.error(error);
-        triggerBanner('error', 'This browser could not enable audio. Check its sound permissions.');
+        setIncomingMessageAudioState(getIncomingAlarmAudioState());
+        triggerBanner('error', 'Sound could not be enabled. Tap the switch again to retry.');
         return;
       }
     }
@@ -563,6 +573,18 @@ export default function SettingsView() {
       triggerBanner('error', 'Failed to update incoming message sound.');
     } finally {
       setSavingIncomingMessageSound(false);
+    }
+  };
+
+  const handleIncomingMessageSoundEnable = async (event: React.MouseEvent<HTMLButtonElement>) => {
+    try {
+      await unlockIncomingAlarmAudio(event.nativeEvent);
+      setIncomingMessageAudioState('enabled');
+      triggerBanner('success', 'Incoming message sound enabled on this device.');
+    } catch (error) {
+      console.error(error);
+      setIncomingMessageAudioState(getIncomingAlarmAudioState());
+      triggerBanner('error', 'Sound is still unavailable. Tap Enable sound to try again.');
     }
   };
 
@@ -1567,19 +1589,34 @@ export default function SettingsView() {
                   <div className="min-w-0">
                     <p id="incoming-message-sound-label" className="text-xs font-bold text-slate-800">Incoming message sound</p>
                     <p className="text-[10px] text-slate-500 mt-0.5">Play a short sound when a new inbound SMS arrives while this portal is open.</p>
+                    {incomingMessageSoundEnabled && incomingMessageAudioState !== 'enabled' && (
+                      <p id="incoming-message-sound-status" className="mt-1 text-[10px] font-semibold text-amber-700" role="status">
+                        {incomingMessageAudioState === 'unsupported'
+                          ? 'Sound is not supported by this browser.'
+                          : 'Sound is on, but this device needs a tap to enable playback.'}
+                      </p>
+                    )}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={incomingMessageSoundEnabled}
-                  aria-labelledby="incoming-message-sound-label"
-                  disabled={savingIncomingMessageSound}
-                  onClick={handleIncomingMessageSoundToggle}
-                  className={`relative h-6 w-11 shrink-0 rounded-full border-none p-0 transition-colors cursor-pointer disabled:opacity-50 ${incomingMessageSoundEnabled ? 'bg-indigo-600' : 'bg-slate-300'}`}
-                >
-                  <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${incomingMessageSoundEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
-                </button>
+                <div className="flex shrink-0 items-center gap-2">
+                  {incomingMessageSoundEnabled && incomingMessageAudioState === 'blocked' && (
+                    <button type="button" aria-describedby="incoming-message-sound-status" onClick={handleIncomingMessageSoundEnable} className="rounded-lg bg-amber-100 px-2.5 py-1.5 text-[10px] font-bold text-amber-800">
+                      Enable sound
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={incomingMessageSoundEnabled}
+                    aria-labelledby="incoming-message-sound-label"
+                    aria-describedby={incomingMessageSoundEnabled && incomingMessageAudioState !== 'enabled' ? 'incoming-message-sound-status' : undefined}
+                    disabled={savingIncomingMessageSound}
+                    onClick={handleIncomingMessageSoundToggle}
+                    className={`relative h-6 w-11 shrink-0 rounded-full border-none p-0 transition-colors cursor-pointer disabled:opacity-50 ${incomingMessageSoundEnabled ? 'bg-indigo-600' : 'bg-slate-300'}`}
+                  >
+                    <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${incomingMessageSoundEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
+                  </button>
+                </div>
               </div>
 
               <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100">
