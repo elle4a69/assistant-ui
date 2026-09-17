@@ -145,7 +145,13 @@ def test_3_missing_timezone_when_required_for_scheduling_raises_no_silent_fallba
         get_tenant_timezone("empty_tz_acct", required_for_scheduling=True)
     assert "empty timezone configured" in str(exc_info.value)
 
-    # 4. When required_for_scheduling=False, it should NOT raise; returns None or fallback
+    # 4. Built-in default line present in JSON but missing explicit 'timezone' key
+    profiles_file.write_text(json.dumps({
+        "secondary": {"displayName": "Line 2"}
+    }), encoding="utf-8")
+    assert get_tenant_timezone("secondary", required_for_scheduling=True) == ZoneInfo("Australia/Hobart")
+
+    # 5. When required_for_scheduling=False, it should NOT raise; returns None or fallback
     assert get_tenant_timezone("unknown_account_xyz", required_for_scheduling=False) is None
     assert get_tenant_timezone("unknown_account_xyz", required_for_scheduling=False, fallback="UTC") == ZoneInfo("UTC")
 

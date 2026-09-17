@@ -174,7 +174,14 @@ def get_tenant_timezone(
                         else:
                             return validate_iana_timezone(tz_val)
                     else:
-                        # Profile exists in file but explicitly lacks timezone
+                        # Profile exists in file without explicit timezone: check if this account has a built-in default
+                        defaults = LINE_PROFILE_DEFAULTS or {}
+                        if isinstance(defaults, dict) and account_key in defaults:
+                            def_profile = defaults[account_key]
+                            if isinstance(def_profile, dict):
+                                def_tz = def_profile.get("timezone") or def_profile.get("time_zone")
+                                if def_tz:
+                                    return validate_iana_timezone(def_tz)
                         if required_for_scheduling:
                             raise TenantTimezoneError(
                                 f"Tenant account '{account_key}' profile has no timezone configured. "

@@ -792,6 +792,7 @@ export interface SmsLineProfile {
   providerName: string;
   informationUrl: string;
   userPrompt: string;
+  timezone?: string;
 }
 
 export async function getSmsLineProfiles(): Promise<Record<'primary' | 'secondary', SmsLineProfile>> {
