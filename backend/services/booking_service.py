@@ -187,6 +187,14 @@ def load_working_hours() -> List[Dict[str, Any]]:
 def load_booking_services() -> List[Dict[str, Any]]:
     """Load both line catalogues for booking infrastructure, never AI context."""
     loader = _dyn("load_all_line_services", None)
+    if loader is None:
+        try:
+            from backend.services.settings_service import load_all_line_services as loader
+        except ImportError:
+            try:
+                from services.settings_service import load_all_line_services as loader
+            except ImportError:
+                loader = None
     if callable(loader):
         return loader()
     return []
@@ -196,9 +204,25 @@ def get_service_for_booking(service_id: str, account_key: Optional[str] = None) 
     """Resolve a service from the current Settings catalogue at decision time."""
     if account_key in FIRST_CONTACT_ACCOUNT_KEYS:
         line_loader = _dyn("load_line_services", None)
+        if line_loader is None:
+            try:
+                from backend.services.settings_service import load_line_services as line_loader
+            except ImportError:
+                try:
+                    from services.settings_service import load_line_services as line_loader
+                except ImportError:
+                    line_loader = None
         services = line_loader(account_key) if callable(line_loader) else []
     else:
         all_loader = _dyn("load_all_line_services", None)
+        if all_loader is None:
+            try:
+                from backend.services.settings_service import load_all_line_services as all_loader
+            except ImportError:
+                try:
+                    from services.settings_service import load_all_line_services as all_loader
+                except ImportError:
+                    all_loader = None
         services = all_loader() if callable(all_loader) else []
     return next((
         service for service in services
@@ -1191,6 +1215,14 @@ def get_booking_tool_suite(account_key: str) -> Any:
                 start, end, account_key, require_authoritative=True,
             )
         line_loader = _dyn("load_line_services", None)
+        if line_loader is None:
+            try:
+                from backend.services.settings_service import load_line_services as line_loader
+            except ImportError:
+                try:
+                    from services.settings_service import load_line_services as line_loader
+                except ImportError:
+                    line_loader = None
         hours_loader = _dyn("load_working_hours", load_working_hours)
         provider = LegacyCalendarDiscoveryProvider(
             services_loader=lambda: line_loader(account_key) if callable(line_loader) else [],
