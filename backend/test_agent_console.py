@@ -298,6 +298,9 @@ def test_autonomous_virtual_tools_are_explicitly_scoped():
     assert "inspect_code_changes" in main.AGENT_CONSOLE_ALLOWED_TOOLS
     assert "prepare_customer_sms_context" in main.AGENT_CONSOLE_ALLOWED_TOOLS
     assert "send_sms" in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "list_unanswered_threads" in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "inspect_message_thread" in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "save_sms_draft" in main.AGENT_CONSOLE_ALLOWED_TOOLS
     assert "run_shell" not in main.AGENT_CONSOLE_ALLOWED_TOOLS
     assert "start_coding_task" in main.AGENT_CONSOLE_CRITICAL_TOOLS
     assert "execute_code_deployment" in main.AGENT_CONSOLE_CRITICAL_TOOLS
@@ -337,6 +340,9 @@ def test_agent_prompt_forbids_customer_evidence_in_coding_task_fields():
     assert "An ordinary individual SMS explicitly requested" in prompt
     assert "prepare_customer_sms_context with phone, account_key, and draft_intent" in prompt
     assert "Both primary and secondary accounts are available" in prompt
+    assert "To work customer follow-ups, use list_unanswered_threads and inspect_message_thread" in prompt
+    assert "save an approved follow-up without sending it" in prompt
+    assert "save_sms_draft with phone, account_key" in prompt
 
 
 def test_coding_agent_routes_owner_authorised_sms_to_the_existing_operations_tool(
