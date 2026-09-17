@@ -337,10 +337,12 @@ AGENT_CONSOLE_ALLOWED_TOOLS = frozenset({
     "propose_booking_recovery",
     "propose_code_deployment",
     "propose_runtime_change",
+    "prepare_customer_sms_context",
     "recall_operational_memory",
     "remember_operational_learning",
     "research_internet",
     "search_message_bodies",
+    "send_sms",
     "start_coding_task",
 })
 
@@ -352,6 +354,7 @@ AGENT_CONSOLE_CRITICAL_TOOLS = frozenset({
     "propose_booking_recovery",
     "propose_code_deployment",
     "propose_runtime_change",
+    "send_sms",
     "remember_operational_learning",
     "start_coding_task",
 })
