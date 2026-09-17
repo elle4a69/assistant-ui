@@ -55,6 +55,7 @@ try:
         persist_operations_realtime_turn,
         serialize_operations_chat_message,
         OPERATIONS_AI_TOOLS,
+        _operations_claim_worker_task,
     )
 except ImportError:
     from core.database import get_db, SessionLocal
@@ -96,6 +97,7 @@ except ImportError:
         persist_operations_realtime_turn,
         serialize_operations_chat_message,
         OPERATIONS_AI_TOOLS,
+        _operations_claim_worker_task,
     )
 
 router = APIRouter()

@@ -659,9 +659,12 @@ def operations_ai_instructions(
         "available. Do not pretend a queued task is deployed. If you genuinely cannot perform the implementation, say "
         "so once in plain language, state the exact blocker, and give the owner the single next action that removes it.\n\n"
         "Known architecture: FastAPI/Python backend; React/TypeScript/Vite frontend; persistent SQLite under "
-        "/data; Uvicorn on port 8080; Google Calendar with SQLite fallback is the current booking write path. "
-        "The customer booking agent uses read-only discovery tools plus persistent propose/explicit-confirm "
-        "safeguards. FastAPI Bookings discovery is optional; final writes have not migrated there.\n\n"
+        "/data; Uvicorn on port 8080. Google Calendar is the authoritative live calendar system for both availability "
+        "discovery and booking creation (with SQLite local fallback). The customer booking agent uses read-only discovery "
+        "tools directly integrated with Google Calendar plus persistent propose/explicit-confirm safeguards. "
+        "FastAPI Bookings (FASTAPI_BOOKINGS_URL) is an optional alternate third-party external booking microservice provider, "
+        "NOT required for live Google Calendar functionality. When google_calendar_connected is true, live calendar "
+        "availability and booking verification are fully active, configured, and working through Google Calendar.\n\n"
         f"Live operational snapshot:\n{snapshot}\n\nDurable operational memory:\n{memory}"
         + (
             "\n\nRecent persistent owner conversation (oldest to newest):\n"
@@ -4028,10 +4031,10 @@ def agent_console_enabled() -> bool:
 
 def agent_console_max_steps() -> int:
     try:
-        configured = int(os.getenv("OPS_AGENT_MAX_STEPS", "50"))
+        configured = int(os.getenv("OPS_AGENT_MAX_STEPS", "200"))
     except ValueError:
-        configured = 50
-    return max(1, min(50, configured))
+        configured = 200
+    return max(1, min(200, configured))
 
 
 def agent_console_total_timeout_seconds() -> int:

@@ -226,7 +226,7 @@ class OperationsAgentRun(Base):
     objective = Column(Text, nullable=False)
     status = Column(String, nullable=False, default="starting", index=True)
     step_count = Column(Integer, nullable=False, default=0)
-    max_steps = Column(Integer, nullable=False, default=50)
+    max_steps = Column(Integer, nullable=False, default=200)
     cancel_requested = Column(Boolean, nullable=False, default=False)
     final_summary = Column(Text, nullable=True)
     error = Column(Text, nullable=True)

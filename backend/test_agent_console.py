@@ -1087,7 +1087,7 @@ def test_authenticated_websocket_streams_ordered_persisted_completion(
     with client.websocket_connect("/ws/agent", headers={"origin": "http://testserver"}) as socket:
         ready = socket.receive_json()
         assert ready["type"] == "ready"
-        assert ready["limits"]["maxSteps"] == 50
+        assert ready["limits"]["maxSteps"] == 200
         socket.send_json({"type": "start", "requestId": request_id, "objective": "Inspect safely and finish."})
         frames = receive_until(socket, "completed")
 
@@ -1172,12 +1172,12 @@ def test_step_cap_finishes_without_an_infinite_loop(isolated_agent_database, mon
     assert frames[-1]["status"] == "step_limit"
     assert frames[-1]["steps"] == 2
 
-def test_step_limit_defaults_to_50_and_caps_configuration(monkeypatch):
+def test_step_limit_defaults_to_200_and_caps_configuration(monkeypatch):
     monkeypatch.delenv("OPS_AGENT_MAX_STEPS", raising=False)
-    assert main.agent_console_max_steps() == 50
+    assert main.agent_console_max_steps() == 200
 
-    monkeypatch.setenv("OPS_AGENT_MAX_STEPS", "100")
-    assert main.agent_console_max_steps() == 50
+    monkeypatch.setenv("OPS_AGENT_MAX_STEPS", "300")
+    assert main.agent_console_max_steps() == 200
 
     monkeypatch.setenv("OPS_AGENT_MAX_STEPS", "invalid")
-    assert main.agent_console_max_steps() == 50
+    assert main.agent_console_max_steps() == 200
