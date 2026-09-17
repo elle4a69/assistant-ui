@@ -1,0 +1,1483 @@
+[
+  {
+    "path": "/openapi.json",
+    "name": "openapi",
+    "route_type": "Route",
+    "methods": [
+      "GET",
+      "HEAD"
+    ],
+    "endpoint": "openapi",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/docs",
+    "name": "swagger_ui_html",
+    "route_type": "Route",
+    "methods": [
+      "GET",
+      "HEAD"
+    ],
+    "endpoint": "swagger_ui_html",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/docs/oauth2-redirect",
+    "name": "swagger_ui_redirect",
+    "route_type": "Route",
+    "methods": [
+      "GET",
+      "HEAD"
+    ],
+    "endpoint": "swagger_ui_redirect",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/redoc",
+    "name": "redoc_html",
+    "route_type": "Route",
+    "methods": [
+      "GET",
+      "HEAD"
+    ],
+    "endpoint": "redoc_html",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/anon/content",
+    "name": "get_anon_content",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_anon_content",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/anon/content",
+    "name": "save_anon_content",
+    "route_type": "APIRoute",
+    "methods": [
+      "PUT"
+    ],
+    "endpoint": "save_anon_content",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/anon/image",
+    "name": "get_anon_image",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_anon_image",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/health",
+    "name": "health_check",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "health_check",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/auth/status",
+    "name": "admin_auth_status",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "admin_auth_status",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/auth/login",
+    "name": "admin_auth_login",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "admin_auth_login",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/auth/logout",
+    "name": "admin_auth_logout",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "admin_auth_logout",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/threads/{thread_id}/autoresponder",
+    "name": "toggle_autoresponder",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "toggle_autoresponder",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/threads/{thread_id}/pin",
+    "name": "set_thread_pinned",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "set_thread_pinned",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/threads/{thread_id}/block",
+    "name": "set_thread_blocked",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "set_thread_blocked",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/blocked-contacts",
+    "name": "list_blocked_contacts",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "list_blocked_contacts",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/blocked-contacts",
+    "name": "unblock_contact",
+    "route_type": "APIRoute",
+    "methods": [
+      "DELETE"
+    ],
+    "endpoint": "unblock_contact",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/calendar/bookings",
+    "name": "get_bookings",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_bookings",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/calendar/bookings/{booking_id}",
+    "name": "update_booking_endpoint",
+    "route_type": "APIRoute",
+    "methods": [
+      "PUT"
+    ],
+    "endpoint": "update_booking_endpoint",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/calendar/bookings/{booking_id}",
+    "name": "delete_booking_endpoint",
+    "route_type": "APIRoute",
+    "methods": [
+      "DELETE"
+    ],
+    "endpoint": "delete_booking_endpoint",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/calendar/freebusy",
+    "name": "get_free_slots_endpoint",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_free_slots_endpoint",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/push/config",
+    "name": "get_push_config",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_push_config",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/push/subscriptions",
+    "name": "save_push_subscription",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "save_push_subscription",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/push/subscriptions",
+    "name": "delete_push_subscription",
+    "route_type": "APIRoute",
+    "methods": [
+      "DELETE"
+    ],
+    "endpoint": "delete_push_subscription",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/a/{invite_token}",
+    "name": "follow_arrival_short_link",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "follow_arrival_short_link",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/arrival/admin/bookings/{booking_id}/invite",
+    "name": "create_arrival_invite",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "create_arrival_invite",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/arrival/activate",
+    "name": "activate_arrival",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "activate_arrival",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/arrival/status",
+    "name": "get_arrival_invite_status",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "get_arrival_invite_status",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/arrival/client/{session_id}",
+    "name": "get_client_arrival_session",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_client_arrival_session",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/arrival/client/{session_id}/messages",
+    "name": "send_client_arrival_message",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "send_client_arrival_message",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/arrival/admin/sessions",
+    "name": "list_arrival_sessions",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "list_arrival_sessions",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/arrival/admin/sessions/{session_id}",
+    "name": "get_admin_arrival_session",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_admin_arrival_session",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/arrival/admin/sessions/{session_id}/messages",
+    "name": "send_admin_arrival_message",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "send_admin_arrival_message",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/arrival/admin/sessions/{session_id}/close",
+    "name": "close_arrival_session",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "close_arrival_session",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/webhooks/sms",
+    "name": "webhook_sms",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "webhook_sms",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/admin/sms-simulator",
+    "name": "simulate_inbound_sms",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "simulate_inbound_sms",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/threads",
+    "name": "get_threads",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_threads",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/threads/catch-up",
+    "name": "catch_up_missed_messages",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "catch_up_missed_messages",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/threads/{thread_id}",
+    "name": "get_thread_detail",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_thread_detail",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/threads/{thread_id}/review-flags",
+    "name": "clear_thread_review_flags",
+    "route_type": "APIRoute",
+    "methods": [
+      "DELETE"
+    ],
+    "endpoint": "clear_thread_review_flags",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/threads/{thread_id}/arrivals/{session_id}/acknowledge",
+    "name": "acknowledge_thread_arrival",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "acknowledge_thread_arrival",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/threads/{thread_id}/takeover",
+    "name": "takeover_thread",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "takeover_thread",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/threads/{thread_id}/reply",
+    "name": "reply_thread",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "reply_thread",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/threads/{thread_id}/information-request/respond",
+    "name": "respond_to_information_request",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "respond_to_information_request",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/threads/{thread_id}/notes",
+    "name": "add_thread_note",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "add_thread_note",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/threads/{thread_id}/escalate",
+    "name": "escalate_thread",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "escalate_thread",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/threads/{thread_id}/resolve",
+    "name": "resolve_thread",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "resolve_thread",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/agent-console/runs",
+    "name": "list_agent_console_runs",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "list_agent_console_runs",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/agent-console/runs/{run_id}/events",
+    "name": "list_agent_console_events",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "list_agent_console_events",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/ws/agent",
+    "name": "operations_agent_websocket",
+    "route_type": "APIWebSocketRoute",
+    "methods": [
+      "WEBSOCKET"
+    ],
+    "endpoint": "operations_agent_websocket",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/internal/operations/worker-claim",
+    "name": "claim_operations_worker_task",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "claim_operations_worker_task",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/operations-chat/messages",
+    "name": "get_operations_chat_messages",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_operations_chat_messages",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/operations-chat/messages",
+    "name": "send_operations_chat_message",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "send_operations_chat_message",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/operations-chat/realtime",
+    "name": "start_operations_realtime_session",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "start_operations_realtime_session",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/operations-chat/realtime/turns",
+    "name": "save_operations_realtime_turn",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "save_operations_realtime_turn",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/operations-chat/realtime/tool",
+    "name": "run_operations_realtime_tool",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "run_operations_realtime_tool",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/rag/status",
+    "name": "get_rag_admin_status",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_rag_admin_status",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/admin/rag/status",
+    "name": "get_rag_admin_status",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_rag_admin_status",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/business-variables",
+    "name": "get_business_variables",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_business_variables",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/business-variables",
+    "name": "save_business_variables",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "save_business_variables",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/line-profiles",
+    "name": "get_line_profiles",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_line_profiles",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/line-profiles",
+    "name": "update_line_profiles",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "update_line_profiles",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/quick-replies/{account_key}",
+    "name": "get_quick_replies",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_quick_replies",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/quick-replies/{account_key}/{slot_index}",
+    "name": "update_quick_reply",
+    "route_type": "APIRoute",
+    "methods": [
+      "PUT"
+    ],
+    "endpoint": "update_quick_reply",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings",
+    "name": "get_settings",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_settings",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings",
+    "name": "update_settings",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "update_settings",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/qa-rules",
+    "name": "get_qa_rules",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_qa_rules",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/qa-rules",
+    "name": "save_qa_rules",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "save_qa_rules",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/first-contact-autoresponder",
+    "name": "get_first_contact_autoresponder",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_first_contact_autoresponder",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/first-contact-autoresponder",
+    "name": "save_first_contact_autoresponder",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "save_first_contact_autoresponder",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/messages/{message_id}/approve",
+    "name": "approve_draft_message",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "approve_draft_message",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/messages/{message_id}/draft",
+    "name": "update_draft_message",
+    "route_type": "APIRoute",
+    "methods": [
+      "PATCH"
+    ],
+    "endpoint": "update_draft_message",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/messages/{message_id}/discard",
+    "name": "discard_draft_message",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "discard_draft_message",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/messages/drafts/pending",
+    "name": "clear_pending_draft_messages",
+    "route_type": "APIRoute",
+    "methods": [
+      "DELETE"
+    ],
+    "endpoint": "clear_pending_draft_messages",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/messages/review/pending",
+    "name": "clear_review_only_threads",
+    "route_type": "APIRoute",
+    "methods": [
+      "DELETE"
+    ],
+    "endpoint": "clear_review_only_threads",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/learnings",
+    "name": "create_manual_learning",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "create_manual_learning",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/messages/export.csv",
+    "name": "export_messages_csv",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "export_messages_csv",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/learnings",
+    "name": "get_learned_information",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_learned_information",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/learnings/{entry_id}",
+    "name": "update_learned_information",
+    "route_type": "APIRoute",
+    "methods": [
+      "PUT"
+    ],
+    "endpoint": "update_learned_information",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/learnings/{entry_id}/approve",
+    "name": "approve_learned_information",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "approve_learned_information",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/learnings/approve-pending",
+    "name": "approve_pending_learned_information_endpoint",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "approve_pending_learned_information_endpoint",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/learnings/approve-selected",
+    "name": "approve_selected_learned_information_endpoint",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "approve_selected_learned_information_endpoint",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/learnings/sms-pair-preview",
+    "name": "sms_pair_learning_preview",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "sms_pair_learning_preview",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/learnings/sms-pair-import",
+    "name": "sms_pair_learning_import",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "sms_pair_learning_import",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/learnings/{entry_id}/redraft",
+    "name": "redraft_learned_information",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "redraft_learned_information",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/learnings/redraft-pending",
+    "name": "redraft_pending_learned_information",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "redraft_pending_learned_information",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/learnings/move-all-to-review",
+    "name": "move_all_learnings_to_review",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "move_all_learnings_to_review",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/learnings/{entry_id}",
+    "name": "remove_learned_information",
+    "route_type": "APIRoute",
+    "methods": [
+      "DELETE"
+    ],
+    "endpoint": "remove_learned_information",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/learnings/classify",
+    "name": "classify_learned_information",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "classify_learned_information",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/knowledge-curator",
+    "name": "list_knowledge_curator_state",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "list_knowledge_curator_state",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/knowledge-curator/run",
+    "name": "run_knowledge_curator_endpoint",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "run_knowledge_curator_endpoint",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/knowledge-curator/proposals/{proposal_id}/accept",
+    "name": "accept_knowledge_curator_proposal_endpoint",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "accept_knowledge_curator_proposal_endpoint",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/knowledge-curator/proposals/{proposal_id}/resolve",
+    "name": "resolve_knowledge_curator_proposal_endpoint",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "resolve_knowledge_curator_proposal_endpoint",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/knowledge-curator/proposals/{proposal_id}/{transition}",
+    "name": "transition_knowledge_curator_proposal_endpoint",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "transition_knowledge_curator_proposal_endpoint",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/knowledge-files",
+    "name": "get_knowledge_files",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_knowledge_files",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/upload-knowledge",
+    "name": "upload_knowledge_file",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "upload_knowledge_file",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/upload-credentials",
+    "name": "upload_credentials_file",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "upload_credentials_file",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/knowledge-files/{filename}",
+    "name": "get_knowledge_file_content",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_knowledge_file_content",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/knowledge-files/{filename}",
+    "name": "save_knowledge_file_content",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "save_knowledge_file_content",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/knowledge-files/{filename}",
+    "name": "delete_knowledge_file",
+    "route_type": "APIRoute",
+    "methods": [
+      "DELETE"
+    ],
+    "endpoint": "delete_knowledge_file",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/knowledge-files/{filename}/search",
+    "name": "search_knowledge_file_lines",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "search_knowledge_file_lines",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/knowledge-files/{filename}/purge",
+    "name": "purge_knowledge_file_lines",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "purge_knowledge_file_lines",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/services",
+    "name": "get_services",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_services",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/services",
+    "name": "save_services",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "save_services",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/sms-confirmation",
+    "name": "get_sms_confirmation",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_sms_confirmation",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/sms-confirmation",
+    "name": "save_sms_confirmation",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "save_sms_confirmation",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/booking-reminder",
+    "name": "get_booking_reminder_settings",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_booking_reminder_settings",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/booking-reminder",
+    "name": "save_booking_reminder_settings",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "save_booking_reminder_settings",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/calendar/bookings",
+    "name": "create_manual_booking",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "create_manual_booking",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/working-hours",
+    "name": "get_working_hours",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_working_hours",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/working-hours",
+    "name": "save_working_hours",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "save_working_hours",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/mobilemessage",
+    "name": "get_mobilemessage_settings",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_mobilemessage_settings",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/mobilemessage",
+    "name": "save_mobilemessage_settings",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "save_mobilemessage_settings",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/locanto/sync",
+    "name": "handle_locanto_message",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "handle_locanto_message",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/bootcamp/personas",
+    "name": "get_bootcamp_personas",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_bootcamp_personas",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/bootcamp/profile",
+    "name": "get_bootcamp_profile",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_bootcamp_profile",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/bootcamp/profile/apply",
+    "name": "apply_bootcamp_profile",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "apply_bootcamp_profile",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/bootcamp/profile/undo",
+    "name": "undo_bootcamp_profile",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "undo_bootcamp_profile",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/bootcamp/runs",
+    "name": "start_bootcamp_run",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "start_bootcamp_run",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/bootcamp/runs/latest",
+    "name": "get_latest_bootcamp_run",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_latest_bootcamp_run",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/bootcamp/runs/{run_id}",
+    "name": "get_bootcamp_run",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_bootcamp_run",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/bootcamp/conversations/{conversation_id}/information-request/respond",
+    "name": "respond_to_bootcamp_information_request",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "respond_to_bootcamp_information_request",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/bootcamp/runs/{run_id}/control",
+    "name": "control_bootcamp_run",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "control_bootcamp_run",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/bootcamp/runs",
+    "name": "reset_bootcamp_runs",
+    "route_type": "APIRoute",
+    "methods": [
+      "DELETE"
+    ],
+    "endpoint": "reset_bootcamp_runs",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/assets",
+    "name": "assets",
+    "route_type": "Mount",
+    "methods": [],
+    "endpoint": "StaticFiles",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/{full_path:path}",
+    "name": "serve_spa",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "serve_spa",
+    "dependencies": [],
+    "response_model": null
+  }
+]

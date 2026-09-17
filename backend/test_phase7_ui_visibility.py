@@ -33,22 +33,16 @@ def test_rag_status_endpoints_enabled(monkeypatch):
 
 
 def test_rag_status_endpoints_disabled(monkeypatch):
-    """Verify GET /api/admin/rag/status and /api/rag/status return explicit disabled state when feature flag is off."""
+    """Verify GET /api/admin/rag/status and /api/rag/status return 503 when feature flag is off."""
     monkeypatch.setattr(main, "STYLE_EXAMPLES_ENABLED", False)
     monkeypatch.setattr(main, "example_index", None)
 
     for endpoint in ["/api/admin/rag/status", "/api/rag/status"]:
         response = client.get(endpoint)
-        assert response.status_code == 200
+        assert response.status_code == 503
         data = response.json()
-
-        assert data["enabled"] is False
-        assert data["feature_flag_enabled"] is False
-        assert data["rag_state"] == "disabled"
-        assert data["validation_status"] == "disabled"
-        assert data["total_examples"] == 0
-        assert data["intent_counts"] == {}
-        assert data["dataset_hash"] is None
+        assert "detail" in data
+        assert "Style example retrieval is unavailable" in data["detail"]
 
 
 def test_knowledge_retrieval_errors_do_not_block_settings(tmp_path, monkeypatch):

@@ -166,3 +166,79 @@ def test_admin_rag_status_endpoint(monkeypatch):
     assert data["total_examples"] >= 20
     assert "intent_counts" in data
     assert "availability" in data["intent_counts"]
+
+
+def test_admin_rag_status_endpoint_unavailable(monkeypatch):
+    monkeypatch.setattr("main.STYLE_EXAMPLES_ENABLED", False)
+    monkeypatch.setattr("main.example_index", None)
+
+    response = client.get("/api/admin/rag/status")
+    assert response.status_code == 503
+    assert "Style example retrieval is unavailable" in response.json()["detail"]
+
+
+def test_symmetrical_synchronization_and_helpers(monkeypatch):
+    import main
+    try:
+        import backend.knowledge as knowledge_mod
+    except ImportError:
+        import knowledge as knowledge_mod
+
+    # 1. Test set_style_examples_enabled helper
+    main.set_style_examples_enabled(True)
+    assert main.STYLE_EXAMPLES_ENABLED is True
+    assert knowledge_mod.STYLE_EXAMPLES_ENABLED is True
+    assert main.is_style_examples_enabled() is True
+    assert knowledge_mod.is_style_examples_enabled() is True
+
+    main.set_style_examples_enabled(False)
+    assert main.STYLE_EXAMPLES_ENABLED is False
+    assert knowledge_mod.STYLE_EXAMPLES_ENABLED is False
+    assert main.is_style_examples_enabled() is False
+    assert knowledge_mod.is_style_examples_enabled() is False
+
+    # 2. Test set_example_index helper
+    dummy_index = SMSExampleIndex(DATASET_FILE)
+    main.set_example_index(dummy_index)
+    assert main.example_index is dummy_index
+    assert knowledge_mod.example_index is dummy_index
+    assert main.get_example_index() is dummy_index
+    assert knowledge_mod.get_example_index() is dummy_index
+
+    main.set_example_index(None)
+    assert main.example_index is None
+    assert knowledge_mod.example_index is None
+    assert main.get_example_index() is None
+    assert knowledge_mod.get_example_index() is None
+
+    # 3. Test symmetrical sync from knowledge -> main
+    knowledge_mod.STYLE_EXAMPLES_ENABLED = True
+    assert main.is_style_examples_enabled() is True
+    assert main.STYLE_EXAMPLES_ENABLED is True
+
+    knowledge_mod.example_index = dummy_index
+    assert main.get_example_index() is dummy_index
+    assert main.example_index is dummy_index
+
+    # 4. Test symmetrical sync from main -> knowledge
+    main.STYLE_EXAMPLES_ENABLED = False
+    assert knowledge_mod.is_style_examples_enabled() is False
+    assert knowledge_mod.STYLE_EXAMPLES_ENABLED is False
+
+    main.example_index = None
+    assert knowledge_mod.get_example_index() is None
+    assert knowledge_mod.example_index is None
+
+
+def test_render_template_variables_deduplication():
+    import main
+    try:
+        import backend.knowledge as knowledge_mod
+    except ImportError:
+        import knowledge as knowledge_mod
+
+    # Verify main uses the exact same function imported from knowledge
+    assert main.render_template_variables is knowledge_mod.render_template_variables
+    rendered = main.render_template_variables("Hello {name} at {website}", {"name": "Frank", "website": "https://example.com"})
+    assert rendered == "Hello Frank at https://example.com"
+

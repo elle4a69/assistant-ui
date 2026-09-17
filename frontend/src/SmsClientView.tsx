@@ -32,7 +32,6 @@ export default function SmsClientView() {
   const [composerText, setComposerText] = useState('');
   const [loading, setLoading] = useState(false);
   const [simulationError, setSimulationError] = useState<string | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const threadListRequestRef = useRef(0);
   const threadMessagesRequestRef = useRef(0);
   const threadIdRef = useRef(threadId);
@@ -109,11 +108,6 @@ export default function SmsClientView() {
       if (timeout !== undefined) window.clearTimeout(timeout);
     };
   }, [threadId, fetchThreadMessages]);
-
-  // Scroll to bottom when messages change
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
 
   const handleStartChat = (phone: string) => {
     if (!phone.trim()) return;
@@ -359,7 +353,6 @@ export default function SmsClientView() {
                   );
                 })
               )}
-              <div ref={messagesEndRef} />
             </div>
 
             {/* Quick Action Chips */}

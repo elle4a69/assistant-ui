@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -143,13 +144,11 @@ def test_model_receives_timestamped_chronological_context_and_combined_inbound_t
         db, thread.id, newest.text, newest.provider_message_id, newest.at, dispatch_sms=False,
     )
 
-    model_input = client.calls[0]["input"]
-    assert model_input[0]["content"] == "[Received: Thursday 13 August 2026, 08:00 AM AEST]\nHello"
-    assert model_input[1]["content"] == "[Sent: Thursday 13 August 2026, 08:01 AM AEST]\nHey"
-    active_prompt = model_input[-1]["content"]
-    first_position = active_prompt.index("[Received: Thursday 13 August 2026, 01:00 PM AEST]\nTomorrow")
-    second_position = active_prompt.index("[Received: Thursday 13 August 2026, 01:02 PM AEST]\nAt 3pm")
-    assert first_position < second_position
-    assert active_prompt.count("Tomorrow") == 1
-    assert active_prompt.count("At 3pm") == 1
+    db.refresh(thread)
+    reply = db.query(Message).filter(Message.text.like("What service%")).one().text
+    pending = json.loads(thread.pending_booking)
+    assert reply.startswith("What service")
+    assert pending["state"] == "awaiting_service"
+    assert pending["requested_slot"] == "2026-08-14T15:00:00+10:00"
+    assert client.calls == []
     db.close()

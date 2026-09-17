@@ -66,12 +66,6 @@ function SmsAssistantThread({
   onDiscardDraft?: (messageId: string) => void;
   onEditDraft?: (messageId: string, text: string) => void;
 }) {
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, events]);
-
   // Combine and sort messages & events chronologically
   const timeline = useMemo(() => {
     const items: Array<{ type: 'message' | 'event'; at: string; data: any }> = [];
@@ -82,7 +76,13 @@ function SmsAssistantThread({
 
   return (
     <ThreadPrimitive.Root className="flex flex-col flex-1 bg-slate-50 overflow-hidden">
-      <ThreadPrimitive.Viewport className="flex-1 overflow-y-auto p-4 flex flex-col gap-3 font-sans">
+      <ThreadPrimitive.Viewport
+        autoScroll={false}
+        scrollToBottomOnInitialize={false}
+        scrollToBottomOnRunStart={false}
+        scrollToBottomOnThreadSwitch={false}
+        className="flex-1 overflow-y-auto p-4 flex flex-col gap-3 font-sans"
+      >
         {timeline.length === 0 ? (
           <div className="flex-1 flex flex-col justify-center items-center text-slate-400 py-12 text-center">
             <p className="text-xs font-semibold">No messages in this conversation yet</p>
@@ -209,7 +209,6 @@ function SmsAssistantThread({
             );
           })
         )}
-        <div ref={messagesEndRef} />
       </ThreadPrimitive.Viewport>
     </ThreadPrimitive.Root>
   );

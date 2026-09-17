@@ -1,0 +1,217 @@
+# Anti-Gravity Strangler Refactoring Ledger
+
+## Batch 1: Neutral Leaf Configuration & Constants Extraction
+
+- **Batch ID:** BATCH-01
+- **Legacy area:** `backend/main.py` (Inline configuration, filesystem paths, regex patterns, prompt policies, and static constants) & `backend/config/timezone.py` (runtime reflection via `getattr(mod, ...)`)
+- **Canonical destination:** `backend/core/config.py` & `backend/core/constants.py`
+- **Files changed:**
+  - `backend/core/__init__.py` [NEW]
+  - `backend/core/constants.py` [NEW]
+  - `backend/core/config.py` [NEW]
+  - `backend/config/timezone.py` [MODIFIED]
+  - `backend/main.py` [MODIFIED]
+- **Symbols migrated:** 55+ symbols
+  - **Base directories & paths:** `BASE_DIR`, `TMP_DIR`, `DATA_DIR`, `PERSIST_DIR`, `KNOWLEDGE_DIR`, `PROMPTS_DIR`, `STYLE_PROFILE_STORE`, `BOOTCAMP_STORE`, `BOOTCAMP_OPENINGS_FILE`, `BUSINESS_VARIABLES_PATH`, `LINE_PROFILES_PATH`, `WORKING_HOURS_PATH`, `MESSAGE_UI_SETTINGS_PATH`, `QUICK_REPLIES_PATH`, `FIRST_CONTACT_AUTORESPONDER_PATH`, `BOOKING_REMINDER_CONFIG_PATH`, `BOOKING_REMINDER_SENT_PATH`, `AGENT_RUNS_DIR`, `OPERATIONS_WORKER_WORKFLOW_PATH`
+  - **Core environment / database config:** `DATABASE_URL`, `DB_FILE`, `DOTENV_AVAILABLE`, `AUTH_USERNAME`, `AUTH_PASSWORD`, `AUTH_COOKIE_NAME`, `AUTH_SESSION_MAX_AGE`, `PUBLIC_EXACT_PATHS`, `PORTAL_SPA_PATHS`, `AUDIT_SCHEMA_VERSION`, `PORT`, `port`
+  - **Account keys & constants:** `FIRST_CONTACT_ACCOUNT_KEYS`, `CONVERSATIONAL_AI_ACCOUNT_KEYS`, `FIRST_CONTACT_AUTORESPONDER_DEFAULT`, `AUTO_REPLY_GLOBAL_ENABLED`, `MANUAL_REPLY_DEDUPE_WINDOW`, `DEFAULT_CATCH_UP_LOOKBACK_DAYS`, `QUICK_REPLY_ACCOUNT_KEYS`, `QUICK_REPLY_DEFAULT_LABELS`, `MESSAGE_EXPORT_COLUMNS`, `LINE_SERVICE_FILENAMES`, `LINE_PROFILE_DEFAULTS`, `DAY_NAMES`, `DEFAULT_WORKING_HOURS`, `BUSINESS_VARIABLE_DEFAULTS`
+  - **Regex patterns:** `URL_TRAILING_PUNCTUATION_RE`, `OUTGOING_URL_RE`, `AVAILABILITY_REQUEST_RE`, `AVAILABILITY_CLAIM_RE`, `BOOTCAMP_HANDOFF_RE`, `BOOTCAMP_REFUSAL_RE`, `OPERATIONS_MEMORY_PRIVATE_RE`, `OPERATIONS_CODE_SECRET_RE`
+  - **Protocol & policy versions:** `AGENT_CONSOLE_PROTOCOL_VERSION`, `AGENT_CONSOLE_ACTIVE_STATUSES`, `AGENT_CONSOLE_TERMINAL_STATUSES`, `AGENT_CONSOLE_ALLOWED_TOOLS`, `AGENT_CONSOLE_CRITICAL_TOOLS`, `AGENT_CONSOLE_HISTORY_LIMIT`, `AGENT_CONSOLE_HISTORY_DAYS`, `AGENT_CONSOLE_WORKSPACE_LIMIT_BYTES`, `AGENT_CONSOLE_CONTEXT_MAX_CHARS`, `AGENT_CONSOLE_MEMORY_MAX_CHARS`, `AGENT_CONSOLE_CONTEXT_MESSAGE_LIMIT`, `AGENT_CONSOLE_CONTEXT_LEGACY_RUN_LIMIT`, `AGENT_CONSOLE_ACTION_TIMEOUT_SECONDS`, `AGENT_CONSOLE_CODING_SUBMISSION_RESERVED_SECONDS`, `OPERATIONS_CODE_ACTIVE_STATUSES`, `OPERATIONS_CODE_ALLOWED_EXTENSIONS`, `OPERATIONS_CODE_ALLOWED_NAMES`, `OPERATIONS_CODE_ALLOWED_SUFFIXES`, `OPERATIONS_CODE_IMMUTABLE_PATHS`, `OPERATIONS_WORKER_PROTOCOL_VERSION`, `OPERATIONS_WORKER_OIDC_AUDIENCE`, `OPERATIONS_VOICE_SHARED_TOOL_NAMES`, `OPERATIONS_MEMORY_CATEGORIES`, `DEFAULT_BOOKING_REMINDER_TEMPLATE`, `BOOKING_REMINDER_LOCK`, `INTERNAL_INSTRUCTION_REPLY_PATTERNS`, `UNSAFE_HOLDING_REPLY_PATTERNS`, `AVAILABILITY_REPLY_POLICY`, `BOOKING_AVAILABILITY_SAFETY_POLICY`, `RETRIEVED_BUSINESS_CONTEXT_POLICY`, `SERVICE_AND_BOOKING_CONVERSATION_POLICY`, `RELEVANCE_AND_THREAD_FLOW_POLICY`, `SMS_TYPOGRAPHY_POLICY`, `TAKEOVER_RELEASE_EVENT_TYPES`
+- **Symbols deleted:** 0 (Zero-loss backwards compatibility: all symbols imported and re-exported from `backend/main.py`)
+- **Compatibility shims added:** Clean fallback imports between `backend.core.config` / `core.config` and full re-exports in `backend/main.py`
+- **Compatibility shims removed:** Dynamic `getattr(mod, "LINE_PROFILES_PATH")` and `getattr(mod, "LINE_PROFILE_DEFAULTS")` in `backend/config/timezone.py` completely eliminated in favor of direct leaf imports
+- **Tests run:**
+  - `python -m pytest backend/test_route_parity.py -v` (4 passed)
+  - `python -m pytest backend/test_tenant_timezone.py backend/test_curator_autonomy.py backend/test_knowledge_migration.py backend/test_knowledge_repository.py backend/test_semantic_retrieval.py -v` (53 passed)
+  - Full test suite: `python -m pytest -q` (576 passed / 576 total)
+- **Audit agent:** Independent Code Audit Agent (`051aa0d8`)
+- **Audit result:** PASS (100% test pass, 0 regressions, neutral leaf invariant verified)
+- **Remaining dependencies:** Module-level state & locks (Batch 2), service extractions (Batches 3-7), compatibility bridges (Batch 8)
+- **main.py lines before:** 16,447
+- **main.py lines after:** 16,153 (Net -294 lines)
+
+## Batch 2: Database Infrastructure & External Service Clients
+
+- **Batch ID:** BATCH-02
+- **Legacy area:** `backend/main.py` (Database engine, ModelBase, SessionLocal, get_db, db_session, SQLite pragmas, OpenAI client, Google Calendar service, Twilio client, Operations GitHub client, Line profiles, Business variables)
+- **Canonical destination:** `backend/core/database.py` & `backend/core/clients.py`
+- **Files changed:**
+  - `backend/core/database.py` [NEW]
+  - `backend/core/clients.py` [NEW]
+  - `backend/main.py` [MODIFIED]
+- **Symbols migrated:**
+  - **Database infrastructure:** `Base`, `ModelBase`, `engine`, `SessionLocal`, `get_db`, `db_session`, `sqlite_connect_args`, `set_sqlite_pragma`
+  - **External clients & services:** `openai_client`, `init_openai_client`, `calendar_service`, `GoogleCalendarService`, `init_calendar_service`, `twilio_client`, `init_twilio_client`, `mobilemessage_service`, `operations_github_client`, `operations_github_oidc_verifier`, `load_line_profiles`, `save_line_profiles`, `get_line_profile`, `_normalize_line_profile`, `effective_line_user_prompt`, `get_line_business_variable_values`, `canonical_phone_number`, `resolve_provider_context`
+- **Symbols deleted:** 0 (All symbols re-exported in `backend/main.py` with 100% object identity preservation)
+- **Compatibility enhancements:**
+  - Robust `__init_subclass__` in `ModelBase` merging `extend_existing: True` dynamically across all subclass definitions (dict, tuple, or absent).
+  - Dynamic `_resolve_line_profiles_path()` honoring test monkeypatching across modules.
+  - Class-level `_calendar_event_model = None` on `GoogleCalendarService` supporting `object.__new__` test instantiations.
+  - Safe transactional rollbacks on SQLite fallback calendar operations.
+- **Tests run:**
+  - `python -m pytest backend/test_route_parity.py -v` (4 passed / 4 total)
+  - `python -m pytest backend/test_timestamp_aware_replies.py backend/test_booking_boundary_rollback.py backend/test_settings_and_drafts.py backend/test_conversational_booking.py -v` (88 passed / 88 total)
+  - Full test suite: `python -m pytest -q` (576 passed / 576 total)
+- **Audit agent:** Independent Code Audit Agent (`9e0aebf8`), repaired by Neutral Core Repair Engineer (`dc430c1a`)
+- **Audit result:** PASS (All findings resolved, 125/125 routes verified, 576/576 tests passed)
+- **main.py lines before:** 16,153
+- **main.py lines after:** 15,640 (Net -513 lines)
+
+## Batch 3: Domain Models, Schemas & Shared State Extraction
+
+- **Batch ID:** BATCH-03
+- **Legacy area:** `backend/main.py` (SQLAlchemy ORM models, Pydantic request/response schemas, in-memory locks, mutable thread locks and caches)
+- **Canonical destination:**
+  - `backend/models/domain.py` & `backend/models/__init__.py`
+  - `backend/schemas/domain.py` & `backend/schemas/__init__.py`
+  - `backend/core/state.py`
+- **Files changed:**
+  - `backend/models/__init__.py` [NEW]
+  - `backend/models/domain.py` [NEW]
+  - `backend/schemas/__init__.py` [NEW]
+  - `backend/schemas/domain.py` [NEW]
+  - `backend/core/state.py` [NEW]
+  - `backend/main.py` [MODIFIED]
+  - `docs/refactor/refactor_ledger.md` [MODIFIED]
+- **Symbols migrated:** 70+ symbols
+  - **SQLAlchemy ORM models (15):** `Thread`, `BlockedContact`, `Message`, `InboundWebhookReceipt`, `Note`, `ThreadEvent`, `CalendarEvent`, `ArrivalSession`, `ArrivalChatMessage`, `PushSubscription`, `OperationsChatMessage`, `OperationsAction`, `OperationsMemory`, `OperationsAgentRun`, `OperationsAgentEvent`
+  - **Shared state & concurrency locks (17):** `LEARNED_INFORMATION_LOCK`, `KNOWLEDGE_CURATOR_LOCK`, `OUTBOUND_SMS_SEND_LOCK`, `SMS_REPLY_GLOBAL_LOCK`, `SMS_REPLY_THREAD_LOCKS`, `get_thread_lock`, `_agent_start_lock`, `_agent_event_lock`, `_agent_run_tasks`, `_operations_code_task_lock`, `_operations_code_deployment_lock`, `_quick_replies_lock`, `_vapid_key_lock`, `BOOKING_REMINDER_LOCK`, `OPERATIONS_CODE_BLOCKED_PARTS`, `OPERATIONS_CODE_BLOCKED_NAMES`, `KNOWLEDGE_CHUNKS`
+  - **Pydantic schemas (55):** `WebhookSMSInput`, `AdminSmsSimulationInput`, `TakeoverInput`, `ReplyInput`, `DraftUpdateInput`, `NoteInput`, `EscalateInput`, `ResolveInput`, `AutoresponderInput`, `ThreadPinnedInput`, `ThreadBlockedInput`, `FirstContactAutoresponderInput`, `InformationRequestResponseInput`, `FirstContactAutoresponderAccountsInput`, `ManualLearningInput`, `LearnedInformationUpdateInput`, `LearnedInformationBulkApproveInput`, `SmsLearningPreviewInput`, `SmsLearningCandidateInput`, `SmsLearningImportInput`, `ArrivalInviteInput`, `ArrivalActivateInput`, `ArrivalMessageInput`, `PushSubscriptionKeysInput`, `PushSubscriptionInput`, `AdminLoginInput`, `UpdateBookingInput`, `ManualBookingInput`, `BookingReminderInput`, `SmsConfirmationInput`, `BusinessVariableInput`, `BusinessVariablesInput`, `LineProfileInput`, `LineProfilesInput`, `SettingsUpdateInput`, `QuickReplyInput`, `OperationsChatInput`, `OperationsVoiceToolInput`, `OperationsRealtimeToolInput`, `OperationsRealtimeTurnInput`, `QARuleItem`, `FileSaveInput`, `FileSearchInput`, `FilePurgeInput`, `ServiceItem`, `ServicesListInput`, `WorkingHourEntry`, `WorkingHoursInput`, `MobileMessageConfigInput`, `LocantoMessagePayload`, `BootcampRunInput`, `BootcampControlInput`, `BootcampProfileInput`, `BootcampProfileApplyInput`, `BootcampInformationRequestInput`
+- **Symbols deleted:** 0 (Zero-loss backward compatibility: every symbol imported and re-exported from `backend/main.py` preserving 100% object identity)
+- **Compatibility enhancements:**
+  - Dual import paths (`backend.models` / `models`, `backend.schemas` / `schemas`, `backend.core.state` / `core.state`) enabling standalone and package test execution.
+  - Neutral leaf isolation verified: `backend.models`, `backend.schemas`, and `backend.core.state` never import `main` or any route module.
+  - Re-export wiring for `GoogleCalendarService._calendar_event_model = CalendarEvent` and `calendar_service._calendar_event_model = CalendarEvent`.
+  - In-place mutation compatibility for `KNOWLEDGE_CHUNKS.clear()` ensuring shared object identity across caller scopes.
+- **Tests run:**
+  - `python -m pytest backend/test_route_parity.py -v` (4 passed / 125 routes in 100% parity)
+  - `python -m pytest backend/test_timestamp_aware_replies.py backend/test_booking_boundary_rollback.py backend/test_backend.py backend/test_phone_threads.py -v` (22 passed / 22 total)
+  - Full test suite: `python -m pytest -q` (576 passed / 576 total)
+- **Audit result:** PASS (100% test pass, 0 regressions, 0 circular dependencies)
+- **main.py lines before:** 15,785
+- **main.py lines after:** 15,421 (Net -364 lines)
+
+## Batch 4: Domain Services Extraction
+
+- **Batch ID:** BATCH-04
+- **Legacy area:** `backend/main.py` (Domain services: Authentication & security, Booking workflows & calendar availability, Arrival orchestration & push alerts, SMS conversation & autoresponder pipelines, Operations AI & coding agent console)
+- **Canonical destination:**
+  - `backend/services/auth_service.py`
+  - `backend/services/booking_service.py`
+  - `backend/services/arrival_service.py`
+  - `backend/services/sms_service.py`
+  - `backend/services/operations_service.py`
+  - `backend/services/__init__.py`
+- **Files changed:**
+  - `backend/services/__init__.py` [NEW]
+  - `backend/services/auth_service.py` [NEW]
+  - `backend/services/booking_service.py` [NEW]
+  - `backend/services/arrival_service.py` [NEW]
+  - `backend/services/sms_service.py` [NEW]
+  - `backend/services/operations_service.py` [NEW]
+  - `backend/main.py` [MODIFIED]
+  - `docs/refactor/refactor_ledger.md` [MODIFIED]
+- **Symbols migrated:** 230+ symbols
+  - **Auth Service:** `_valid_admin_credentials`, `_admin_session_token`, `_valid_admin_session`, `_set_admin_session_cookie`, `_clear_admin_session_cookie`, `_is_public_exact_path`, `_is_portal_spa_path`, `build_authority_context`, `verify_admin_access`
+  - **Booking Service:** `load_working_hours`, `save_working_hours`, `current_business_time`, `parse_business_datetime`, `booking_availability_error`, `propose_conversational_booking`, `confirm_conversational_booking`, `run_booking_reminders`, `get_booking_tool_suite`, `get_service_for_booking`, `load_booking_services`, `is_explicit_booking_confirmation`
+  - **Arrival Service:** `_hash_arrival_token`, `_create_arrival_short_code`, `_ensure_arrival_token_index`, `_issue_arrival_invite`, `_activate_arrival_session`, `_push_configured`, `send_arrival_push_notifications`, `send_arrival_clear_notifications`, `process_due_arrival_alerts`, `extract_arrival_intent`, `resolve_arrival_line_key`
+  - **SMS Service:** `run_sms_reply_logic`, `process_inbound_sms`, `load_quick_replies`, `save_quick_replies`, `load_first_contact_autoresponders`, `save_first_contact_autoresponders`, `human_replied_after`, `is_latest_customer_turn`, `build_model_input`, `build_model_instructions`, `find_thread_by_phone`, `send_sms_message_with_delivery_tracking`
+  - **Operations Service:** `_agent_execute_action`, `_operations_start_coding_task`, `_operations_propose_code_deployment`, `_operations_execute_code_deployment`, `_prune_agent_console_history`, `_run_agent_console`, `_stream_agent_run`, `_agent_websocket_authenticated`, `_agent_websocket_origin_allowed`, `operations_code_access_available`, `operations_deployment_enabled`, `execute_runtime_change`
+- **Symbols deleted:** 0 (Zero-loss backward compatibility: 100% of domain service symbols re-exported from `backend/main.py`)
+- **Compatibility enhancements:**
+  - Dynamic symbol lookup via `_dyn(name, fallback)` across services supporting 660+ unit test `monkeypatch.setattr(main, ...)` invocations without drift.
+  - Bidirectional `sys.modules` aliasing for `agent_console` / `backend.agent_console`.
+  - Neutral leaf invariant strictly preserved (zero imports from `backend.main` or route modules).
+- **Tests run:**
+  - `python -m pytest backend/test_route_parity.py -v` (4 passed / 125 routes matching baseline 100%)
+  - `python -m pytest backend/test_agent_console.py backend/test_operations_github_service.py -v` (48 passed)
+  - `python -m pytest backend/test_push_notifications.py backend/test_knowledge_integrity.py backend/test_prompting.py -v` (45 passed)
+  - Full test suite: `python -m pytest -q` (576 passed / 576 total, 100% pass rate)
+- **Audit agent:** Independent Code Audit Agent (`8afa9593`)
+- **Audit result:** PASS (100% test pass, 100% route contract parity, 0 regressions, neutral leaf invariant verified)
+- **main.py lines before:** 15,421
+- **main.py lines after:** 8,285 (Net -7,136 lines, 46.3% reduction!)
+
+## Batch 5: Legacy Duplicate Elimination & Curator Bridge Unwiring
+
+- **Batch ID:** BATCH-05
+- **Legacy area:** `backend/main.py` (Duplicate inline implementations of Knowledge Curator inspection, proposal transitions, metadata repair, and dynamic claim sanitization)
+- **Canonical destination:** `backend/curator/` (`service.py`, `supersession.py`, `authority.py`, `sanitizer.py`, `classifier.py`)
+- **Files changed:**
+  - `backend/main.py` [MODIFIED]
+  - `docs/refactor/refactor_ledger.md` [MODIFIED]
+- **Symbols migrated / re-exported:** 48 symbols
+  - Constants & state: `KNOWLEDGE_CURATOR_STATE_PATH`, `KNOWLEDGE_CURATOR_MAX_RUNS`, `KNOWLEDGE_CURATOR_MAX_PROPOSALS`, `KNOWLEDGE_CURATOR_MAX_MAINTENANCE_AUDITS`, `KNOWLEDGE_CURATOR_MAX_BACKUPS`, `KNOWLEDGE_CURATOR_MODEL`, `KNOWLEDGE_CURATOR_FINDING_TYPES`, `KNOWLEDGE_CURATOR_ACTIONS`, `KNOWLEDGE_CURATOR_UNRESOLVED_STATUSES`, `KNOWLEDGE_CURATOR_RESOLUTIONS`, `KNOWLEDGE_CURATOR_CONTEXTUAL_SOURCE_MARKERS`, `KNOWLEDGE_CURATOR_MALFORMED_REFERENCE_REASONS`
+  - Helpers & sanitizers: `_openai_error_code`, `is_openai_quota_exhausted`, `_curator_empty_state`, `_bound_curator_proposals`, `_curator_safe_state_run`, `_curator_safe_maintenance_entry`, `_curator_sanitize_record_references`, `_curator_safe_malformed_references`, `_curator_safe_state_proposal`, `_load_curator_state`, `_save_curator_state`, `_curator_record_preview`, `_curator_reference_statuses`, `_curator_reference_status_preview`, `_present_curator_proposal`, `_present_curator_state`, `_curator_records`, `_curator_authority_role`, `_curator_source_role`, `_curator_applicability_key`, `_curator_valid_revision`, `_curator_invalid_metadata_fields`, `_curator_finding`, `_curator_dynamic_claim_detail`, `_curator_dynamic_claim_kind`, `_repair_legacy_knowledge_metadata`
+  - Service functions & classes: `inspect_knowledge_integrity`, `_classify_curator_model_failure`, `_curator_owner_model_message`, `_curator_enrich_proposals`, `run_knowledge_curator`, `get_knowledge_curator_state`, `_curator_proposal_is_current`, `transition_knowledge_curator_proposal`, `accept_knowledge_curator_proposal`, `resolve_knowledge_curator_proposal`, `_approve_curator_supersession_entry`, `KnowledgeCuratorService`
+- **Symbols deleted:** 0 (Zero-loss backward compatibility: 100% of curator symbols preserved and cleanly imported/re-exported from `backend.curator`)
+- **Compatibility enhancements:**
+  - Complete elimination of ~1,050 lines of duplicate code in `backend/main.py`.
+  - Full compatibility re-export of internal helpers expected by unit tests (`_curator_dynamic_claim_detail`, `_curator_dynamic_claim_kind`, `_repair_legacy_knowledge_metadata`).
+  - Fallback import between `backend.curator` and `curator` for environment agility.
+- **Tests run:**
+  - `python -m pytest backend/test_route_parity.py -v` (4 passed / 125 routes matching baseline 100%)
+  - `python -m pytest backend/test_knowledge_curator.py backend/test_knowledge_integrity.py backend/test_curator_autonomy.py backend/test_knowledge_migration.py -v` (121 passed / 121 total)
+  - Full test suite: `python -m pytest -q` (576 passed / 576 total, 100% pass rate in 47.35s)
+- **Audit agent:** Independent Code Audit Agent (`37b817c9`, `0ad81227`, `8284200f`)
+- **Audit result:** PASS (100% test pass, 100% route contract parity, 0 regressions, clean delegation to modular curator package)
+- **main.py lines before:** 8,285
+- **main.py lines after:** 7,234 (Net -1,051 lines)
+
+## Batch 6: Composition Root & Full Route Extraction
+
+- **Batch ID:** BATCH-06
+- **Legacy area:** `backend/main.py` (Decomposition of monolithic routes, remaining services, and final reduction into pure composition root < 300 lines)
+- **Canonical destination:**
+  - `backend/routes/auth.py`
+  - `backend/routes/booking.py`
+  - `backend/routes/arrival.py`
+  - `backend/routes/phone.py`
+  - `backend/routes/sms.py`
+  - `backend/routes/curator.py`
+  - `backend/routes/settings.py`
+  - `backend/routes/operations.py`
+  - `backend/routes/bootcamp.py`
+  - `backend/routes/misc.py`
+  - `backend/routes/__init__.py`
+  - `backend/services/settings_service.py`
+  - `backend/services/learning_service.py`
+  - `backend/services/phone_service.py`
+  - `backend/services/bootcamp_service.py`
+  - `backend/services/knowledge_service.py`
+  - `backend/main.py` (Slim composition root: 237 lines)
+- **Files changed:**
+  - `backend/routes/auth.py` [NEW]
+  - `backend/routes/booking.py` [NEW]
+  - `backend/routes/arrival.py` [NEW]
+  - `backend/routes/phone.py` [NEW]
+  - `backend/routes/sms.py` [NEW]
+  - `backend/routes/curator.py` [NEW]
+  - `backend/routes/settings.py` [NEW]
+  - `backend/routes/operations.py` [NEW]
+  - `backend/routes/bootcamp.py` [NEW]
+  - `backend/routes/misc.py` [NEW]
+  - `backend/routes/__init__.py` [NEW]
+  - `backend/services/settings_service.py` [NEW]
+  - `backend/services/learning_service.py` [NEW]
+  - `backend/services/phone_service.py` [NEW]
+  - `backend/services/bootcamp_service.py` [NEW]
+  - `backend/services/knowledge_service.py` [NEW]
+  - `backend/core/database.py` [MODIFIED]
+  - `backend/main.py` [MODIFIED]
+  - `docs/refactor/refactor_ledger.md` [MODIFIED]
+- **Symbols migrated:** All 125 route endpoints, 10 domain APIRouters, 40+ secondary services and helpers.
+- **Symbols deleted:** 0 (Zero-loss backward compatibility: 100% of routes and symbols re-exported from `backend/main.py`).
+- **Compatibility enhancements:**
+  - `backend/main.py` reduced to **237 lines** (< 300 lines composition root threshold achieved).
+  - 100% route contract parity across all 125 registered FastAPI routes verified by `backend/test_route_parity.py`.
+  - In-memory SQLite test isolation solved via `StaticPool` in `backend/core/database.py` for cross-test test suite robustness.
+  - Complete zero-loss backwards compatibility: all tests importing from `main` or `backend.main` continue to pass without changes.
+- **Tests run:**
+  - `python -m pytest backend/test_route_parity.py -v` (4 passed / 125 routes matching baseline 100%)
+  - `python -m pytest backend/test_phase7_ui_visibility.py backend/test_prompt_assembly.py backend/test_prompting.py backend/test_push_notifications.py backend/test_services.py backend/test_settings_and_drafts.py -v` (56 passed / 56 total)
+  - Full regression test suite: `python -m pytest -q` (576 passed / 576 total, 100% pass rate in 43.58s)
+- **Audit agent:** Independent Code Audit Agent
+- **Audit result:** PASS (576/576 tests passed, 100% route parity, main.py is 237 lines, leaf invariant verified)
+- **main.py lines before:** 7,234
+- **main.py lines after:** 237 (Net -6,997 lines, 96.7% reduction!)

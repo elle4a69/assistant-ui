@@ -18,7 +18,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from operations_github_service import redact_sensitive_text
+try:
+    from backend.operations_github_service import redact_sensitive_text
+except ImportError:
+    from operations_github_service import redact_sensitive_text
 
 
 AGENT_ACTIONS = Literal[
