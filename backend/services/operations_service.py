@@ -1471,12 +1471,12 @@ def _operations_prepare_customer_sms_context(
             from backend.services.auth_service import build_authority_context
             from backend.services.booking_service import is_booking_or_availability_turn
             from backend.services.sms_service import build_model_instructions
-            from backend.curator.templates import render_template_variables
+            from backend.knowledge import render_template_variables
         except ImportError:
             from services.auth_service import build_authority_context
             from services.booking_service import is_booking_or_availability_turn
             from services.sms_service import build_model_instructions
-            from curator.templates import render_template_variables
+            from knowledge import render_template_variables
 
     thread = find_thread_by_phone(db, canonical_phone, account_key)
     history: List[Dict[str, Any]] = []

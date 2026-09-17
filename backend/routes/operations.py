@@ -29,6 +29,9 @@ try:
         OperationsVoiceToolInput,
     )
     from backend.services.operations_service import (
+        _serialize_agent_run,
+        _serialize_agent_event,
+        _build_agent_conversation_context,
         _create_agent_run,
         _run_agent_console,
         _stream_agent_run,
@@ -67,6 +70,9 @@ except ImportError:
         OperationsVoiceToolInput,
     )
     from services.operations_service import (
+        _serialize_agent_run,
+        _serialize_agent_event,
+        _build_agent_conversation_context,
         _create_agent_run,
         _run_agent_console,
         _stream_agent_run,

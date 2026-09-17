@@ -616,9 +616,9 @@ def confirm_conversational_booking(
         render_fn = _dyn("render_template_variables", None)
         if render_fn is None:
             try:
-                from backend.curator.templates import render_template_variables as render_fn
+                from backend.knowledge import render_template_variables as render_fn
             except ImportError:
-                from curator.templates import render_template_variables as render_fn
+                from knowledge import render_template_variables as render_fn
 
         get_vars_fn = _dyn("get_business_variable_values", None)
         biz_vars = get_vars_fn() if callable(get_vars_fn) else {}
@@ -1299,9 +1299,9 @@ def process_due_booking_reminders() -> None:
                 render_fn = _dyn("render_template_variables", None)
                 if render_fn is None:
                     try:
-                        from backend.curator.templates import render_template_variables as render_fn
+                        from backend.knowledge import render_template_variables as render_fn
                     except ImportError:
-                        from curator.templates import render_template_variables as render_fn
+                        from knowledge import render_template_variables as render_fn
 
                 sms_text = render_fn(config["template"], variables)
                 reminder_key = f"booking-reminder:{booking.id}"

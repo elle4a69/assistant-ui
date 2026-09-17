@@ -254,9 +254,9 @@ def build_model_instructions(
         render_style = _dyn("render_style_profile", None)
         if render_style is None:
             try:
-                from backend.curator.authority import render_style_profile as render_style
+                from backend.bootcamp import render_style_profile as render_style
             except ImportError:
-                from curator.authority import render_style_profile as render_style
+                from bootcamp import render_style_profile as render_style
         if callable(render_style):
             sections.append(render_style(style_profile))
     if examples:
@@ -273,9 +273,9 @@ def build_model_instructions(
     validate_fn = _dyn("validate_no_unresolved_placeholders", None)
     if validate_fn is None:
         try:
-            from backend.curator.templates import validate_no_unresolved_placeholders as validate_fn
+            from backend.knowledge import validate_no_unresolved_placeholders as validate_fn
         except ImportError:
-            from curator.templates import validate_no_unresolved_placeholders as validate_fn
+            from knowledge import validate_no_unresolved_placeholders as validate_fn
     if callable(validate_fn):
         validate_fn(instructions, context_label="model instructions")
     return instructions
@@ -358,9 +358,9 @@ def build_model_input(
     validate_fn = _dyn("validate_no_unresolved_placeholders", None)
     if validate_fn is None:
         try:
-            from backend.curator.templates import validate_no_unresolved_placeholders as validate_fn
+            from backend.knowledge import validate_no_unresolved_placeholders as validate_fn
         except ImportError:
-            from curator.templates import validate_no_unresolved_placeholders as validate_fn
+            from knowledge import validate_no_unresolved_placeholders as validate_fn
     if callable(validate_fn):
         for item in model_input:
             validate_fn(item["content"], context_label=f"input role '{item['role']}'")
@@ -465,9 +465,9 @@ def assemble_safe_prompt(
     render_fn = _dyn("render_template_variables", None)
     if render_fn is None:
         try:
-            from backend.curator.templates import render_template_variables as render_fn
+            from backend.knowledge import render_template_variables as render_fn
         except ImportError:
-            from curator.templates import render_template_variables as render_fn
+            from knowledge import render_template_variables as render_fn
 
     system_prompt_rendered = render_fn(system_prompt_tmpl, business_variables)
     user_prompt_rendered = render_fn(user_prompt_tmpl, {
@@ -480,18 +480,18 @@ def assemble_safe_prompt(
     classify_intent = _dyn("classify_query_intent", None)
     if classify_intent is None:
         try:
-            from backend.curator.authority import classify_query_intent
+            from backend.knowledge import classify_query_intent
         except ImportError:
-            from curator.authority import classify_query_intent
+            from knowledge import classify_query_intent
 
     intent = classify_intent(query) if callable(classify_intent) else "other"
 
     get_examples = _dyn("get_style_examples", None)
     if get_examples is None:
         try:
-            from backend.curator.authority import get_style_examples
+            from backend.knowledge import get_style_examples
         except ImportError:
-            from curator.authority import get_style_examples
+            from knowledge import get_style_examples
 
     rendered_examples = get_examples(query, intent=intent, limit=3, render_variables=True) if callable(get_examples) else []
 
@@ -505,9 +505,9 @@ def assemble_safe_prompt(
     validate_fn = _dyn("validate_no_unresolved_placeholders", None)
     if validate_fn is None:
         try:
-            from backend.curator.templates import validate_no_unresolved_placeholders as validate_fn
+            from backend.knowledge import validate_no_unresolved_placeholders as validate_fn
         except ImportError:
-            from curator.templates import validate_no_unresolved_placeholders as validate_fn
+            from knowledge import validate_no_unresolved_placeholders as validate_fn
     if callable(validate_fn):
         validate_fn(instructions, context_label="system instructions")
         validate_fn(user_prompt_rendered, context_label="user prompt")
@@ -1549,9 +1549,9 @@ def run_sms_reply_logic(
     render_fn = _dyn("render_template_variables", None)
     if render_fn is None:
         try:
-            from backend.curator.templates import render_template_variables as render_fn
+            from backend.knowledge import render_template_variables as render_fn
         except ImportError:
-            from curator.templates import render_template_variables as render_fn
+            from knowledge import render_template_variables as render_fn
 
     system_prompt_rendered = render_fn(system_prompt_tmpl, {
         **business_variables,
@@ -1637,9 +1637,9 @@ def run_sms_reply_logic(
             get_examples_fn = _dyn("get_style_examples", None)
             if get_examples_fn is None:
                 try:
-                    from backend.curator.authority import get_style_examples as get_examples_fn
+                    from backend.knowledge import get_style_examples as get_examples_fn
                 except ImportError:
-                    from curator.authority import get_style_examples as get_examples_fn
+                    from knowledge import get_style_examples as get_examples_fn
 
             examples = [] if booking_or_availability_turn else (
                 get_examples_fn(effective_body, account_key=thread.sms_account_key) if callable(get_examples_fn) else []
@@ -2781,9 +2781,9 @@ def preview_sms_pair_learnings(db: Session, limit: int = 50) -> Dict[str, Any]:
     unsafe_check = _dyn("has_unsafe_literal_learning_detail", None)
     if unsafe_check is None:
         try:
-            from backend.curator.authority import has_unsafe_literal_learning_detail as unsafe_check
+            from backend.curator.sanitizer import has_unsafe_literal_learning_detail as unsafe_check
         except ImportError:
-            from curator.authority import has_unsafe_literal_learning_detail as unsafe_check
+            from curator.sanitizer import has_unsafe_literal_learning_detail as unsafe_check
 
     by_id = {pair["id"]: pair for pair in pairs}
     candidates, rejected = [], []
@@ -2811,9 +2811,9 @@ def save_sms_pair_learning_candidates(candidates: List[Dict[str, str]]) -> Dict[
     list_learned = _dyn("list_learned_information", None)
     if list_learned is None:
         try:
-            from backend.curator.authority import list_learned_information as list_learned
+            from backend.services.learning_service import list_learned_information as list_learned
         except ImportError:
-            from curator.authority import list_learned_information as list_learned
+            from services.learning_service import list_learned_information as list_learned
 
     existing_entries = list_learned() if callable(list_learned) else []
     existing_source_ids = {
@@ -2825,9 +2825,9 @@ def save_sms_pair_learning_candidates(candidates: List[Dict[str, str]]) -> Dict[
     upsert_fn = _dyn("_upsert_learned_information_entry", None)
     if upsert_fn is None:
         try:
-            from backend.curator.authority import _upsert_learned_information_entry as upsert_fn
+            from backend.services.learning_service import _upsert_learned_information_entry as upsert_fn
         except ImportError:
-            from curator.authority import _upsert_learned_information_entry as upsert_fn
+            from services.learning_service import _upsert_learned_information_entry as upsert_fn
 
     key_fn = _dyn("_canonical_knowledge_key", None)
     if key_fn is None:
