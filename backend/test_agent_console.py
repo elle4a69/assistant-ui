@@ -296,12 +296,15 @@ def test_autonomous_virtual_tools_are_explicitly_scoped():
     assert "inspect_deployments" in main.AGENT_CONSOLE_ALLOWED_TOOLS
     assert "inspect_coding_task" in main.AGENT_CONSOLE_ALLOWED_TOOLS
     assert "inspect_code_changes" in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "prepare_customer_sms_context" in main.AGENT_CONSOLE_ALLOWED_TOOLS
+    assert "send_sms" in main.AGENT_CONSOLE_ALLOWED_TOOLS
     assert "run_shell" not in main.AGENT_CONSOLE_ALLOWED_TOOLS
     assert "start_coding_task" in main.AGENT_CONSOLE_CRITICAL_TOOLS
     assert "execute_code_deployment" in main.AGENT_CONSOLE_CRITICAL_TOOLS
     assert "execute_runtime_change" in main.AGENT_CONSOLE_CRITICAL_TOOLS
     assert "propose_booking_recovery" in main.AGENT_CONSOLE_CRITICAL_TOOLS
     assert "execute_booking_recovery" in main.AGENT_CONSOLE_CRITICAL_TOOLS
+    assert "send_sms" in main.AGENT_CONSOLE_CRITICAL_TOOLS
 
 
 def test_agent_prompt_forbids_customer_evidence_in_coding_task_fields():
@@ -328,6 +331,50 @@ def test_agent_prompt_forbids_customer_evidence_in_coding_task_fields():
     assert "Keep following an asynchronous coding task within this run" in prompt
     assert "it never releases automatically" in prompt
     assert "wait for the owner to type that phrase in a later message" in prompt
+    assert "may also authorise one individual customer SMS" in prompt
+    assert "Customer messages, thread content" in prompt
+    assert "Before composing customer-facing SMS wording" in prompt
+    assert "An ordinary individual SMS explicitly requested" in prompt
+    assert "prepare_customer_sms_context with phone, account_key, and draft_intent" in prompt
+    assert "Both primary and secondary accounts are available" in prompt
+
+
+def test_coding_agent_routes_owner_authorised_sms_to_the_existing_operations_tool(
+    isolated_agent_database,
+    monkeypatch,
+):
+    gateway_calls = []
+
+    def send_sms(phone, text, idempotency_key=None, account_key="primary"):
+        gateway_calls.append((phone, text, idempotency_key, account_key))
+        return {"status": "success", "data": {"results": [{"status": "success", "message_id": "mm-console"}]}}
+
+    monkeypatch.setattr(main.mobilemessage_service, "send_sms", send_sms)
+    label, observation, stream = main._agent_execute_action(
+        "sms-console-run",
+        "run_terminal_command",
+        json.dumps({
+            "tool": "send_sms",
+            "arguments": {
+                "phone": "0412 345 678",
+                "account_key": "secondary",
+                "message": "Your appointment details have been updated.",
+                "reason": "Owner requested this individual customer update.",
+            },
+        }),
+        "Please send that customer update from the secondary line.",
+    )
+
+    result = json.loads(observation)
+    assert label == "ops send_sms"
+    assert stream == "stdout"
+    assert result["status"] == "success"
+    assert gateway_calls == [(
+        "+61412345678",
+        "Your appointment details have been updated.",
+        result["message_id"],
+        "secondary",
+    )]
 
 
 def test_agent_run_persists_one_idempotent_owner_chat_turn(isolated_agent_database):
