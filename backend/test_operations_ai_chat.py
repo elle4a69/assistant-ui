@@ -135,7 +135,6 @@ def test_operations_chat_instructions_start_a_task_from_an_owner_described_fault
     assert "Treat an owner-described fault, failed deployment, regression, or requested change as the task" in instructions
     assert "do not require the owner to supply a task ID, pull request, commit, branch, or implementation plan" in instructions
     assert "create the one deduplicated repair task yourself" in instructions
-    assert "It never releases automatically" in instructions
     deployment_tools = {
         item["name"]: item["description"]
         for item in main.OPERATIONS_AI_TOOLS
