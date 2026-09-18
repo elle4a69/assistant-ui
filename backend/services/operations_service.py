@@ -1211,6 +1211,9 @@ def create_operations_realtime_session(
     snapshot: str,
     memory: str = "[]",
     conversation: str = "",
+    *,
+    instructions_override: Optional[str] = None,
+    tool_schemas_override: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Exchange a browser WebRTC offer for an OpenAI Realtime SDP answer."""
     from urllib import error as url_error
@@ -1226,7 +1229,7 @@ def create_operations_realtime_session(
     session_config = json.dumps({
         "type": "realtime",
         "model": "gpt-realtime-2.1",
-        "instructions": operations_ai_instructions(
+        "instructions": instructions_override or operations_ai_instructions(
             snapshot,
             memory,
             tool_access=False,
@@ -1236,7 +1239,7 @@ def create_operations_realtime_session(
         # Realtime rejects the Responses API's otherwise-valid `strict` tool option.
         "tools": [
             {key: value for key, value in schema.items() if key != "strict"}
-            for schema in OPERATIONS_VOICE_TOOL_SCHEMAS
+            for schema in (tool_schemas_override or OPERATIONS_VOICE_TOOL_SCHEMAS)
         ],
         "tool_choice": "auto",
         "parallel_tool_calls": False,

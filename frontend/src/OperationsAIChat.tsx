@@ -1,6 +1,7 @@
 import { FormEvent, KeyboardEvent, ReactNode, useEffect, useRef, useState } from 'react';
 import { Bot, CornerDownLeft, Mic, PhoneOff, RefreshCw, Send, ShieldCheck, UserRound, Volume2 } from 'lucide-react';
 import {
+  getKnowledgeCuratorState,
   getOperationsChatMessages,
   OperationsChatMessage,
   sendOperationsChatMessage,
@@ -24,14 +25,22 @@ export default function OperationsAIChat() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [curatorQuestionCount, setCuratorQuestionCount] = useState(0);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
 
   const loadMessages = async () => {
     setLoading(true);
     setError(null);
     try {
-      const result = await getOperationsChatMessages();
+      const [result, curator] = await Promise.all([
+        getOperationsChatMessages(),
+        getKnowledgeCuratorState(),
+      ]);
       setMessages(result.messages);
+      setCuratorQuestionCount(curator.proposals.filter((item) =>
+        (item.status === 'proposed' || item.status === 'accepted') &&
+        (item.owner_questions?.length || item.proposed_action === 'ask_owner')
+      ).length);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Could not load the chat.');
     } finally {
@@ -77,7 +86,7 @@ export default function OperationsAIChat() {
     } catch (requestError) {
       setMessages((current) => current.filter((item) => item.id !== optimisticMessage.id));
       setDraft(message);
-      setError(requestError instanceof Error ? requestError.message : 'The operations AI could not answer.');
+      setError(requestError instanceof Error ? requestError.message : 'The business assistant could not answer.');
     } finally {
       setSending(false);
     }
@@ -99,13 +108,13 @@ export default function OperationsAIChat() {
           </div>
           <div>
             <div className="flex flex-wrap items-center gap-2">
-              <h2 id="operations-ai-title" className="text-sm font-bold">Operations AI</h2>
+              <h2 id="operations-ai-title" className="text-sm font-bold">Business Assistant</h2>
               <span className="rounded-full border border-emerald-300/30 bg-emerald-300/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-emerald-200">
-                Practical operator
+                Business help
               </span>
             </div>
             <p className="mt-1 text-[10px] leading-relaxed text-slate-300">
-              Describe the outcome. It investigates, acts within its permissions, verifies, and reports back plainly.
+              Talk naturally about your business, onboarding, customer-agent behaviour or anything you want changed.
             </p>
           </div>
         </div>
@@ -117,7 +126,7 @@ export default function OperationsAIChat() {
               data-testid="operations-voice-start"
               className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-indigo-300/30 bg-indigo-300/10 px-3 py-2 text-[10px] font-bold text-indigo-100 transition hover:bg-indigo-300/20"
             >
-              <Mic className="h-3.5 w-3.5" /> Start realtime voice
+              <Mic className="h-3.5 w-3.5" /> ${curatorQuestionCount ? `${curatorQuestionCount} question${curatorQuestionCount === 1 ? '' : 's'} to ask` : 'Talk to assistant'}
             </button>
           ) : (
             <button
@@ -156,7 +165,7 @@ export default function OperationsAIChat() {
       <div className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-3 text-[10px] leading-relaxed text-amber-900">
         <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
         <p>
-          Text and realtime voice share this persistent conversation, memory and audited tools. Safe bounded coding changes can now be independently retested, promoted, deployed and health-checked automatically. Protected changes still use the owner-controlled approval path.
+          Text and realtime voice share the same private business conversation. This assistant can onboard the business, refine customer-agent behaviour, work through curator questions and record confirmed rules. It has no coding or deployment capability; technical faults are handed to the separate maintenance agent.
         </p>
       </div>
 
@@ -164,7 +173,7 @@ export default function OperationsAIChat() {
         className="h-[420px] overflow-y-auto bg-slate-50 px-4 py-5"
         role="log"
         aria-live="polite"
-        aria-label="Operations AI conversation"
+        aria-label="Business Assistant conversation"
         data-testid="operations-chat-transcript"
       >
         {loading && messages.length === 0 ? (
@@ -176,9 +185,9 @@ export default function OperationsAIChat() {
             <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-indigo-100 text-indigo-700">
               <Bot className="h-6 w-6" />
             </div>
-            <h3 className="text-sm font-bold text-slate-900">Start a private system conversation</h3>
+            <h3 className="text-sm font-bold text-slate-900">Start a private business conversation</h3>
             <p className="mt-2 text-xs leading-relaxed text-slate-500">
-              Ask it to diagnose recent message handling, research a technical issue, recall a decision, or record a durable lesson.
+              Tell it how the business works, ask why an agent replied a certain way, change a rule, work through outstanding questions, or simply describe something that is frustrating you.
             </p>
           </div>
         ) : (
@@ -240,8 +249,8 @@ export default function OperationsAIChat() {
               rows={2}
               maxLength={8000}
               data-testid="operations-chat-input"
-              aria-label="Message Operations AI"
-              placeholder="Ask about the assistant, bookings, or an improvement…"
+              aria-label="Message Business Assistant"
+              placeholder="Tell me what you want changed, added, clarified or fixed…"
               className="max-h-36 min-h-12 flex-1 resize-y border-0 bg-transparent px-2 py-2 text-xs leading-relaxed text-slate-900 outline-none placeholder:text-slate-400 disabled:opacity-60"
             />
             <button
