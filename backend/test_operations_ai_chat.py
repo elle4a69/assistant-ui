@@ -101,6 +101,8 @@ def test_operations_chat_persists_both_sides_and_uses_read_only_snapshot(monkeyp
         "webSearch": True,
         "persistentMemory": True,
         "controlledActions": True,
+        "businessAssistant": True,
+        "codingTools": False,
         "requiresConfirmation": True,
     }
     assert [item.role for item in db.query(OperationsChatMessage).all()] == ["user", "assistant"]
