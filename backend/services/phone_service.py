@@ -204,7 +204,7 @@ def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
         ranked_messages.c.row_number == 1,
         Message.role == "customer",
         Thread.auto_reply_enabled.is_(True),
-        Thread.state.in_(["auto-reply", "resolved", "taken-over"]),
+        Thread.state.in_(["auto-reply", "taken-over"]),
     ).all()
     if not rows:
         return []

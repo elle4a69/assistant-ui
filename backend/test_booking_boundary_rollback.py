@@ -178,11 +178,11 @@ def test_same_generated_reply_is_not_sent_twice_for_one_customer_turn(monkeypatc
             customer.at,
         )
 
-    assert len(responses.calls) == 2
+    assert len(responses.calls) == 1
     assert [text for _phone, text, _kwargs in sent] == ["Yep, the name is Sam."]
     assert db.query(Message).filter(Message.role == "system").count() == 1
     cancelled = db.query(ThreadEvent).filter(ThreadEvent.type == "ai-reply-cancelled").one()
-    assert json.loads(cancelled.meta)["reason"] == "duplicate-ai-reply-for-customer-turn"
+    assert json.loads(cancelled.meta)["reason"] == "later-outbound-message"
     db.close()
 
 

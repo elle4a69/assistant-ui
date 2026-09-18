@@ -1,5 +1,6 @@
 import asyncio
-from datetime import datetime
+import json
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi import BackgroundTasks
@@ -207,6 +208,46 @@ def test_first_contact_fixed_responder_bypasses_ai_training_approval(monkeypatch
     event = db.query(main.ThreadEvent).filter(main.ThreadEvent.thread_id == thread.id).one()
     assert event.type == "auto-reply-sent"
     assert '"source": "first-contact-auto-responder"' in event.meta
+    db.close()
+
+
+def test_delayed_first_contact_reply_is_suppressed_after_newer_fragment(monkeypatch):
+    db = make_db()
+    now = datetime.utcnow()
+    thread = main.Thread(
+        id="stale-first-contact",
+        customer_phone="+61412345678",
+        sms_account_key="primary",
+        state="auto-reply",
+        priority="medium",
+        sla_due_at=now,
+        unread_count=2,
+        auto_reply_enabled=True,
+    )
+    first = Message(
+        id="first-contact-source", thread_id=thread.id, role="customer", text="Hi",
+        provider_message_id="provider-first", at=now,
+    )
+    newer = Message(
+        id="first-contact-newer", thread_id=thread.id, role="customer", text="I need a massage",
+        provider_message_id="provider-newer", at=now + timedelta(seconds=1),
+    )
+    db.add_all([thread, first, newer])
+    db.commit()
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "send_sms",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stale first-contact SMS must not be sent")
+        ),
+    )
+
+    assert main.send_first_contact_auto_reply(
+        db, thread, first, {"message": "Welcome", "cooldownDays": 30}, True,
+    ) is False
+    assert db.query(Message).filter(Message.role == "system").count() == 0
+    cancelled = db.query(main.ThreadEvent).filter_by(type="ai-reply-cancelled").one()
+    assert json.loads(cancelled.meta)["reason"] == "superseded-by-newer-customer-message"
     db.close()
 
 def test_both_account_scoped_lines_can_use_conversational_ai(monkeypatch):
@@ -550,7 +591,7 @@ def test_superseded_customer_fragment_cannot_generate_a_reply(monkeypatch):
 def test_model_input_consolidates_latest_customer_burst_with_deep_history():
     now = datetime.utcnow()
     history = []
-    for index in range(15):
+    for index in range(120):
         history.append(type("Stored", (), {
             "role": "customer" if index % 2 == 0 else "system",
             "text": f"historical-{index}",

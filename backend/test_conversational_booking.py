@@ -899,6 +899,54 @@ def test_stored_availability_is_discarded_and_cannot_be_sent_without_live_lookup
     db.close()
 
 
+def test_failed_live_availability_lookup_suppresses_generic_follow_up(monkeypatch):
+    class FailedAvailabilitySuite:
+        timezone_name = "Australia/Hobart"
+        provider = None
+
+        def execute(self, tool_name, arguments):
+            assert tool_name == "get_times_tomorrow"
+            return {"status": "unavailable", "reason": "calendar offline"}
+
+    db = make_db()
+    thread = add_thread(db)
+    customer = Message(
+        id="failed-live-lookup-message",
+        thread_id=thread.id,
+        role="customer",
+        text="Are you free tomorrow?",
+        provider_message_id="failed-live-lookup-provider",
+        at=main.datetime.utcnow(),
+    )
+    db.add(customer)
+    db.commit()
+    client = SequenceClient([
+        FakeResponse(output=[FakeFunctionCall(
+            "get_times_tomorrow", {"service_id": "service"}, "failed-lookup-call",
+        )]),
+        FakeResponse(output_text="What service were you after?"),
+    ])
+    monkeypatch.setattr(main, "openai_client", client)
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", False)
+    monkeypatch.setattr(main, "match_qa_rule", lambda _body: None)
+    monkeypatch.setattr(main, "build_authority_context", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(main, "get_style_examples", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(main, "get_booking_tool_suite", lambda *_args: FailedAvailabilitySuite())
+    monkeypatch.setattr(main.calendar_service, "get_customer_bookings", lambda *_args, **_kwargs: [])
+
+    assert run_sms_reply_logic(
+        db, thread.id, customer.text, customer.provider_message_id, customer.at,
+        dispatch_sms=False,
+    ) == (False, False)
+    db.refresh(thread)
+    assert thread.state == "needs-review"
+    assert db.query(Message).filter(Message.role.in_(["system", "draft"])).count() == 0
+    assert db.query(main.ThreadEvent).filter_by(type="availability_lookup_failed").count() == 1
+    failure = db.query(main.ThreadEvent).filter_by(type="ai-reply-failed").one()
+    assert "Fresh availability lookup failed" in json.loads(failure.meta)["reason"]
+    db.close()
+
+
 def test_booking_allows_immediate_and_back_to_back_times_but_rejects_overlap(monkeypatch):
     now = main.parse_business_datetime("2026-08-12T10:00:00+10:00")
     monkeypatch.setattr(main, "current_business_time", lambda: now)

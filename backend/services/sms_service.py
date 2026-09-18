@@ -307,11 +307,14 @@ def build_model_input(
     history_messages: list[Any],
     current_history_text: str,
     enriched_current_prompt: str,
-    history_limit: int = 100,
+    history_limit: Optional[int] = None,
     include_timestamps: bool = False,
 ) -> list[dict[str, str]]:
     """Map deep chronological history and consolidate the active customer burst."""
-    selected = list(history_messages[-history_limit:])
+    selected = list(
+        history_messages[-history_limit:]
+        if history_limit is not None else history_messages
+    )
     current_index = None
     for index in range(len(selected) - 1, -1, -1):
         message = selected[index]
@@ -662,14 +665,13 @@ def identical_ai_reply_exists_for_customer_turn(
     received_at: datetime,
     reply: str,
 ) -> bool:
-    """Return true when this exact AI reply was already sent for the active customer turn."""
+    """Return true when this exact AI reply was already sent in the thread."""
     fingerprint = normalized_reply_fingerprint(reply)
     if not fingerprint:
         return False
     prior_replies = db.query(Message.text).filter(
         Message.thread_id == thread_id,
         Message.role == "system",
-        Message.at >= received_at,
     ).all()
     return any(normalized_reply_fingerprint(item.text) == fingerprint for item in prior_replies)
 
@@ -697,6 +699,35 @@ def is_latest_customer_turn(
     if provider_message_id and latest.provider_message_id:
         return latest.provider_message_id == provider_message_id
     return latest.at == received_at and latest.text == body
+
+
+def stale_sms_reply_reason(
+    db: Session,
+    thread_id: str,
+    provider_message_id: str,
+    received_at: datetime,
+    body: str,
+) -> Optional[str]:
+    """Return why queued/retried work no longer owns the conversation."""
+    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+    if not thread:
+        return "thread-missing"
+    if thread.state != "auto-reply":
+        return f"thread-state-{thread.state}"
+    if not thread.auto_reply_enabled:
+        return "thread-auto-reply-disabled"
+    if not is_latest_customer_turn(
+        db, thread_id, provider_message_id, received_at, body,
+    ):
+        return "superseded-by-newer-customer-message"
+    later_outbound = db.query(Message.id).filter(
+        Message.thread_id == thread_id,
+        Message.role.in_(["agent", "system"]),
+        Message.at > received_at,
+    ).first()
+    if later_outbound:
+        return "later-outbound-message"
+    return None
 
 
 def find_thread_by_phone(db: Session, phone: str, sms_account_key: str = "primary") -> Optional[Thread]:
@@ -1121,29 +1152,19 @@ def run_sms_reply_logic(
         print(f"[Conversational AI Skipped] Disabled for {thread.sms_account_key}.")
         return False, False
 
-    if not is_latest_customer_turn(db, thread_id, provider_message_id, received_at_naive, body):
+    stale_reason = stale_sms_reply_reason(
+        db, thread_id, provider_message_id, received_at_naive, body,
+    )
+    if stale_reason:
         db.add(ThreadEvent(
             id=str(uuid.uuid4()),
             thread_id=thread_id,
             type="ai-reply-cancelled",
             agent_id=None,
-            meta=json.dumps({"reason": "superseded-by-newer-customer-message"}),
+            meta=json.dumps({"reason": stale_reason}),
             at=datetime.utcnow(),
         ))
         db.commit()
-        return False, False
-
-    if not draft_only and human_replied_after(db, thread_id, received_at_naive):
-        db.add(ThreadEvent(
-            id=str(uuid.uuid4()),
-            thread_id=thread_id,
-            type="ai-reply-cancelled",
-            agent_id=None,
-            meta=json.dumps({"reason": "human-replied", "received_at": received_at_naive.isoformat()}),
-            at=datetime.utcnow(),
-        ))
-        db.commit()
-        print(f"[Conversational AI Cancelled] Human already replied on {thread_id}.")
         return False, False
 
     booking_confirmed = False
@@ -1317,6 +1338,7 @@ def run_sms_reply_logic(
     except (TypeError, ValueError, KeyError, json.JSONDecodeError):
         pass
     precomputed_reply: Optional[str] = None
+    availability_lookup_failure_reason: Optional[str] = None
     has_relative_date = bool(re.search(r"\btomorrow\b", effective_body, re.IGNORECASE))
 
     # Exact relative-time requests are resolved before prompt/model work.
@@ -1414,7 +1436,9 @@ def run_sms_reply_logic(
                 if callable(add_event_fn):
                     add_event_fn(db, thread, "availability_lookup_failed", audit,
                         **lookup_fields, status_code="provider_unavailable", exception_classification="expected_provider_error")
-                precomputed_reply = f"I couldn't verify {slot_label} just now. Could you confirm the service you want?"
+                availability_lookup_failure_reason = (
+                    "Fresh availability lookup failed; no customer reply was created or sent"
+                )
             else:
                 exact_slot = exact_result.get("exact_slot")
                 live_calendar_lookup_succeeded = True
@@ -1572,16 +1596,16 @@ def run_sms_reply_logic(
     })
 
     assistant_reply: Optional[str] = precomputed_reply
-    if assistant_reply is None and thread.sms_account_key == "primary":
+    rejected_reply_reason: Optional[str] = availability_lookup_failure_reason
+    if assistant_reply is None and not rejected_reply_reason and thread.sms_account_key == "primary":
         qa_matcher = _dyn("match_qa_rule", None)
         if callable(qa_matcher):
             assistant_reply = qa_matcher(effective_body)
-    rejected_reply_reason: Optional[str] = None
     if assistant_reply:
         print(f"[QA Rules Match] Trigger matched. Using pre-configured reply.")
 
     ai_client = _dyn("openai_client", openai_client)
-    if not assistant_reply and ai_client:
+    if not assistant_reply and not rejected_reply_reason and ai_client:
         try:
             try:
                 from backend.booking_tools import BOOKING_DISCOVERY_TOOL_SCHEMAS
@@ -1828,8 +1852,8 @@ def run_sms_reply_logic(
                 for tool_call in ordered_tool_calls:
                     if tool_call.name in {"propose_booking", "confirm_booking", "signal_customer_arrival"}:
                         db.expire_all()
-                        if not is_latest_customer_turn(
-                            db, thread_id, provider_message_id, received_at_naive, body
+                        if stale_sms_reply_reason(
+                            db, thread_id, provider_message_id, received_at_naive, body,
                         ):
                             raise SupersededCustomerTurn()
                     if tool_call.name in {
@@ -1997,6 +2021,9 @@ def run_sms_reply_logic(
                                 **audit_details,
                                 status_code="provider_unavailable" if tool_result.get("status") == "unavailable" else "lookup_rejected",
                                 exception_classification=exception_classification or "expected_provider_error",
+                            )
+                            availability_lookup_failure_reason = (
+                                "Fresh availability lookup failed; no customer reply was created or sent"
                             )
                         if (
                             tool_call.name in {
@@ -2187,7 +2214,11 @@ def run_sms_reply_logic(
             except ImportError:
                 from services.booking_service import asks_for_secondary_booking_confirmation as secondary_check_fn
 
-        availability_error = delayed_reply_error(
+        availability_error = (
+            availability_lookup_failure_reason
+            if availability_lookup_failure_reason and not live_calendar_lookup_succeeded
+            else None
+        ) or delayed_reply_error(
             assistant_reply,
             delayed_request_time,
         ) or (
@@ -2230,14 +2261,22 @@ def run_sms_reply_logic(
 
     db.flush()
     db.expire_all()
-    if not is_latest_customer_turn(db, thread_id, provider_message_id, received_at_naive, body):
+    stale_reason = stale_sms_reply_reason(
+        db, thread_id, provider_message_id, received_at_naive, body,
+    )
+    if stale_reason:
+        cancellation_reason = (
+            "human-replied-during-generation"
+            if human_replied_after(db, thread_id, received_at_naive)
+            else stale_reason
+        )
         db.rollback()
         db.add(ThreadEvent(
             id=str(uuid.uuid4()),
             thread_id=thread_id,
             type="ai-reply-cancelled",
             agent_id=None,
-            meta=json.dumps({"reason": "newer-customer-message-during-generation"}),
+            meta=json.dumps({"reason": cancellation_reason}),
             at=datetime.utcnow(),
         ))
         db.commit()
@@ -2348,6 +2387,8 @@ def run_sms_reply_logic(
             assistant_reply,
         )
     ):
+        thread.state = "needs-review"
+        thread.pending_slots = None
         db.add(ThreadEvent(
             id=str(uuid.uuid4()),
             thread_id=thread_id,
@@ -2414,7 +2455,16 @@ def run_sms_reply_logic(
             thread.pending_slots = None
     else:
         db.expire_all()
-        if human_replied_after(db, thread_id, received_at_naive):
+        stale_reason = stale_sms_reply_reason(
+            db, thread_id, provider_message_id, received_at_naive, body,
+        )
+        if stale_reason:
+            cancellation_reason = (
+                "human-replied-during-generation"
+                if human_replied_after(db, thread_id, received_at_naive)
+                else stale_reason
+            )
+            db.rollback()
             thread = db.query(Thread).filter(Thread.id == thread_id).first()
             if thread:
                 thread.pending_slots = None
@@ -2423,11 +2473,11 @@ def run_sms_reply_logic(
                 thread_id=thread_id,
                 type="ai-reply-cancelled",
                 agent_id=None,
-                meta=json.dumps({"reason": "human-replied-during-generation"}),
+                meta=json.dumps({"reason": cancellation_reason}),
                 at=datetime.utcnow(),
             ))
             db.commit()
-            print(f"[Conversational AI Cancelled] Human replied while AI was working on {thread_id}.")
+            print(f"[Conversational AI Cancelled] Reply became stale while AI was working on {thread_id}.")
             return False, False
 
         system_message = Message(
@@ -2524,8 +2574,8 @@ def _process_sms_reply_unlocked(
             print(f"[Conversational AI Delay] Contact is blocked. Reply cancelled for {thread_id}.")
             return
 
-        if thread.state == "taken-over":
-            print(f"[Conversational AI Delay] Thread is taken over. Reply cancelled for {thread_id}.")
+        if thread.state != "auto-reply":
+            print(f"[Conversational AI Delay] Thread is not active. Reply cancelled for {thread_id}.")
             return
 
         account_ai_fn = _dyn("account_allows_conversational_ai", lambda key: key in CONVERSATIONAL_AI_ACCOUNT_KEYS)
@@ -2582,7 +2632,26 @@ def send_first_contact_auto_reply(
     customer_message: Message,
     config: Dict[str, Any],
     dispatch_sms: bool,
-) -> None:
+) -> bool:
+    stale_reason = stale_sms_reply_reason(
+        db,
+        thread.id,
+        customer_message.provider_message_id or "",
+        customer_message.at,
+        customer_message.text,
+    )
+    if stale_reason:
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread.id,
+            type="ai-reply-cancelled",
+            agent_id=None,
+            meta=json.dumps({"reason": stale_reason, "source": "first-contact-auto-responder"}),
+            at=datetime.utcnow(),
+        ))
+        db.commit()
+        return False
+
     reply_text = sanitize_outgoing_urls(config["message"])
     reply_at = datetime.utcnow()
     outbound = Message(
@@ -2636,6 +2705,7 @@ def send_first_contact_auto_reply(
     db.add(outbound)
     db.add(event_log)
     db.commit()
+    return True
 
 
 def _process_first_contact_auto_reply(
@@ -2656,11 +2726,15 @@ def _process_first_contact_auto_reply(
         if not thread or not customer_message:
             print(f"[First Contact Delay] Thread or message no longer exists for {thread_id}. Reply canceled.")
             return
-        if human_replied_after(db, thread_id, customer_message.at):
-            print(f"[First Contact Delay] Human already replied on {thread_id}. Reply canceled.")
-            return
-        if not thread.auto_reply_enabled or thread.state == "taken-over":
-            print(f"[First Contact Delay] Automatic replies are off for {thread_id}. Reply canceled.")
+        stale_reason = stale_sms_reply_reason(
+            db,
+            thread_id,
+            customer_message.provider_message_id or "",
+            customer_message.at,
+            customer_message.text,
+        )
+        if stale_reason:
+            print(f"[First Contact Delay] Reply is stale ({stale_reason}) for {thread_id}.")
             return
         if is_contact_blocked(db, thread.sms_account_key, thread.customer_phone):
             print(f"[First Contact Delay] Contact is blocked for {thread_id}. Reply canceled.")

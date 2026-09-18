@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -161,6 +162,88 @@ def test_human_reply_during_model_generation_wins(monkeypatch):
     assert db.query(Message).filter(Message.role == "system").count() == 0
     cancelled = db.query(ThreadEvent).filter(ThreadEvent.type == "ai-reply-cancelled").one()
     assert json.loads(cancelled.meta)["reason"] == "human-replied-during-generation"
+    db.close()
+
+
+def test_queued_reply_is_suppressed_after_any_later_outbound(monkeypatch):
+    db = make_db()
+    thread, customer = add_thread_and_customer(
+        db, "Which service?", at=datetime.utcnow() - timedelta(minutes=2),
+    )
+    db.add(Message(
+        id="later-approved-outbound",
+        thread_id=thread.id,
+        role="system",
+        text="Here are the service details.",
+        at=customer.at + timedelta(seconds=1),
+    ))
+    db.commit()
+    monkeypatch.setattr(
+        main,
+        "openai_client",
+        type("ForbiddenClient", (), {
+            "responses": type("ForbiddenResponses", (), {
+                "create": lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("stale queued work must not call the model")
+                )
+            })()
+        })(),
+    )
+
+    assert main.run_sms_reply_logic(
+        db, thread.id, customer.text, customer.provider_message_id, customer.at,
+    ) == (False, False)
+    assert db.query(Message).filter(Message.thread_id == thread.id).count() == 2
+    cancelled = db.query(ThreadEvent).filter_by(type="ai-reply-cancelled").one()
+    assert json.loads(cancelled.meta)["reason"] == "later-outbound-message"
+    db.close()
+
+
+@pytest.mark.parametrize("state", ["needs-review", "taken-over", "escalated", "resolved"])
+def test_queued_reply_is_suppressed_for_non_active_thread_state(monkeypatch, state):
+    db = make_db()
+    thread, customer = add_thread_and_customer(db, "Please reply")
+    thread.state = state
+    db.commit()
+
+    assert main.run_sms_reply_logic(
+        db, thread.id, customer.text, customer.provider_message_id, customer.at,
+        dispatch_sms=False,
+    ) == (False, False)
+    assert db.query(Message).filter(Message.role.in_(["system", "draft"])).count() == 0
+    cancelled = db.query(ThreadEvent).filter_by(type="ai-reply-cancelled").one()
+    assert json.loads(cancelled.meta)["reason"] == f"thread-state-{state}"
+    db.close()
+
+
+def test_repeated_prompt_after_customer_moves_forward_enters_review(monkeypatch):
+    db = make_db()
+    now = datetime.utcnow()
+    thread, _customer = add_thread_and_customer(db, "What can I book?", at=now)
+    db.add_all([
+        Message(
+            id="generic-service-prompt", thread_id=thread.id, role="system",
+            text="What service were you after?", at=now + timedelta(seconds=1),
+        ),
+        Message(
+            id="customer-service-answer", thread_id=thread.id, role="customer",
+            text="A massage", provider_message_id="provider-service-answer",
+            at=now + timedelta(seconds=2),
+        ),
+    ])
+    db.commit()
+    configure_ai_test(monkeypatch, "What service were you after?")
+    monkeypatch.setattr(main.calendar_service, "get_customer_bookings", lambda *_args, **_kwargs: [])
+
+    assert main.run_sms_reply_logic(
+        db, thread.id, "A massage", "provider-service-answer",
+        now + timedelta(seconds=2), dispatch_sms=False,
+    ) == (False, False)
+    db.refresh(thread)
+    assert thread.state == "needs-review"
+    assert db.query(Message).filter(Message.role == "system").count() == 1
+    cancelled = db.query(ThreadEvent).filter_by(type="ai-reply-cancelled").one()
+    assert json.loads(cancelled.meta)["reason"] == "duplicate-ai-reply-for-customer-turn"
     db.close()
 
 

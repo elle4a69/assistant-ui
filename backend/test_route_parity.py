@@ -73,7 +73,15 @@ def get_live_routes() -> List[Dict[str, Any]]:
     """Inspect and extract metadata for all live routes."""
     from backend.main import app
 
-    return [extract_route_metadata(r) for r in app.routes]
+    def concrete_routes(routes):
+        for route in routes:
+            included_router = getattr(route, "original_router", None)
+            if included_router is not None:
+                yield from concrete_routes(included_router.routes)
+            else:
+                yield route
+
+    return [extract_route_metadata(r) for r in concrete_routes(app.routes)]
 
 
 def load_baseline_routes() -> List[Dict[str, Any]]:
