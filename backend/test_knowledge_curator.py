@@ -52,11 +52,24 @@ def finding_types(records):
         ([record("a", canonical_key="")], "invalid_metadata"),
         ([record("a", text="This service costs $100 for 30 minutes.")], "literal_dynamic_authority"),
         ([record("a", revision=1), record("b", revision=2, text="Updated wording.", retrieval_enabled=False, review_status="pending", status="quarantined")], "apparently_superseded"),
-        ([record("a", scope="internal", sms_account_key="internal", retrieval_enabled=False, status="quarantined", review_status="pending")], "owner_answer_required"),
     ],
 )
 def test_deterministic_audit_detects_each_finding_class(records, expected):
     assert expected in finding_types(records)
+
+
+def test_private_internal_record_does_not_create_owner_question():
+    findings = main.inspect_knowledge_integrity([
+        record(
+            "a",
+            scope="internal",
+            sms_account_key="internal",
+            retrieval_enabled=False,
+            status="quarantined",
+            review_status="pending",
+        )
+    ], now=NOW)
+    assert "owner_answer_required" not in {item["finding_type"] for item in findings}
 
 
 def curator_paths(tmp_path, monkeypatch, records):
