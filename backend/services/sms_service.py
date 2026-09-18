@@ -1011,6 +1011,31 @@ def process_inbound_sms(
         ))
     db.commit()
 
+    # Send native push notification for real inbound SMS after persistence succeeds.
+    # Notification delivery is best-effort and must never block or fail the webhook.
+    if not payload.isSimulation:
+        notify_fn = _dyn("send_ntfy_notification", None)
+        if notify_fn is None:
+            try:
+                from backend.services.notification_service import send_ntfy_notification as notify_fn
+            except ImportError:
+                from services.notification_service import send_ntfy_notification as notify_fn
+        if callable(notify_fn):
+            public_app_url = os.getenv("PUBLIC_APP_URL", "").rstrip("/")
+            click_url = (
+                f"{public_app_url}/chat?thread={thread.id}"
+                if public_app_url
+                else f"/chat?thread={thread.id}"
+            )
+            line_label = "Line 2" if thread.sms_account_key == "secondary" else "Line 1"
+            background_tasks.add_task(
+                notify_fn,
+                title=f"New SMS · {line_label}",
+                message=f"{from_phone}\n{payload.body or ''}".strip(),
+                click_url=click_url,
+                priority=4,
+            )
+
     is_testing = "pytest" in sys.modules or any("test" in arg for arg in sys.argv)
     if first_contact_eligible:
         background_tasks.add_task(
