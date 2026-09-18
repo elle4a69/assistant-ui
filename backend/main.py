@@ -60,6 +60,7 @@ from backend.services import (
     settings_service,
     learning_service,
     phone_service,
+    notification_service,
     bootcamp_service,
 )
 
@@ -134,6 +135,9 @@ except ImportError:
 @contextlib.asynccontextmanager
 async def lifespan(application: FastAPI):
     """Unified application lifespan managing startup recovery and background workers."""
+    # Additive schema creation keeps the durable ntfy dedupe ledger available
+    # on existing Fly volumes without altering or dropping application data.
+    Base.metadata.create_all(bind=engine)
     # Run synchronous startup recovery
     recover_interrupted_agent_console_runs()
 

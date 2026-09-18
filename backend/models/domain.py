@@ -179,6 +179,21 @@ class PushSubscription(Base):
     last_success_at = Column(DateTime, nullable=True)
 
 
+class NotificationDelivery(Base):
+    """One durable claim for an externally visible operational alert.
+
+    The row intentionally records only a stable application event key and type;
+    notification bodies can contain customer information and do not belong in a
+    delivery ledger.
+    """
+    __tablename__ = "notification_deliveries"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    dedupe_key = Column(String, nullable=False, unique=True, index=True)
+    notification_type = Column(String, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class OperationsChatMessage(Base):
     """Persistent, admin-only conversation with the operations adviser."""
     __tablename__ = "operations_chat_messages"
@@ -263,6 +278,7 @@ __all__ = [
     "ArrivalSession",
     "ArrivalChatMessage",
     "PushSubscription",
+    "NotificationDelivery",
     "OperationsChatMessage",
     "OperationsAction",
     "OperationsMemory",

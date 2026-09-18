@@ -331,6 +331,18 @@ def catch_up_missed_messages(db: Session = Depends(get_db)):
                 at=datetime.utcnow(),
             ))
             db.commit()
+            notify_fn = _dyn("send_thread_attention_notification", None)
+            if notify_fn is None:
+                try:
+                    from backend.services.notification_service import send_thread_attention_notification as notify_fn
+                except ImportError:
+                    from services.notification_service import send_thread_attention_notification as notify_fn
+            notify_fn(
+                thread_id=thread.id,
+                sms_account_key=thread.sms_account_key,
+                reason="Catch-up reply could not be completed.",
+                source_key=f"catch-up:{customer_message.id}",
+            )
         return {
             "processed": True,
             "threadId": thread_id,

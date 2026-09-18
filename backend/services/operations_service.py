@@ -266,6 +266,34 @@ class AgentConsoleTimeoutError(RuntimeError):
 
 logger = logging.getLogger(__name__)
 
+
+def _notify_operational_failure(
+    *,
+    notification_type: str,
+    dedupe_key: str,
+    title: str,
+    detail: str,
+    priority: int = 5,
+) -> None:
+    """Best-effort owner alert after an Operations record has committed."""
+    notify_fn = _dyn("send_notification", None)
+    url_fn = _dyn("build_notification_url", None)
+    if notify_fn is None or url_fn is None:
+        try:
+            from backend.services.notification_service import build_notification_url, send_notification
+        except ImportError:
+            from services.notification_service import build_notification_url, send_notification
+        notify_fn = notify_fn or send_notification
+        url_fn = url_fn or build_notification_url
+    notify_fn(
+        notification_type=notification_type,
+        title=title,
+        message=str(detail or "Owner intervention is required.")[:300],
+        click_url=url_fn("/agent-console"),
+        priority=priority,
+        dedupe_key=dedupe_key,
+    )
+
 # Fallback defaults for symbols defined in other services or configuration
 try:
     from backend.services.booking_service import (
@@ -3270,6 +3298,12 @@ def _operations_refresh_coding_task(db: Session, action: OperationsAction) -> Op
             action.payload = json.dumps(payload, ensure_ascii=False)
             action.executed_at = datetime.utcnow()
             db.commit()
+            _notify_operational_failure(
+                notification_type="coding_task_failed",
+                dedupe_key=f"coding-task-failed:{action.id}",
+                title="Coding Task Failed",
+                detail="A coding task finished unsuccessfully and needs owner review.",
+            )
             return None
 
         branch = str(payload.get("branch") or "")
@@ -3419,6 +3453,7 @@ def _operations_reconcile_deployment_actions(db: Session) -> None:
         main_object = main_ref.get("object", {}) if isinstance(main_ref, dict) else {}
         current_main = str(main_object.get("sha") or "").casefold() if isinstance(main_object, dict) else ""
         changed = False
+        failed_actions: List[OperationsAction] = []
         for action in active:
             payload = _operations_action_payload(action)
             run_id = payload.get("worker_run_id")
@@ -3442,11 +3477,19 @@ def _operations_reconcile_deployment_actions(db: Session) -> None:
                     f"The GitHub promotion worker finished with status {conclusion}; "
                     f"main {'does' if current_main == expected_commit else 'does not'} contain the reviewed commit."
                 )
+                failed_actions.append(action)
             action.payload = json.dumps(payload, ensure_ascii=False)
             action.executed_at = datetime.utcnow()
             changed = True
         if changed:
             db.commit()
+            for action in failed_actions:
+                _notify_operational_failure(
+                    notification_type="deployment_failed",
+                    dedupe_key=f"deployment-failed:{action.id}",
+                    title="Deployment Failed",
+                    detail="The production promotion did not complete and needs owner review.",
+                )
     except (OperationsGitHubError, TypeError, ValueError):
         db.rollback()
 
@@ -3680,6 +3723,12 @@ def _operations_execute_code_deployment(
             action.status = "failed"
             action.executed_at = datetime.utcnow()
             db.commit()
+            _notify_operational_failure(
+                notification_type="deployment_failed",
+                dedupe_key=f"deployment-failed:{action.id}",
+                title="Deployment Failed",
+                detail="A deployment could not be queued and needs owner review.",
+            )
             return {"status": "failed", "action_id": action.id, "reason": str(exc)}
     worker_request = _operations_request_immediate_worker()
     return {
@@ -4388,6 +4437,14 @@ def _finish_agent_run(
                 },
             )
         _prune_agent_console_history(db)
+        if status_value in {"failed", "interrupted", "step_limit"}:
+            _notify_operational_failure(
+                notification_type="agent_needs_attention",
+                dedupe_key=f"agent-run-terminal:{run_id}:{status_value}",
+                title="Agent Needs Attention",
+                detail="An Operations Agent run stopped before normal completion.",
+                priority=5 if status_value == "failed" else 4,
+            )
     finally:
         db.close()
 

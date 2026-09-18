@@ -518,8 +518,6 @@ def _push_configured() -> bool:
 def send_arrival_push_notifications(session_id: str, clear: bool = False) -> None:
     """Best-effort delivery: an alert failure must never undo an arrival."""
     wp = _dyn("webpush", webpush)
-    if not _push_configured() or wp is None:
-        return
     session_factory = _dyn("SessionLocal", SessionLocal)
     db = session_factory()
     try:
@@ -559,6 +557,48 @@ def send_arrival_push_notifications(session_id: str, clear: bool = False) -> Non
                 "sessionId": session.id,
                 "threadId": session.thread_id,
             })
+            # This is called for the initial activation and later reminder
+            # checks.  The durable per-session key means ntfy sees one
+            # meaningful arrival alert while Web Push retains its existing
+            # repeating-alarm behaviour.
+            notify_fn = _dyn("send_notification", None)
+            if notify_fn is None:
+                try:
+                    from backend.services.notification_service import (
+                        build_notification_url,
+                        send_notification as notify_fn,
+                    )
+                except ImportError:
+                    from services.notification_service import (
+                        build_notification_url,
+                        send_notification as notify_fn,
+                    )
+            else:
+                build_notification_url = _dyn("build_notification_url", None)
+            if callable(notify_fn):
+                booking = _arrival_booking(db, session.booking_id)
+                label = (booking.summary if booking else "Customer")[:160]
+                line_label = "Line 2" if session.sms_account_key == "secondary" else "Line 1"
+                click_url = (
+                    build_notification_url("/chat", thread=session.thread_id)
+                    if callable(build_notification_url) and session.thread_id
+                    else build_notification_url("/arrivals") if callable(build_notification_url)
+                    else destination
+                )
+                notify_fn(
+                    notification_type="customer_arrival",
+                    title="Customer Arrived",
+                    message=f"{label}\n{line_label} · Customer is waiting.",
+                    click_url=click_url,
+                    priority=5,
+                    dedupe_key=f"customer-arrival:{session.id}",
+                    metadata={"arrival_session_id": session.id},
+                )
+
+        # ntfy is independent of browser Web Push. A missing VAPID key must
+        # not suppress the owner notification channel.
+        if not _push_configured() or wp is None:
+            return
         vapid_key_fn = _dyn("_vapid_private_key", _vapid_private_key)
         private_key = vapid_key_fn() if callable(vapid_key_fn) else None
         vapid_contact = os.getenv("VAPID_CONTACT", "mailto:admin@assistant-ui-hub.fly.dev")

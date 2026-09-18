@@ -621,6 +621,7 @@ def confirm_conversational_booking(
 
     proposal["arrival_link"] = arrival_link_fn(arrival_token)
     proposal["arrival_session_id"] = arrival_session.id
+    proposal["booking_id"] = str(booking_id)
 
     if send_confirmation:
         prompts_dir = _dyn("PROMPTS_DIR", PROMPTS_DIR)

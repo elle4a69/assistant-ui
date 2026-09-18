@@ -14,6 +14,7 @@ from .knowledge_service import *
 from .settings_service import *
 from .learning_service import *
 from .phone_service import *
+from .notification_service import *
 from .bootcamp_service import *
 from . import (
     auth_service,
@@ -25,6 +26,7 @@ from . import (
     settings_service,
     learning_service,
     phone_service,
+    notification_service,
     bootcamp_service,
 )
 
@@ -38,5 +40,6 @@ __all__ = [
     *settings_service.__all__,
     *learning_service.__all__,
     *phone_service.__all__,
+    *notification_service.__all__,
     *bootcamp_service.__all__,
 ]

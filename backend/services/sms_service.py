@@ -842,6 +842,81 @@ def should_process_sms_synchronously(
     return is_testing or is_simulation or training_mode
 
 
+def _send_confirmed_booking_notification(thread: Thread, booking: Dict[str, Any]) -> None:
+    """Deliver one post-commit booking alert from the canonical SMS flow."""
+    booking_id = str(booking.get("booking_id") or "").strip()
+    if not booking_id:
+        return
+    notify_fn = _dyn("send_notification", None)
+    build_url = _dyn("build_notification_url", None)
+    if notify_fn is None or build_url is None:
+        try:
+            from backend.services.notification_service import build_notification_url, send_notification
+        except ImportError:
+            from services.notification_service import build_notification_url, send_notification
+        notify_fn = notify_fn or send_notification
+        build_url = build_url or build_notification_url
+    customer = str(booking.get("customer_name") or "Customer").strip()[:80]
+    service = str(booking.get("service_name") or "Appointment").strip()[:100]
+    start = str(booking.get("start_time") or "").replace("T", " ")[:32]
+    line_label = "Line 2" if thread.sms_account_key == "secondary" else "Line 1"
+    notify_fn(
+        notification_type="new_booking",
+        title="New Booking",
+        message=f"{customer} · {service}\n{start} · {line_label}",
+        click_url=build_url("/bookings"),
+        priority=4,
+        dedupe_key=f"booking-created:{booking_id}",
+        metadata={"booking_id": booking_id, "thread_id": thread.id},
+    )
+
+
+def _send_review_notification(
+    thread_id: str,
+    sms_account_key: str,
+    source_key: str,
+    reason: str,
+) -> None:
+    notify_fn = _dyn("send_thread_attention_notification", None)
+    if notify_fn is None:
+        try:
+            from backend.services.notification_service import send_thread_attention_notification as notify_fn
+        except ImportError:
+            from services.notification_service import send_thread_attention_notification as notify_fn
+    notify_fn(
+        thread_id=thread_id,
+        sms_account_key=sms_account_key,
+        reason=reason,
+        source_key=source_key,
+    )
+
+
+def _send_customer_arrival_notification(
+    thread_id: str,
+    sms_account_key: str,
+    arrival_key: str,
+) -> None:
+    notify_fn = _dyn("send_notification", None)
+    url_fn = _dyn("build_notification_url", None)
+    if notify_fn is None or url_fn is None:
+        try:
+            from backend.services.notification_service import build_notification_url, send_notification
+        except ImportError:
+            from services.notification_service import build_notification_url, send_notification
+        notify_fn = notify_fn or send_notification
+        url_fn = url_fn or build_notification_url
+    line_label = "Line 2" if sms_account_key == "secondary" else "Line 1"
+    notify_fn(
+        notification_type="customer_arrival",
+        title="Customer Arrived",
+        message=f"{line_label} · Customer has arrived.",
+        click_url=url_fn("/chat", thread=thread_id),
+        priority=5,
+        dedupe_key=f"customer-arrival:{arrival_key}",
+        metadata={"thread_id": thread_id},
+    )
+
+
 def process_inbound_sms(
     payload: WebhookSMSInput,
     background_tasks: BackgroundTasks,
@@ -992,14 +1067,23 @@ def process_inbound_sms(
         except ImportError:
             from services.arrival_service import record_customer_arrival_event as arrival_record_fn
 
+    arrival_notification_key = ""
     if callable(arrival_check_fn) and arrival_check_fn(payload.body):
         if callable(arrival_record_fn):
-            arrival_record_fn(db, thread, customer_message.id, "clear-phrase")
+            arrival_recorded = arrival_record_fn(db, thread, customer_message.id, "clear-phrase")
+            if arrival_recorded:
+                linked_session = db.query(ArrivalSession).filter(
+                    ArrivalSession.thread_id == thread.id,
+                    ArrivalSession.sms_account_key == thread.sms_account_key,
+                    ArrivalSession.status.in_(["invited", "active"]),
+                ).order_by(ArrivalSession.created_at.desc()).first()
+                arrival_notification_key = linked_session.id if linked_session else customer_message.id
 
     thread.unread_count += 1
     thread.updated_at = datetime.utcnow()
 
     auto_reply_enabled = _dyn("AUTO_REPLY_GLOBAL_ENABLED", AUTO_REPLY_GLOBAL_ENABLED)
+    ai_reply_missed = False
     if not auto_reply_enabled and thread.auto_reply_enabled and thread.state != "taken-over":
         db.add(ThreadEvent(
             id=str(uuid.uuid4()),
@@ -1009,17 +1093,34 @@ def process_inbound_sms(
             meta=json.dumps({"message_id": customer_message.id, "reason": "global-ai-off"}),
             at=received_at_naive,
         ))
+        ai_reply_missed = True
     db.commit()
+
+    if ai_reply_missed and not payload.isSimulation:
+        background_tasks.add_task(
+            _send_review_notification,
+            thread.id,
+            thread.sms_account_key,
+            customer_message.id,
+            "Automatic replies are disabled.",
+        )
+    if arrival_notification_key and not payload.isSimulation:
+        background_tasks.add_task(
+            _send_customer_arrival_notification,
+            thread.id,
+            thread.sms_account_key,
+            arrival_notification_key,
+        )
 
     # Send native push notification for real inbound SMS after persistence succeeds.
     # Notification delivery is best-effort and must never block or fail the webhook.
-    if not payload.isSimulation:
-        notify_fn = _dyn("send_ntfy_notification", None)
+    def schedule_inbound_notification() -> None:
+        notify_fn = _dyn("send_notification", None)
         if notify_fn is None:
             try:
-                from backend.services.notification_service import send_ntfy_notification as notify_fn
+                from backend.services.notification_service import send_notification as notify_fn
             except ImportError:
-                from services.notification_service import send_ntfy_notification as notify_fn
+                from services.notification_service import send_notification as notify_fn
         if callable(notify_fn):
             public_app_url = os.getenv("PUBLIC_APP_URL", "").rstrip("/")
             click_url = (
@@ -1030,11 +1131,18 @@ def process_inbound_sms(
             line_label = "Line 2" if thread.sms_account_key == "secondary" else "Line 1"
             background_tasks.add_task(
                 notify_fn,
+                notification_type="incoming_sms",
                 title=f"New SMS · {line_label}",
                 message=f"{from_phone}\n{payload.body or ''}".strip(),
                 click_url=click_url,
                 priority=4,
+                dedupe_key=f"incoming-sms:{provider_message_id}",
             )
+
+    # Preserve the established first-contact task ordering; it is part of the
+    # responder's immediate behaviour and the ntfy task can follow it.
+    if not payload.isSimulation and not first_contact_eligible:
+        schedule_inbound_notification()
 
     is_testing = "pytest" in sys.modules or any("test" in arg for arg in sys.argv)
     if first_contact_eligible:
@@ -1045,6 +1153,8 @@ def process_inbound_sms(
             first_contact_config,
             not (is_testing or payload.isSimulation),
         )
+        if not payload.isSimulation:
+            schedule_inbound_notification()
         return {
             "status": "success",
             "thread_id": thread.id,
@@ -1093,6 +1203,7 @@ def process_inbound_sms(
     sync_fn = _dyn("should_process_sms_synchronously", should_process_sms_synchronously)
     if sync_fn(is_testing, payload.isSimulation):
         if auto_reply_enabled and thread.auto_reply_enabled and thread.state != "taken-over":
+            was_needs_review = thread.state == "needs-review"
             reply_logic_fn = _dyn("run_sms_reply_logic", run_sms_reply_logic)
             booking_confirmed, slots_presented = reply_logic_fn(
                 db,
@@ -1103,6 +1214,15 @@ def process_inbound_sms(
                 dispatch_sms=not (is_testing or payload.isSimulation),
                 is_simulation=payload.isSimulation,
             )
+            db.refresh(thread)
+            if not payload.isSimulation and not was_needs_review and thread.state == "needs-review":
+                background_tasks.add_task(
+                    _send_review_notification,
+                    thread.id,
+                    thread.sms_account_key,
+                    customer_message.id,
+                    "Automatic reply needs human review.",
+                )
             res = {"status": "success", "thread_id": thread.id}
             if booking_confirmed:
                 res["booking_confirmed"] = True
@@ -1172,6 +1292,7 @@ def run_sms_reply_logic(
         return False, False
 
     booking_confirmed = False
+    created_booking: Optional[Dict[str, Any]] = None
     booking_arrival_link: Optional[str] = None
     booking_system_confirmation_handled = False
     slots_presented = False
@@ -1275,6 +1396,10 @@ def run_sms_reply_logic(
             else "booking_created" if confirmed_now else "booking_rejected"
         )
         if confirmed_now:
+            created_booking = (
+                confirmation_result.get("booking")
+                if isinstance(confirmation_result.get("booking"), dict) else None
+            )
             booking_arrival_link = (
                 confirmation_result.get("booking", {}).get("arrival_link")
                 if isinstance(confirmation_result.get("booking"), dict)
@@ -2110,6 +2235,10 @@ def run_sms_reply_logic(
                                     booking_confirmed = booking_confirmed or confirmed_now
                                     decision_result_code = "booking_created" if confirmed_now else "booking_rejected"
                                     if confirmed_now:
+                                        created_booking = (
+                                            tool_result.get("booking")
+                                            if isinstance(tool_result.get("booking"), dict) else None
+                                        )
                                         booking_arrival_link = (
                                             tool_result.get("booking", {}).get("arrival_link")
                                             if isinstance(tool_result.get("booking"), dict)
@@ -2141,6 +2270,10 @@ def run_sms_reply_logic(
                                 else "booking_created" if confirmed_now else "booking_rejected"
                             )
                             if confirmed_now:
+                                created_booking = (
+                                    tool_result.get("booking")
+                                    if isinstance(tool_result.get("booking"), dict) else None
+                                )
                                 booking_arrival_link = (
                                     tool_result.get("booking", {}).get("arrival_link")
                                     if isinstance(tool_result.get("booking"), dict)
@@ -2285,6 +2418,8 @@ def run_sms_reply_logic(
                 generated_reply_message_id=audit.get("generated_reply_message_id"),
             )
         db.commit()
+        if not is_simulation and decision_result_code == "booking_created" and created_booking:
+            _send_confirmed_booking_notification(thread, created_booking)
         return booking_confirmed, slots_presented
 
     if booking_confirmed and booking_arrival_link and assistant_reply and booking_arrival_link not in assistant_reply:
@@ -2519,6 +2654,8 @@ def run_sms_reply_logic(
             generated_reply_message_id=generated_reply_message_id,
         )
     db.commit()
+    if not is_simulation and decision_result_code == "booking_created" and created_booking:
+        _send_confirmed_booking_notification(thread, created_booking)
     return booking_confirmed, slots_presented
 
 
@@ -2561,8 +2698,17 @@ def _process_sms_reply_unlocked(
             )
             return
 
+        was_needs_review = thread.state == "needs-review"
         reply_logic_fn = _dyn("run_sms_reply_logic", run_sms_reply_logic)
         reply_logic_fn(db, thread_id, body, provider_message_id, received_at_naive)
+        db.refresh(thread)
+        if not was_needs_review and thread.state == "needs-review":
+            _send_review_notification(
+                thread.id,
+                thread.sms_account_key,
+                provider_message_id or f"message:{received_at_naive.isoformat()}",
+                "Automatic reply needs human review.",
+            )
     except Exception as e:
         print(f"[Conversational AI Delay Error] {e}")
         db.rollback()
