@@ -8,8 +8,14 @@ const [mobileInbox, triageDashboard, smsSimulator] = await Promise.all([
   readFile(new URL('../src/SmsClientView.tsx', import.meta.url), 'utf8'),
 ]);
 
-test('message threads do not force the viewport to the latest message', () => {
-  for (const source of [mobileInbox, triageDashboard, smsSimulator]) {
+test('opening a mobile SMS conversation starts at the latest message', () => {
+  assert.match(mobileInbox, /ref=\{messageViewportRef\}/);
+  assert.match(mobileInbox, /initiallyScrolledThreadRef/);
+  assert.match(mobileInbox, /viewport\.scrollTop\s*=\s*viewport\.scrollHeight/);
+});
+
+test('other message views still do not force the viewport to the latest message', () => {
+  for (const source of [triageDashboard, smsSimulator]) {
     assert.doesNotMatch(source, /scrollIntoView\s*\(/);
     assert.doesNotMatch(source, /\.scrollTo\s*\(/);
     assert.doesNotMatch(source, /\.scrollTop\s*=/);
