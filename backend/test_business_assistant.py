@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import backend.main as main
-from backend.services import business_assistant_service as business
+import main
+from services import business_assistant_service as business
 
 
 def test_business_assistant_hard_excludes_coding_and_deployment_tools():
