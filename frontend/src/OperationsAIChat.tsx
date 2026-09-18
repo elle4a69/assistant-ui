@@ -126,7 +126,7 @@ export default function OperationsAIChat() {
               data-testid="operations-voice-start"
               className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-indigo-300/30 bg-indigo-300/10 px-3 py-2 text-[10px] font-bold text-indigo-100 transition hover:bg-indigo-300/20"
             >
-              <Mic className="h-3.5 w-3.5" /> ${curatorQuestionCount ? `${curatorQuestionCount} question${curatorQuestionCount === 1 ? '' : 's'} to ask` : 'Talk to assistant'}
+              <Mic className="h-3.5 w-3.5" /> {curatorQuestionCount ? `${curatorQuestionCount} question${curatorQuestionCount === 1 ? '' : 's'} to ask` : 'Talk to assistant'}
             </button>
           ) : (
             <button
