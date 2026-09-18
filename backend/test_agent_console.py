@@ -126,6 +126,34 @@ def test_step_zero_insufficient_quota_has_clear_safe_diagnosis(isolated_agent_da
         db.close()
 
 
+def test_later_step_insufficient_quota_has_clear_safe_diagnosis(isolated_agent_database, monkeypatch):
+    run_id = create_agent_run(isolated_agent_database)
+    calls = {"count": 0}
+
+    def fail_after_one_step(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return AgentStep(
+                thought="Record one safe progress step before continuing.",
+                action="write_file",
+                arguments='{"path":"notes/progress.txt","content":"started"}',
+            )
+        raise StructuredProviderError("insufficient_quota")
+
+    monkeypatch.setattr(main, "_agent_model_step", fail_after_one_step)
+    asyncio.run(main._run_agent_console(run_id, "Run a safe multi-step check", 50))
+    db = isolated_agent_database()
+    try:
+        run = db.query(main.OperationsAgentRun).filter_by(id=run_id).one()
+        assert run.status == "failed"
+        assert run.step_count == 1
+        assert run.error == "openai_quota_exhausted"
+        assert "credits or billing must be restored" in run.final_summary
+        assert "bounded execution error" not in (run.final_summary or "").casefold()
+    finally:
+        db.close()
+
+
 @pytest.mark.parametrize("code", ["rate_limit_exceeded", "invalid_api_key", "timeout", "server_error"])
 def test_other_first_call_failures_do_not_claim_credits_are_exhausted(isolated_agent_database, monkeypatch, code):
     run_id = create_agent_run(isolated_agent_database, objective=f"Test {code}")
