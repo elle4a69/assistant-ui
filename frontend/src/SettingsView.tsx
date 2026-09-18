@@ -1382,8 +1382,8 @@ export default function SettingsView() {
                   <Cpu className="w-4.5 h-4.5" />
                 </div>
                 <div>
-                  <h2 className="font-bold text-slate-800 text-sm">Operations Assistant</h2>
-                  <p className="text-[10px] text-slate-500 mt-0.5">Ask the earlier onboard assistant to inspect and manage the system.</p>
+                  <h2 className="font-bold text-slate-800 text-sm">Business Assistant</h2>
+                  <p className="text-[10px] text-slate-500 mt-0.5">Onboarding, business rules, curator questions, customer-agent refinements and general help.</p>
                 </div>
               </summary>
               <div className="p-2 sm:p-3">

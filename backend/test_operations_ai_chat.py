@@ -108,16 +108,16 @@ def test_operations_chat_persists_both_sides_and_uses_read_only_snapshot(monkeyp
     assert call["model"] == "gpt-5.6-terra"
     assert call["store"] is False
     assert '"needs_review_count": 1' in call["instructions"]
-    assert "cannot edit source code" in call["instructions"]
-    assert "Lead every response with the outcome" in call["instructions"]
-    assert "Do not use corporate, bureaucratic or academic phrasing" in call["instructions"]
-    assert "When a workflow or deployment failed, inspect the failed run before asking the owner for anything" in call["instructions"]
-    assert "Never leave the owner with a vague queued, waiting, or unavailable response" in call["instructions"]
-    assert "Never answer a status request with a bare claim" in call["instructions"]
-    assert "A question authorises explanation or inspection, not a code or production change" in call["instructions"]
-    assert "Starting a command, submitting a job, or receiving a run ID is not completion" in call["instructions"]
-    assert "Treat recoverable failures as part of the task" in call["instructions"]
-    assert call["tools"] == main.OPERATIONS_AI_TOOLS
+    assert "private Business Assistant" in call["instructions"]
+    assert "absolutely no coding" in call["instructions"]
+    assert "onboarding" in call["instructions"]
+    assert "ask one clear question at a time" in call["instructions"]
+    assert "explicit confirmation" in call["instructions"]
+    tool_names = {item["name"] for item in call["tools"]}
+    assert {"draft_business_rule", "confirm_business_rule", "list_curator_questions", "create_maintenance_handoff"} <= tool_names
+    assert "start_coding_task" not in tool_names
+    assert "read_code_file" not in tool_names
+    assert "propose_code_deployment" not in tool_names
     assert call["max_output_tokens"] == 1200
     assert "include" not in call
     owner_style = db.query(OperationsMemory).filter(

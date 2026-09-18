@@ -560,11 +560,10 @@ def inspect_knowledge_integrity(records: Optional[List[Dict[str, Any]]] = None, 
                     owner_question="This shared rule contains provider-specific details. Select its proven provider before any scope change; no provider has been guessed.",
                 ))
 
-        if item.get("scope") == "internal" or item.get("category") == "internal_or_uncertain":
-            findings.append(_curator_finding(
-                "owner_answer_required", [item], reason_code="curator_owner_answer_required", action="ask_owner",
-                owner_question="This information is currently kept out of customer replies. Should the agent ever use it?",
-            ))
+        # Deliberately private or uncertain material is already in the safe state:
+        # excluded from customer retrieval. Do not create a standing owner question
+        # merely because the record is private. A future explicit refinement can
+        # promote or replace it through the conversational business-assistant flow.
 
     # Exact duplicates and incompatible independent active authorities.  A
     # shared broad topic is not a collision identity: message pairs and staff

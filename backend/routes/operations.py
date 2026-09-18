@@ -57,6 +57,11 @@ try:
         OPERATIONS_AI_TOOLS,
         _operations_claim_worker_task,
     )
+    from backend.services.business_assistant_service import (
+        BUSINESS_ASSISTANT_TOOLS,
+        business_assistant_instructions,
+        execute_business_assistant_tool,
+    )
 except ImportError:
     from core.database import get_db, SessionLocal
     from core.utils import format_dt, _dyn
@@ -98,6 +103,11 @@ except ImportError:
         serialize_operations_chat_message,
         OPERATIONS_AI_TOOLS,
         _operations_claim_worker_task,
+    )
+    from services.business_assistant_service import (
+        BUSINESS_ASSISTANT_TOOLS,
+        business_assistant_instructions,
+        execute_business_assistant_tool,
     )
 
 router = APIRouter()
@@ -287,7 +297,7 @@ def send_operations_chat_message(payload: OperationsChatInput, db: Session = Dep
         {"role": item.role, "content": item.content}
         for item in history
     ]
-    instructions = operations_ai_instructions(
+    instructions = business_assistant_instructions(
         build_operations_ai_snapshot(db),
         build_operations_ai_memory_context(db),
     )
@@ -296,7 +306,7 @@ def send_operations_chat_message(payload: OperationsChatInput, db: Session = Dep
             model="gpt-5.6-terra",
             instructions=instructions,
             input=model_input,
-            tools=OPERATIONS_AI_TOOLS,
+            tools=BUSINESS_ASSISTANT_TOOLS,
             max_output_tokens=1200,
             store=False,
         )
@@ -323,7 +333,7 @@ def send_operations_chat_message(payload: OperationsChatInput, db: Session = Dep
                     arguments = json.loads(item.arguments or "{}")
                 except (TypeError, json.JSONDecodeError):
                     arguments = {}
-                result = execute_operations_tool(db, item.name, arguments, content)
+                result = execute_business_assistant_tool(db, item.name, arguments, content)
                 model_input.append({
                     "type": "function_call_output",
                     "call_id": item.call_id,
@@ -333,7 +343,7 @@ def send_operations_chat_message(payload: OperationsChatInput, db: Session = Dep
                 model="gpt-5.6-terra",
                 instructions=instructions,
                 input=model_input,
-                tools=OPERATIONS_AI_TOOLS,
+                tools=BUSINESS_ASSISTANT_TOOLS,
                 max_output_tokens=1200,
                 store=False,
             )
@@ -353,13 +363,15 @@ def send_operations_chat_message(payload: OperationsChatInput, db: Session = Dep
         "capabilities": {
             "readOnly": False,
             "liveSnapshot": True,
-            "codeAccess": operations_code_access_available(),
+            "codeAccess": False,
             "logAccess": True,
             "diagnosticTools": True,
             "messageSelfDiagnosis": True,
             "webSearch": True,
             "persistentMemory": True,
             "controlledActions": True,
+            "businessAssistant": True,
+            "codingTools": False,
             "requiresConfirmation": True,
         },
     }
@@ -385,6 +397,16 @@ async def start_operations_realtime_session(request: Request, db: Session = Depe
             current_run_id=f"realtime-{uuid.uuid4()}",
             max_chars=12_000,
         ),
+        instructions_override=business_assistant_instructions(
+            build_operations_ai_snapshot(db),
+            build_operations_ai_memory_context(db),
+            _build_agent_conversation_context(
+                db,
+                current_run_id=f"business-realtime-{uuid.uuid4()}",
+                max_chars=12_000,
+            ),
+        ),
+        tool_schemas_override=BUSINESS_ASSISTANT_TOOLS,
     )
     return Response(content=answer, media_type="application/sdp")
 
@@ -402,7 +424,7 @@ def run_operations_realtime_tool(
     payload: OperationsVoiceToolInput,
     db: Session = Depends(get_db),
 ):
-    return execute_operations_voice_tool(db, payload.name, payload.arguments)
+    return execute_business_assistant_tool(db, payload.name, payload.arguments, "")
 
 
 __all__ = [
