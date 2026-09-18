@@ -10,6 +10,7 @@ from typing import Any, List, Optional, Tuple
 import uuid
 
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     Float,
@@ -17,6 +18,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     or_,
     select,
 )
@@ -226,6 +228,58 @@ class KnowledgeGap(Base):
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
+    def to_public_dict(self) -> dict[str, Any]:
+        """Return owner-facing question state without customer or embedding data."""
+        return {
+            "id": self.id,
+            "account_key": self.account_key,
+            "canonical_question": self.canonical_question,
+            "intent": self.intent,
+            "status": self.status,
+            "first_seen_at": self.first_seen_at.isoformat() if self.first_seen_at else None,
+            "last_seen_at": self.last_seen_at.isoformat() if self.last_seen_at else None,
+            "occurrence_count": self.occurrence_count,
+            "customer_count": self.customer_count,
+            "owner_question": self.owner_question,
+            "owner_answer": self.owner_answer,
+            "resolved_by_knowledge_id": self.resolved_by_knowledge_id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class KnowledgeGapRevision(Base):
+    """Immutable, scoped audit snapshot captured before a curator-question change."""
+
+    __tablename__ = "knowledge_gap_revisions"
+
+    id = Column(String(255), primary_key=True, default=lambda: f"kgr-{uuid.uuid4()}")
+    gap_id = Column(String(255), nullable=False, index=True)
+    tenant_id = Column(String(100), nullable=False, default="default", index=True)
+    account_key = Column(String(50), nullable=False, index=True)
+    version = Column(Integer, nullable=False)
+    action = Column(String(50), nullable=False)
+    actor_id = Column(String(255), nullable=False, default="owner")
+    snapshot = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    undone = Column(Boolean, nullable=False, default=False)
+    undone_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_knowledge_gap_revision_scope", "tenant_id", "account_key", "gap_id", "version"),
+        UniqueConstraint("tenant_id", "account_key", "gap_id", "version", name="uq_knowledge_gap_revision_version"),
+    )
+
+    def to_public_dict(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "action": self.action,
+            "actor_id": self.actor_id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "undone": self.undone,
+            "state": dict(self.snapshot or {}),
+        }
+
 
 class KnowledgeGapManager:
     """Manager service for recording knowledge gaps, clustering questions, and resolving gaps."""
@@ -260,6 +314,180 @@ class KnowledgeGapManager:
         if self._session is not None:
             return self._session
         return self._session_factory()
+
+    @staticmethod
+    def _snapshot(gap: KnowledgeGap) -> dict[str, Any]:
+        return gap.to_public_dict()
+
+    def _scoped_gap(self, session: Session, gap_id: str, account_key: str, tenant_id: str) -> KnowledgeGap:
+        gap = session.scalar(select(KnowledgeGap).where(
+            KnowledgeGap.id == gap_id,
+            KnowledgeGap.tenant_id == tenant_id,
+            KnowledgeGap.account_key == account_key,
+        ))
+        if not gap:
+            raise ValueError("Curator question not found for this account.")
+        return gap
+
+    def _audit_before(self, session: Session, gap: KnowledgeGap, action: str, actor_id: str) -> KnowledgeGapRevision:
+        latest = session.scalar(select(KnowledgeGapRevision.version).where(
+            KnowledgeGapRevision.gap_id == gap.id,
+            KnowledgeGapRevision.tenant_id == gap.tenant_id,
+            KnowledgeGapRevision.account_key == gap.account_key,
+        ).order_by(KnowledgeGapRevision.version.desc()).limit(1))
+        revision = KnowledgeGapRevision(
+            gap_id=gap.id,
+            tenant_id=gap.tenant_id,
+            account_key=gap.account_key,
+            version=int(latest or 0) + 1,
+            action=action,
+            actor_id=str(actor_id or "owner")[:255],
+            snapshot=self._snapshot(gap),
+        )
+        session.add(revision)
+        return revision
+
+    def update_gap(
+        self, gap_id: str, account_key: str, updates: dict[str, Any],
+        tenant_id: str = "default", actor_id: str = "owner",
+    ) -> KnowledgeGap:
+        """Edit owner-facing question wording; resolved answers must be undone first."""
+        session = self._get_session()
+        close_on_exit = self._session is None
+        try:
+            gap = self._scoped_gap(session, gap_id, account_key, tenant_id)
+            if gap.status not in {"open", "awaiting_owner", "answered"}:
+                raise ValueError("Only an active curator question can be edited; undo its latest change first.")
+            allowed = {"canonical_question", "owner_question"}
+            clean = {key: str(value or "").strip() for key, value in updates.items() if key in allowed}
+            if not clean or any(not value for value in clean.values()):
+                raise ValueError("Provide a non-empty question field to edit.")
+            self._audit_before(session, gap, "edit", actor_id)
+            for key, value in clean.items():
+                setattr(gap, key, value[:2000])
+            gap.updated_at = utcnow()
+            session.commit()
+            session.refresh(gap)
+            if close_on_exit:
+                session.expunge(gap)
+            return gap
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            if close_on_exit:
+                session.close()
+
+    def delete_gap(
+        self, gap_id: str, account_key: str, tenant_id: str = "default", actor_id: str = "owner",
+    ) -> KnowledgeGap:
+        """Soft-delete a question and deactivate only knowledge created from that question."""
+        session = self._get_session()
+        close_on_exit = self._session is None
+        try:
+            gap = self._scoped_gap(session, gap_id, account_key, tenant_id)
+            if gap.status == "deleted":
+                raise ValueError("Curator question is already deleted.")
+            self._audit_before(session, gap, "delete", actor_id)
+            self._deactivate_resolution(session, gap)
+            gap.status = "deleted"
+            gap.updated_at = utcnow()
+            session.commit()
+            session.refresh(gap)
+            if close_on_exit:
+                session.expunge(gap)
+            return gap
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            if close_on_exit:
+                session.close()
+
+    @staticmethod
+    def _deactivate_resolution(session: Session, gap: KnowledgeGap) -> None:
+        if not gap.resolved_by_knowledge_id:
+            return
+        record = session.get(KnowledgeRecord, gap.resolved_by_knowledge_id)
+        if (record and record.source_type == "knowledge_gap_resolution" and record.source_id == gap.id
+                and record.tenant_id == gap.tenant_id and record.account_key == gap.account_key):
+            record.status = "withdrawn"
+            record.retrieval_enabled = False
+            record.updated_at = utcnow()
+
+    @staticmethod
+    def _restore_resolution(session: Session, gap: KnowledgeGap) -> None:
+        if gap.status != "resolved" or not gap.resolved_by_knowledge_id:
+            return
+        record = session.get(KnowledgeRecord, gap.resolved_by_knowledge_id)
+        if (record and record.source_type == "knowledge_gap_resolution" and record.source_id == gap.id
+                and record.tenant_id == gap.tenant_id and record.account_key == gap.account_key):
+            record.status = "active"
+            record.retrieval_enabled = True
+            record.updated_at = utcnow()
+
+    def undo_gap(
+        self, gap_id: str, account_key: str, tenant_id: str = "default", actor_id: str = "owner",
+    ) -> KnowledgeGap:
+        """Restore the latest non-undone snapshot and retain the audit event."""
+        session = self._get_session()
+        close_on_exit = self._session is None
+        try:
+            gap = self._scoped_gap(session, gap_id, account_key, tenant_id)
+            revision = session.scalar(select(KnowledgeGapRevision).where(
+                KnowledgeGapRevision.gap_id == gap.id,
+                KnowledgeGapRevision.tenant_id == tenant_id,
+                KnowledgeGapRevision.account_key == account_key,
+                KnowledgeGapRevision.undone == False,  # noqa: E712
+            ).order_by(KnowledgeGapRevision.version.desc()).limit(1))
+            if not revision:
+                raise ValueError("There is no curator-question change to undo.")
+            self._deactivate_resolution(session, gap)
+            undo_audit = self._audit_before(session, gap, "undo", actor_id)
+            # The undo event is immutable history, but is not itself an item on
+            # the undo stack (otherwise repeated undo would just oscillate).
+            undo_audit.undone = True
+            undo_audit.undone_at = utcnow()
+            snapshot = dict(revision.snapshot or {})
+            for key in ("canonical_question", "intent", "status", "owner_question", "owner_answer", "resolved_by_knowledge_id"):
+                if key in snapshot:
+                    setattr(gap, key, snapshot[key])
+            self._restore_resolution(session, gap)
+            revision.undone = True
+            revision.undone_at = utcnow()
+            gap.updated_at = utcnow()
+            session.commit()
+            session.refresh(gap)
+            if close_on_exit:
+                session.expunge(gap)
+            return gap
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            if close_on_exit:
+                session.close()
+
+    def history(
+        self, gap_id: str, account_key: str, tenant_id: str = "default",
+    ) -> tuple[KnowledgeGap, List[KnowledgeGapRevision]]:
+        session = self._get_session()
+        close_on_exit = self._session is None
+        try:
+            gap = self._scoped_gap(session, gap_id, account_key, tenant_id)
+            revisions = list(session.scalars(select(KnowledgeGapRevision).where(
+                KnowledgeGapRevision.gap_id == gap.id,
+                KnowledgeGapRevision.tenant_id == tenant_id,
+                KnowledgeGapRevision.account_key == account_key,
+            ).order_by(KnowledgeGapRevision.version.desc()).limit(100)).all())
+            if close_on_exit:
+                session.expunge(gap)
+                for revision in revisions:
+                    session.expunge(revision)
+            return gap, revisions
+        finally:
+            if close_on_exit:
+                session.close()
 
     def record_unanswered_question(
         self,
@@ -452,6 +680,8 @@ class KnowledgeGapManager:
                 raise ValueError(f"Knowledge gap '{gap_id}' is already resolved.")
             if gap.status not in {"open", "awaiting_owner", "answered"}:
                 raise ValueError(f"Knowledge gap '{gap_id}' cannot be resolved from status '{gap.status}'.")
+
+            self._audit_before(session, gap, "resolve", author_id)
 
             # Sanitize owner answer and canonical question template
             sanitized_answer = sanitise_reusable_knowledge_template(clean_answer, gap.account_key)

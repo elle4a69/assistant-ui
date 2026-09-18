@@ -30,7 +30,10 @@ try:
         resolve_knowledge_curator_proposal,
         transition_knowledge_curator_proposal,
         KnowledgeCuratorService,
+        KnowledgeGap,
+        KnowledgeGapManager,
     )
+    from backend.knowledge.models import Base as KnowledgeBase
     from backend.curator.authority import LEARNED_INFORMATION_FILENAME
     from backend.services.learning_service import (
         list_learned_information,
@@ -71,7 +74,10 @@ except ImportError:
         resolve_knowledge_curator_proposal,
         transition_knowledge_curator_proposal,
         KnowledgeCuratorService,
+        KnowledgeGap,
+        KnowledgeGapManager,
     )
+    from knowledge.models import Base as KnowledgeBase
     from curator.authority import LEARNED_INFORMATION_FILENAME
     from services.learning_service import (
         list_learned_information,
@@ -96,6 +102,104 @@ except ImportError:
     from curator.classifier import classify_all_learned_information
 
 router = APIRouter()
+
+CURATOR_QUESTION_ACCOUNTS = {"primary", "secondary", "shared"}
+
+
+def _curator_question_manager(db: Session) -> KnowledgeGapManager:
+    # These tables belong to the staged knowledge store rather than the legacy
+    # application metadata. Creation is additive and makes existing installs
+    # usable without a destructive migration.
+    KnowledgeBase.metadata.create_all(bind=db.get_bind())
+    return KnowledgeGapManager(db)
+
+
+def _curator_account(account_key: str) -> str:
+    value = str(account_key or "").strip().casefold()
+    if value not in CURATOR_QUESTION_ACCOUNTS:
+        raise HTTPException(status_code=422, detail="Choose a valid customer-service line.")
+    return value
+
+
+def _present_gap_with_history(manager: KnowledgeGapManager, gap_id: str, account_key: str) -> Dict[str, Any]:
+    try:
+        gap, revisions = manager.history(gap_id, account_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    current_version = max((item.version for item in revisions), default=0) + 1
+    return {
+        "question": {**gap.to_public_dict(), "current_version": current_version, "can_undo": any(not item.undone for item in revisions)},
+        "history": [item.to_public_dict() for item in revisions],
+    }
+
+
+@router.get("/api/settings/curator-questions")
+def list_curator_questions(account_key: str = Query(...), include_deleted: bool = False, include_history: bool = True, db: Session = Depends(get_db)):
+    account = _curator_account(account_key)
+    manager = _curator_question_manager(db)
+    items = manager.list_gaps(account_key=account, tenant_id="default", limit=100)
+    if not include_deleted:
+        items = [item for item in items if item.status != "deleted"]
+    questions = []
+    for item in items:
+        if include_history:
+            presented = _present_gap_with_history(manager, item.id, account)
+            questions.append({**presented["question"], "history": presented["history"]})
+        else:
+            questions.append(item.to_public_dict())
+    return {"account_key": account, "questions": questions}
+
+
+@router.get("/api/settings/curator-questions/{gap_id}")
+def get_curator_question(gap_id: str, account_key: str = Query(...), db: Session = Depends(get_db)):
+    return _present_gap_with_history(_curator_question_manager(db), gap_id, _curator_account(account_key))
+
+
+@router.get("/api/settings/curator-questions/{gap_id}/versions/{version}")
+def get_curator_question_version(gap_id: str, version: int, account_key: str = Query(...), db: Session = Depends(get_db)):
+    presented = _present_gap_with_history(_curator_question_manager(db), gap_id, _curator_account(account_key))
+    if version == presented["question"]["current_version"]:
+        return {"version": version, "current": True, "state": presented["question"]}
+    prior = next((item for item in presented["history"] if item["version"] == version), None)
+    if not prior:
+        raise HTTPException(status_code=404, detail="Curator-question version not found for this account.")
+    return {**prior, "current": False}
+
+
+@router.patch("/api/settings/curator-questions/{gap_id}")
+def edit_curator_question(gap_id: str, payload: Dict[str, Any], account_key: str = Query(...), db: Session = Depends(get_db)):
+    manager = _curator_question_manager(db)
+    try:
+        manager.update_gap(gap_id, _curator_account(account_key), payload, actor_id="settings-owner")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "success", **_present_gap_with_history(manager, gap_id, _curator_account(account_key))}
+
+
+@router.delete("/api/settings/curator-questions/{gap_id}")
+def delete_curator_question(gap_id: str, payload: Dict[str, Any], account_key: str = Query(...), db: Session = Depends(get_db)):
+    if str(payload.get("confirmation") or "").strip() != f"delete {gap_id}":
+        raise HTTPException(status_code=409, detail=f"Type delete {gap_id} to confirm.")
+    manager = _curator_question_manager(db)
+    account = _curator_account(account_key)
+    try:
+        manager.delete_gap(gap_id, account, actor_id="settings-owner")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "success", **_present_gap_with_history(manager, gap_id, account)}
+
+
+@router.post("/api/settings/curator-questions/{gap_id}/undo")
+def undo_curator_question(gap_id: str, payload: Dict[str, Any], account_key: str = Query(...), db: Session = Depends(get_db)):
+    if str(payload.get("confirmation") or "").strip() != f"undo {gap_id}":
+        raise HTTPException(status_code=409, detail=f"Type undo {gap_id} to confirm.")
+    manager = _curator_question_manager(db)
+    account = _curator_account(account_key)
+    try:
+        manager.undo_gap(gap_id, account, actor_id="settings-owner")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "success", **_present_gap_with_history(manager, gap_id, account)}
 
 @router.post("/api/settings/learnings")
 def create_manual_learning(payload: ManualLearningInput):

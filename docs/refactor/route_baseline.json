@@ -1083,6 +1083,84 @@
     "response_model": null
   },
   {
+    "path": "/api/settings/curator-questions",
+    "name": "list_curator_questions",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "list_curator_questions",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/curator-questions/{gap_id}",
+    "name": "get_curator_question",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_curator_question",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/curator-questions/{gap_id}/versions/{version}",
+    "name": "get_curator_question_version",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_curator_question_version",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/curator-questions/{gap_id}",
+    "name": "edit_curator_question",
+    "route_type": "APIRoute",
+    "methods": [
+      "PATCH"
+    ],
+    "endpoint": "edit_curator_question",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/curator-questions/{gap_id}",
+    "name": "delete_curator_question",
+    "route_type": "APIRoute",
+    "methods": [
+      "DELETE"
+    ],
+    "endpoint": "delete_curator_question",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/curator-questions/{gap_id}/undo",
+    "name": "undo_curator_question",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "undo_curator_question",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
     "path": "/api/settings/knowledge-curator/run",
     "name": "run_knowledge_curator_endpoint",
     "route_type": "APIRoute",

@@ -29,6 +29,9 @@ try:
         resolve_knowledge_curator_proposal,
         run_knowledge_curator,
     )
+    from backend.curator.gaps import KnowledgeGapManager
+    from backend.knowledge.models import Base as KnowledgeBase
+    from backend.knowledge.repository import KnowledgeRepository
 except ImportError:
     from models.domain import OperationsAction
     from services.operations_service import OPERATIONS_TOOL_SCHEMAS, execute_operations_tool
@@ -43,6 +46,9 @@ except ImportError:
         resolve_knowledge_curator_proposal,
         run_knowledge_curator,
     )
+    from curator.gaps import KnowledgeGapManager
+    from knowledge.models import Base as KnowledgeBase
+    from knowledge.repository import KnowledgeRepository
 
 
 BUSINESS_ASSISTANT_SHARED_TOOL_NAMES = (
@@ -79,8 +85,93 @@ BUSINESS_ASSISTANT_TOOL_SCHEMAS = [
             "properties": {
                 "refresh": {"type": "boolean"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                "account_key": {"type": "string", "enum": ["primary", "secondary", "shared"]},
+                "include_history": {"type": "boolean"},
             },
-            "required": ["refresh", "limit"],
+            "required": ["refresh", "limit", "account_key", "include_history"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "get_curator_question",
+        "description": "Retrieve one authoritative curator question and its auditable prior versions for its customer-service line.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question_id": {"type": "string", "minLength": 3, "maxLength": 255},
+                "account_key": {"type": "string", "enum": ["primary", "secondary", "shared"]},
+                "version": {"type": ["integer", "null"], "minimum": 1},
+            },
+            "required": ["question_id", "account_key", "version"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "edit_curator_question",
+        "description": "Audit and edit the wording of an unresolved curator question after the owner confirms the wording.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question_id": {"type": "string"},
+                "account_key": {"type": "string", "enum": ["primary", "secondary", "shared"]},
+                "canonical_question": {"type": "string", "minLength": 2, "maxLength": 2000},
+                "owner_question": {"type": "string", "minLength": 2, "maxLength": 2000},
+                "confirmation_quote": {"type": "string", "minLength": 1, "maxLength": 300},
+            },
+            "required": ["question_id", "account_key", "canonical_question", "owner_question", "confirmation_quote"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "answer_curator_question",
+        "description": "Resolve a first-class curator question with the owner's confirmed reusable answer for that line.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question_id": {"type": "string"},
+                "account_key": {"type": "string", "enum": ["primary", "secondary", "shared"]},
+                "owner_answer": {"type": "string", "minLength": 2, "maxLength": 4000},
+                "confirmation_quote": {"type": "string", "minLength": 1, "maxLength": 300},
+            },
+            "required": ["question_id", "account_key", "owner_answer", "confirmation_quote"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "delete_curator_question",
+        "description": "Soft-delete one curator question. Require the owner to type the returned exact phrase; the audit and undo remain available.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question_id": {"type": "string"},
+                "account_key": {"type": "string", "enum": ["primary", "secondary", "shared"]},
+                "confirmation_phrase": {"type": "string"},
+            },
+            "required": ["question_id", "account_key", "confirmation_phrase"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "undo_curator_question_change",
+        "description": "Undo the latest audited curator-question change. Require the owner to type the exact undo phrase.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question_id": {"type": "string"},
+                "account_key": {"type": "string", "enum": ["primary", "secondary", "shared"]},
+                "confirmation_phrase": {"type": "string"},
+            },
+            "required": ["question_id", "account_key", "confirmation_phrase"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -189,8 +280,10 @@ def business_assistant_instructions(snapshot: str, memory: str = "[]", conversat
         "frustrations such as 'line one is too flirtatious' or 'it keeps answering parking badly'. Inspect the relevant "
         "conversation or settings evidence when useful, identify the smallest durable business refinement and use "
         "draft_business_rule to prepare it. Always read the drafted meaning back in plain language and get an explicit "
-        "confirmation before calling confirm_business_rule. For curator work, refresh and list outstanding questions, "
-        "ask one clear question at a time, confirm your interpretation back to the user, then resolve it. Cluster the "
+        "confirmation before calling confirm_business_rule. For curator work, list each relevant account from the authoritative "
+        "question store with history enabled, ask one clear question at a time, confirm your interpretation back to the user, "
+        "then resolve it. Use the question retrieval tool before diagnosing a prior answer or revision. Edits are audited; deletion "
+        "and undo require the exact separately typed confirmation phrase returned by the tool. Cluster the "
         "same underlying uncertainty instead of asking repetitive questions. During onboarding, gather useful missing "
         "business information conversationally rather than presenting a long form. At the end of a curator interview, "
         "invite the user to mention anything else they want changed, added or corrected. "
@@ -220,7 +313,21 @@ def _confirmation_present(value: str) -> bool:
     return cleaned in affirmative or cleaned.startswith("yes ") or cleaned.startswith("correct ")
 
 
-def _list_curator_questions(refresh: bool, limit: int) -> Dict[str, Any]:
+def _gap_manager(db: Session) -> KnowledgeGapManager:
+    KnowledgeBase.metadata.create_all(bind=db.get_bind())
+    return KnowledgeGapManager(db)
+
+
+def _present_gap_history(manager: KnowledgeGapManager, question_id: str, account_key: str) -> Dict[str, Any]:
+    gap, revisions = manager.history(question_id, account_key)
+    current_version = max((item.version for item in revisions), default=0) + 1
+    return {
+        "question": {**gap.to_public_dict(), "current_version": current_version, "can_undo": any(not item.undone for item in revisions)},
+        "history": [item.to_public_dict() for item in revisions],
+    }
+
+
+def _list_curator_questions(db: Session, refresh: bool, limit: int, account_key: str, include_history: bool) -> Dict[str, Any]:
     if refresh:
         run_knowledge_curator()
     state = get_knowledge_curator_state()
@@ -229,13 +336,28 @@ def _list_curator_questions(refresh: bool, limit: int) -> Dict[str, Any]:
         if item.get("status") in {"proposed", "accepted"}
     ]
     questions = []
+    manager = _gap_manager(db)
+    gaps = manager.list_gaps(account_key=account_key, tenant_id="default", limit=max(1, min(20, int(limit))))
+    for gap in gaps:
+        if gap.status == "deleted":
+            continue
+        item = gap.to_public_dict()
+        item["source"] = "knowledge_gap"
+        if include_history:
+            item["history"] = _present_gap_history(manager, gap.id, account_key)["history"]
+        questions.append(item)
+        if len(questions) >= max(1, min(20, int(limit))):
+            break
     for item in unresolved:
+        if str(item.get("scope")) != account_key:
+            continue
         owner_questions = [str(q).strip() for q in item.get("owner_questions", []) if str(q).strip()]
         if not owner_questions and item.get("proposed_action") != "ask_owner":
             continue
         previews = item.get("record_previews") if isinstance(item.get("record_previews"), list) else []
         questions.append({
             "proposal_id": item.get("id"),
+            "source": "integrity_proposal",
             "finding_type": item.get("finding_type"),
             "scope": item.get("scope"),
             "question": owner_questions[0] if owner_questions else "This knowledge item needs a business decision.",
@@ -252,7 +374,22 @@ def _list_curator_questions(refresh: bool, limit: int) -> Dict[str, Any]:
         })
         if len(questions) >= max(1, min(20, int(limit))):
             break
-    return {"status": "ok", "count": len(questions), "questions": questions}
+    proposal_history = []
+    if include_history:
+        proposal_history = [{
+            "proposal_id": item.get("id"),
+            "scope": item.get("scope"),
+            "question": next((str(q).strip() for q in item.get("owner_questions", []) if str(q).strip()), None),
+            "status": item.get("status"),
+            "resolution": item.get("resolution"),
+            "selected_record_ids": item.get("selected_record_ids", []),
+            "created_at": item.get("created_at"),
+            "updated_at": item.get("updated_at"),
+        } for item in state.get("proposals", []) if str(item.get("scope")) == account_key][-20:]
+    return {
+        "status": "ok", "account_key": account_key, "count": len(questions),
+        "questions": questions, "integrity_proposal_history": proposal_history,
+    }
 
 
 def execute_business_assistant_tool(
@@ -269,7 +406,69 @@ def execute_business_assistant_tool(
     if name in BUSINESS_ASSISTANT_SHARED_TOOL_NAMES:
         return execute_operations_tool(db, name, arguments, current_user_message)
     if name == "list_curator_questions":
-        return _list_curator_questions(bool(arguments.get("refresh")), int(arguments.get("limit", 10)))
+        return _list_curator_questions(
+            db, bool(arguments.get("refresh")), int(arguments.get("limit", 10)),
+            str(arguments.get("account_key") or "primary"), bool(arguments.get("include_history")),
+        )
+    if name == "get_curator_question":
+        try:
+            presented = _present_gap_history(_gap_manager(db), str(arguments.get("question_id") or ""), str(arguments.get("account_key") or ""))
+            version = arguments.get("version")
+            if version is None or int(version) == presented["question"]["current_version"]:
+                return {"status": "ok", **presented}
+            prior = next((item for item in presented["history"] if item["version"] == int(version)), None)
+            return {"status": "ok", "version": prior} if prior else {"status": "rejected", "reason": "That version is unavailable for this account."}
+        except ValueError as exc:
+            return {"status": "rejected", "reason": str(exc)}
+    if name == "edit_curator_question":
+        if not _confirmation_present(str(arguments.get("confirmation_quote") or "")):
+            return {"status": "rejected", "reason": "An explicit owner confirmation is required."}
+        try:
+            manager = _gap_manager(db)
+            question_id = str(arguments.get("question_id") or "")
+            account_key = str(arguments.get("account_key") or "")
+            manager.update_gap(question_id, account_key, {
+                "canonical_question": arguments.get("canonical_question"),
+                "owner_question": arguments.get("owner_question"),
+            }, actor_id="business-assistant")
+            return {"status": "updated", **_present_gap_history(manager, question_id, account_key)}
+        except ValueError as exc:
+            return {"status": "rejected", "reason": str(exc)}
+    if name == "answer_curator_question":
+        if not _confirmation_present(str(arguments.get("confirmation_quote") or "")):
+            return {"status": "rejected", "reason": "An explicit owner confirmation is required."}
+        try:
+            manager = _gap_manager(db)
+            question_id = str(arguments.get("question_id") or "")
+            account_key = str(arguments.get("account_key") or "")
+            manager.history(question_id, account_key)  # Enforce line/account scope before resolution.
+            record = manager.resolve_gap(
+                question_id, str(arguments.get("owner_answer") or ""), KnowledgeRepository(db),
+                author_id="business-assistant",
+            )
+            return {
+                "status": "resolved", "question_id": question_id, "account_key": account_key,
+                "knowledge_id": record.id, "revision": record.revision,
+                **_present_gap_history(manager, question_id, account_key),
+            }
+        except ValueError as exc:
+            return {"status": "rejected", "reason": str(exc)}
+    if name in {"delete_curator_question", "undo_curator_question_change"}:
+        question_id = str(arguments.get("question_id") or "")
+        verb = "delete" if name == "delete_curator_question" else "undo"
+        required = f"{verb} {question_id}"
+        if str(arguments.get("confirmation_phrase") or "").strip() != required or str(current_user_message or "").strip() != required:
+            return {"status": "pending_confirmation", "confirmation_phrase": required}
+        try:
+            manager = _gap_manager(db)
+            account_key = str(arguments.get("account_key") or "")
+            if verb == "delete":
+                manager.delete_gap(question_id, account_key, actor_id="business-assistant")
+            else:
+                manager.undo_gap(question_id, account_key, actor_id="business-assistant")
+            return {"status": "deleted" if verb == "delete" else "undone", **_present_gap_history(manager, question_id, account_key)}
+        except ValueError as exc:
+            return {"status": "rejected", "reason": str(exc)}
     if name == "draft_business_rule":
         scope = str(arguments.get("scope") or "shared")
         topic = str(arguments.get("topic") or "").strip()

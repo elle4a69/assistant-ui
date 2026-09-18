@@ -73,7 +73,17 @@ def get_live_routes() -> List[Dict[str, Any]]:
     """Inspect and extract metadata for all live routes."""
     from backend.main import app
 
-    return [extract_route_metadata(r) for r in app.routes]
+    # FastAPI 0.141 keeps included APIRouters as lazy _IncludedRouter entries.
+    # Compare the effective route candidates, not those implementation wrappers.
+    routes = []
+    for route in app.routes:
+        candidates = getattr(route, "effective_candidates", None)
+        if callable(candidates):
+            contexts = [*candidates(), *route.effective_low_priority_routes()]
+            routes.extend(context.original_route for context in contexts)
+        else:
+            routes.append(route)
+    return [extract_route_metadata(route) for route in routes]
 
 
 def load_baseline_routes() -> List[Dict[str, Any]]:

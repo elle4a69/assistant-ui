@@ -89,6 +89,7 @@ curl -X POST http://localhost:8000/webhooks/sms \
 ### 2. Verify AI Auto-Replies
 If the autoresponder is enabled, the webhook response will register a system message.
 - For booking questions, the assistant can query the current business time, services, today's times, tomorrow's times, or the next available time.
+- The authenticated Settings curator view and Business Assistant read first-class curator questions from the scoped knowledge-gap store. Question edits, answers, soft deletion, and undo retain bounded owner-facing revision history; every request is line-scoped and customer identifiers, embeddings, secrets, and unrelated records are excluded from assistant/UI responses.
 - A reply such as `1`, `2`, or `3` selects a presented time but does not create a booking. The assistant presents the complete booking summary and only creates it after a later explicit customer confirmation.
 - The complete booking flow stays in the conversation; customers are not sent to a web form.
 

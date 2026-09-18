@@ -35,6 +35,7 @@ from .classifier import (
 )
 from .gaps import (
     KnowledgeGap,
+    KnowledgeGapRevision,
     KnowledgeGapManager,
 )
 from .sanitizer import (
@@ -218,6 +219,7 @@ __all__ = [
     "KnowledgeCuratorService",
     # gaps
     "KnowledgeGap",
+    "KnowledgeGapRevision",
     "KnowledgeGapManager",
     # autonomy
     "AutonomyLevel",
@@ -227,4 +229,3 @@ __all__ = [
     "export_to_main",
     "wire_curator_to_main",
 ]
-

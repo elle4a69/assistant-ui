@@ -21,6 +21,7 @@ def test_business_assistant_hard_excludes_coding_and_deployment_tools():
     assert "draft_business_rule" in names
     assert "confirm_business_rule" in names
     assert "list_curator_questions" in names
+    assert {"get_curator_question", "edit_curator_question", "answer_curator_question", "delete_curator_question", "undo_curator_question_change"} <= names
     assert "create_maintenance_handoff" in names
 
 
@@ -30,6 +31,7 @@ def test_business_assistant_instructions_define_user_level_boundary():
     assert "onboarding" in text
     assert "ask one clear question at a time" in text
     assert "explicit confirmation" in text
+    assert "authoritative question store" in text
     assert "create_maintenance_handoff" in text
 
 

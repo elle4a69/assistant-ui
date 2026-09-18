@@ -898,6 +898,35 @@ export interface KnowledgeCuratorState {
   proposals: KnowledgeCuratorProposal[];
 }
 
+export interface CuratorQuestionRevision {
+  version: number;
+  action: 'edit' | 'resolve' | 'delete' | 'undo';
+  actor_id: string;
+  created_at: string;
+  undone: boolean;
+  state: Omit<CuratorQuestion, 'history' | 'current_version' | 'can_undo'>;
+}
+
+export interface CuratorQuestion {
+  id: string;
+  account_key: 'primary' | 'secondary' | 'shared';
+  canonical_question: string;
+  intent?: string | null;
+  status: string;
+  first_seen_at?: string | null;
+  last_seen_at?: string | null;
+  occurrence_count: number;
+  customer_count: number;
+  owner_question: string;
+  owner_answer?: string | null;
+  resolved_by_knowledge_id?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  current_version?: number;
+  can_undo?: boolean;
+  history?: CuratorQuestionRevision[];
+}
+
 export interface SmsLearningPreviewItem {
   id: string;
   account_key: 'primary' | 'secondary';
@@ -1043,6 +1072,41 @@ export async function getKnowledgeCuratorState(): Promise<KnowledgeCuratorState>
   const response = await apiFetch(`${API_BASE}/api/settings/knowledge-curator`, { cache: 'no-store' });
   if (!response.ok) throw new Error('Failed to load the knowledge curator.');
   return response.json();
+}
+
+export async function listCuratorQuestions(): Promise<CuratorQuestion[]> {
+  const accounts = ['primary', 'secondary', 'shared'] as const;
+  const responses = await Promise.all(accounts.map(async (account) => {
+    const response = await apiFetch(`${API_BASE}/api/settings/curator-questions?account_key=${account}&include_history=true&include_deleted=true`, { cache: 'no-store' });
+    if (!response.ok) throw new Error('Failed to load curator questions.');
+    return (await response.json()).questions as CuratorQuestion[];
+  }));
+  return responses.flat();
+}
+
+export async function editCuratorQuestion(question: CuratorQuestion, ownerQuestion: string): Promise<CuratorQuestion> {
+  const response = await apiFetch(`${API_BASE}/api/settings/curator-questions/${encodeURIComponent(question.id)}?account_key=${question.account_key}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ owner_question: ownerQuestion }),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Curator question could not be edited.');
+  return (await response.json()).question;
+}
+
+export async function deleteCuratorQuestion(question: CuratorQuestion): Promise<void> {
+  const response = await apiFetch(`${API_BASE}/api/settings/curator-questions/${encodeURIComponent(question.id)}?account_key=${question.account_key}`, {
+    method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirmation: `delete ${question.id}` }),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Curator question could not be deleted.');
+}
+
+export async function undoCuratorQuestion(question: CuratorQuestion): Promise<void> {
+  const response = await apiFetch(`${API_BASE}/api/settings/curator-questions/${encodeURIComponent(question.id)}/undo?account_key=${question.account_key}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirmation: `undo ${question.id}` }),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || 'Curator question change could not be undone.');
 }
 
 export async function runKnowledgeCurator(): Promise<{ run: KnowledgeCuratorRun; proposals: KnowledgeCuratorProposal[] }> {

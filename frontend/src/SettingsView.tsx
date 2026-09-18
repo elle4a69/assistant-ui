@@ -26,10 +26,15 @@ import {
   LearnedInformationEntry,
   KnowledgeCuratorState,
   KnowledgeCuratorProposal,
+  CuratorQuestion,
   SmsLearningPreview,
   getKnowledgeCuratorState,
   runKnowledgeCurator,
   resolveKnowledgeCuratorProposal,
+  listCuratorQuestions,
+  editCuratorQuestion,
+  deleteCuratorQuestion,
+  undoCuratorQuestion,
   KnowledgeCuratorResolution,
   getKnowledgeFile,
   saveKnowledgeFile,
@@ -93,6 +98,7 @@ import {
   Volume2,
   Download,
   Ban,
+  Undo2,
 } from 'lucide-react';
 import {
   getIncomingAlarmSettings,
@@ -187,6 +193,8 @@ export default function SettingsView() {
   const [importingSmsLearningCandidates, setImportingSmsLearningCandidates] = useState(false);
   const [smsLearningPreview, setSmsLearningPreview] = useState<SmsLearningPreview | null>(null);
   const [knowledgeCurator, setKnowledgeCurator] = useState<KnowledgeCuratorState>({ runs: [], proposals: [] });
+  const [curatorQuestions, setCuratorQuestions] = useState<CuratorQuestion[]>([]);
+  const [updatingCuratorQuestionId, setUpdatingCuratorQuestionId] = useState<string | null>(null);
   const [runningKnowledgeAudit, setRunningKnowledgeAudit] = useState(false);
   const [updatingCuratorProposalId, setUpdatingCuratorProposalId] = useState<string | null>(null);
 
@@ -313,6 +321,7 @@ export default function SettingsView() {
     try { setLineProfiles(await retryOnce(getSmsLineProfiles)); } catch (e) { console.error('line profile fetch failed:', e); }
     try { setLearnedEntries(await retryOnce(listLearnedInformation)); } catch (e) { console.error('learned rules fetch failed:', e); }
     try { setKnowledgeCurator(await retryOnce(getKnowledgeCuratorState)); } catch (e) { console.error('knowledge curator fetch failed:', e); }
+    try { setCuratorQuestions(await retryOnce(listCuratorQuestions)); } catch (e) { console.error('curator questions fetch failed:', e); }
     try { setBlockedContacts(await retryOnce(listBlockedContacts)); } catch (e) { console.error('blocked contacts fetch failed:', e); }
   }, []);
 
@@ -803,6 +812,51 @@ export default function SettingsView() {
       triggerBanner('error', err instanceof Error ? err.message : 'Proposal could not be updated.');
     } finally {
       setUpdatingCuratorProposalId(null);
+    }
+  };
+
+  const refreshCuratorQuestions = async () => setCuratorQuestions(await listCuratorQuestions());
+
+  const handleEditCuratorQuestion = async (question: CuratorQuestion) => {
+    const wording = window.prompt('Edit the question shown to the business owner:', question.owner_question);
+    if (!wording?.trim() || wording.trim() === question.owner_question) return;
+    setUpdatingCuratorQuestionId(question.id);
+    try {
+      await editCuratorQuestion(question, wording.trim());
+      await refreshCuratorQuestions();
+      triggerBanner('success', 'Curator question updated. The prior version remains in history.');
+    } catch (err) {
+      triggerBanner('error', err instanceof Error ? err.message : 'Curator question could not be edited.');
+    } finally {
+      setUpdatingCuratorQuestionId(null);
+    }
+  };
+
+  const handleDeleteCuratorQuestion = async (question: CuratorQuestion) => {
+    if (window.prompt(`Type delete ${question.id} to remove this question. Its audit history will remain available for undo.`) !== `delete ${question.id}`) return;
+    setUpdatingCuratorQuestionId(question.id);
+    try {
+      await deleteCuratorQuestion(question);
+      await refreshCuratorQuestions();
+      triggerBanner('success', 'Curator question removed. You can undo this change from its history.');
+    } catch (err) {
+      triggerBanner('error', err instanceof Error ? err.message : 'Curator question could not be deleted.');
+    } finally {
+      setUpdatingCuratorQuestionId(null);
+    }
+  };
+
+  const handleUndoCuratorQuestion = async (question: CuratorQuestion) => {
+    if (window.prompt(`Type undo ${question.id} to restore the latest prior version.`) !== `undo ${question.id}`) return;
+    setUpdatingCuratorQuestionId(question.id);
+    try {
+      await undoCuratorQuestion(question);
+      await refreshCuratorQuestions();
+      triggerBanner('success', 'Latest curator-question change undone.');
+    } catch (err) {
+      triggerBanner('error', err instanceof Error ? err.message : 'Curator question change could not be undone.');
+    } finally {
+      setUpdatingCuratorQuestionId(null);
     }
   };
 
@@ -1933,6 +1987,47 @@ export default function SettingsView() {
                     </div>
                   )}
                 </form>
+
+                <section className="rounded-xl border border-sky-200 bg-sky-50/40 p-4" aria-labelledby="curator-questions-heading">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 id="curator-questions-heading" className="text-sm font-bold text-sky-950">Curator questions and answer history</h3>
+                      <p className="mt-1 text-[11px] text-sky-800">Authoritative unanswered and resolved questions are kept separate by customer-service line. Changes retain a dated audit version.</p>
+                    </div>
+                    <button type="button" onClick={() => void refreshCuratorQuestions()} className="rounded border border-sky-300 bg-white px-2 py-1.5 text-[10px] font-bold text-sky-800">Refresh</button>
+                  </div>
+                  <div className="mt-3 grid gap-3">
+                    {curatorQuestions.length === 0 && <p className="rounded-lg border border-dashed border-sky-200 bg-white p-3 text-[11px] text-slate-600">No first-class curator questions have been recorded yet.</p>}
+                    {curatorQuestions.map(question => {
+                      const busy = updatingCuratorQuestionId === question.id;
+                      return <article key={question.id} className={`rounded-lg border bg-white p-3 text-[11px] ${question.status === 'deleted' ? 'border-slate-200 opacity-75' : 'border-sky-200'}`}>
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div>
+                            <p className="font-bold text-slate-900">{question.owner_question}</p>
+                            <p className="mt-1 text-slate-600">{question.account_key} line · {question.status.replace(/_/g, ' ')} · seen {question.occurrence_count} time{question.occurrence_count === 1 ? '' : 's'} · current version {question.current_version || 1}</p>
+                            {question.owner_answer && <p className="mt-2 text-slate-800"><strong>Confirmed answer:</strong> {question.owner_answer}</p>}
+                          </div>
+                          <div className="flex gap-1.5">
+                            {question.status !== 'deleted' && <button type="button" disabled={busy || question.status === 'resolved'} onClick={() => void handleEditCuratorQuestion(question)} className="inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 font-bold disabled:opacity-40"><Edit className="h-3 w-3" /> Edit</button>}
+                            {question.status !== 'deleted' && <button type="button" disabled={busy} onClick={() => void handleDeleteCuratorQuestion(question)} className="inline-flex items-center gap-1 rounded border border-red-200 px-2 py-1 font-bold text-red-700 disabled:opacity-40"><Trash2 className="h-3 w-3" /> Delete</button>}
+                            {question.can_undo && <button type="button" disabled={busy} onClick={() => void handleUndoCuratorQuestion(question)} className="inline-flex items-center gap-1 rounded border border-amber-300 px-2 py-1 font-bold text-amber-800 disabled:opacity-40"><Undo2 className="h-3 w-3" /> Undo</button>}
+                          </div>
+                        </div>
+                        {!!question.history?.length && <details className="mt-3 rounded border border-slate-200 bg-slate-50 p-2">
+                          <summary className="cursor-pointer font-bold text-slate-700">Prior versions and changes ({question.history.length})</summary>
+                          <div className="mt-2 grid gap-2">
+                            {question.history.map(version => <div key={version.version} className="rounded bg-white p-2 text-slate-600">
+                              <p><strong>Version {version.version}</strong> · {version.action} · {new Date(version.created_at).toLocaleString()}{version.undone ? ' · undone' : ''}</p>
+                              <p className="mt-1"><strong>Question:</strong> {version.state.owner_question}</p>
+                              {version.state.owner_answer && <p className="mt-1"><strong>Answer:</strong> {version.state.owner_answer}</p>}
+                              <p className="mt-1">State: {version.state.status.replace(/_/g, ' ')}</p>
+                            </div>)}
+                          </div>
+                        </details>}
+                      </article>;
+                    })}
+                  </div>
+                </section>
 
                 <section className="rounded-xl border border-violet-200 bg-violet-50/40 p-4" aria-labelledby="knowledge-curator-heading">
                   {(() => {
