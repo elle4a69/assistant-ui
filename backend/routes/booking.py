@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 from datetime import datetime, timezone, timedelta
 import json
 import os
 from typing import Any, Dict, List, Optional
-from types import SimpleNamespace
 import uuid
 from zoneinfo import ZoneInfo
 
@@ -32,6 +30,8 @@ try:
         get_service_for_booking,
         load_booking_services,
         load_booking_reminder_config,
+        queue_booking_notification as _queue_booking_notification,
+        booking_notification_snapshot as _booking_notification_snapshot,
     )
     from backend.services.settings_service import (
         get_business_variable_values, load_business_variables, load_line_services,
@@ -58,6 +58,8 @@ except ImportError:
         get_service_for_booking,
         load_booking_services,
         load_booking_reminder_config,
+        queue_booking_notification as _queue_booking_notification,
+        booking_notification_snapshot as _booking_notification_snapshot,
     )
     from services.settings_service import (
         get_business_variable_values, load_business_variables, load_line_services,
@@ -69,57 +71,6 @@ except ImportError:
     from knowledge import render_template_variables
 
 router = APIRouter()
-
-
-def _queue_booking_notification(
-    background_tasks: Optional[BackgroundTasks],
-    booking: CalendarEvent,
-    *,
-    notification_type: str,
-    title: str,
-    priority: int,
-) -> None:
-    """Schedule an already-persisted booking event through the central service."""
-    notify_fn = _dyn("send_notification", None)
-    url_fn = _dyn("build_notification_url", None)
-    if notify_fn is None or url_fn is None:
-        try:
-            from backend.services.notification_service import build_notification_url, send_notification
-        except ImportError:
-            from services.notification_service import build_notification_url, send_notification
-        notify_fn = notify_fn or send_notification
-        url_fn = url_fn or build_notification_url
-    fingerprint = hashlib.sha256(
-        "|".join((
-            notification_type, str(booking.id), str(booking.status or ""),
-            str(booking.summary or ""), str(booking.start_time or ""), str(booking.end_time or ""),
-        )).encode("utf-8")
-    ).hexdigest()
-    task_args = {
-        "notification_type": notification_type,
-        "title": title,
-        "message": f"{str(booking.summary or 'Appointment')[:160]}\n{booking.start_time.strftime('%a %d %b, %I:%M %p')}",
-        "click_url": url_fn("/bookings"),
-        "priority": priority,
-        "dedupe_key": f"booking:{fingerprint}",
-        "metadata": {"booking_id": booking.id, "thread_id": booking.thread_id},
-    }
-    if background_tasks is not None:
-        background_tasks.add_task(notify_fn, **task_args)
-    else:
-        notify_fn(**task_args)
-
-
-def _booking_notification_snapshot(booking: CalendarEvent) -> SimpleNamespace:
-    """Keep notification details available after a cancellation row is deleted."""
-    return SimpleNamespace(
-        id=booking.id,
-        status=booking.status,
-        summary=booking.summary,
-        start_time=booking.start_time,
-        end_time=booking.end_time,
-        thread_id=booking.thread_id,
-    )
 
 @router.get("/api/calendar/bookings")
 def get_bookings(
