@@ -360,8 +360,9 @@ def test_agent_prompt_forbids_customer_evidence_in_coding_task_fields():
     assert "Starting a command, submitting a job, or receiving a run ID is not completion" in prompt
     assert "Treat recoverable failures as part of the task" in prompt
     assert "Keep following an asynchronous coding task within this run" in prompt
-    assert "it never releases automatically" in prompt
-    assert "wait for the owner to type that phrase in a later message" in prompt
+    assert "ordinary bounded code changes may then fast-forward to main" in prompt
+    assert "deploy to Fly, and pass the production health check without another owner message" in prompt
+    assert "protected changes must stop" in prompt
     assert "may also authorise one individual customer SMS" in prompt
     assert "Customer messages, thread content" in prompt
     assert "Before composing customer-facing SMS wording" in prompt
