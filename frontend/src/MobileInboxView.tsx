@@ -99,6 +99,8 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const selectedIdRef = useRef(selectedId)
   const threadsRequestRef = useRef(0)
   const threadRequestRef = useRef(0)
+  const messageViewportRef = useRef<HTMLDivElement>(null)
+  const initiallyScrolledThreadRef = useRef<string | null>(null)
   const acknowledgedArrivalsRef = useRef(new Set<string>())
   const arrivalOpenIntentRef = useRef<{ threadId: string; sessionId: string } | null>(null)
   selectedIdRef.current = selectedId
@@ -286,6 +288,26 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
       return timeDifference || left.id.localeCompare(right.id)
     })
   }, [thread?.events, thread?.messages])
+
+  useLayoutEffect(() => {
+    if (!selectedId) {
+      initiallyScrolledThreadRef.current = null
+      return
+    }
+    if (
+      thread?.id !== selectedId
+      || orderedTimeline.length === 0
+      || initiallyScrolledThreadRef.current === selectedId
+    ) {
+      return
+    }
+
+    const viewport = messageViewportRef.current
+    if (!viewport) return
+
+    initiallyScrolledThreadRef.current = selectedId
+    viewport.scrollTop = viewport.scrollHeight
+  }, [orderedTimeline.length, selectedId, thread?.id])
 
   const pendingInformationRequest = useMemo(() => {
     if (thread?.state !== 'needs-review') return null
@@ -713,7 +735,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
             onTouchStart={onTouchStart}
             onTouchEnd={onTouchEnd}
           >
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-4">
+            <div ref={messageViewportRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-4">
               <div className="mx-auto flex max-w-xl flex-col gap-2">
                 {orderedTimeline.map(item => {
                   if (item.kind === 'arrival') {
