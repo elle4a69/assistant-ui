@@ -1263,6 +1263,15 @@ export interface Service {
   lineKey?: 'primary' | 'secondary';
 }
 
+export interface ServiceAddOn {
+  id: string;
+  name: string;
+  description: string;
+  /** Extra amount charged on top of the base service. */
+  price: number;
+  /** Extra appointment time in minutes, if any. */
+  duration: number;
+}
 
 export interface BookingPayload {
   serviceId: string;
@@ -1289,6 +1298,26 @@ export async function saveServices(services: Service[]): Promise<{ status: strin
   });
   if (!response.ok) {
     throw new Error(`Failed to save services: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function getServiceAddOns(): Promise<ServiceAddOn[]> {
+  const response = await apiFetch(`${API_BASE}/api/service-addons`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch service add-ons: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function saveServiceAddOns(addons: ServiceAddOn[]): Promise<{ status: string }> {
+  const response = await apiFetch(`${API_BASE}/api/service-addons`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ addons }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to save service add-ons: ${response.statusText}`);
   }
   return response.json();
 }

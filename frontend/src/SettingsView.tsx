@@ -39,12 +39,15 @@ import {
   SearchResultItem,
   getServices,
   saveServices,
+  getServiceAddOns,
+  saveServiceAddOns,
   getSmsTemplate,
   saveSmsTemplate,
   getBookingReminderConfig,
   saveBookingReminderConfig,
   BookingReminderConfig,
   Service,
+  ServiceAddOn,
   getWorkingHours,
   saveWorkingHours,
   WorkingHourEntry,
@@ -206,6 +209,7 @@ export default function SettingsView() {
 
   // Services & SMS Template states
   const [services, setServices] = useState<Service[]>([]);
+  const [serviceAddOns, setServiceAddOns] = useState<ServiceAddOn[]>([]);
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
   const [smsTemplate, setSmsTemplate] = useState('');
   const [bookingReminder, setBookingReminder] = useState<BookingReminderConfig>({
@@ -215,6 +219,7 @@ export default function SettingsView() {
   });
   const [savingBookingReminder, setSavingBookingReminder] = useState(false);
   const [savingServices, setSavingServices] = useState(false);
+  const [savingServiceAddOns, setSavingServiceAddOns] = useState(false);
   const [savingSmsTemplate, setSavingSmsTemplate] = useState(false);
 
 
@@ -225,6 +230,17 @@ export default function SettingsView() {
   const [newServiceDuration, setNewServiceDuration] = useState(60);
   const [newServiceShowDuration, setNewServiceShowDuration] = useState(true);
   const [newServiceLineKey, setNewServiceLineKey] = useState<'primary' | 'secondary'>('primary');
+
+  // Shared service add-ons apply to both SMS lines.
+  const [newServiceAddOnName, setNewServiceAddOnName] = useState('');
+  const [newServiceAddOnDesc, setNewServiceAddOnDesc] = useState('');
+  const [newServiceAddOnPrice, setNewServiceAddOnPrice] = useState(0);
+  const [newServiceAddOnDuration, setNewServiceAddOnDuration] = useState(0);
+  const [editingServiceAddOnId, setEditingServiceAddOnId] = useState<string | null>(null);
+  const [editServiceAddOnName, setEditServiceAddOnName] = useState('');
+  const [editServiceAddOnDesc, setEditServiceAddOnDesc] = useState('');
+  const [editServiceAddOnPrice, setEditServiceAddOnPrice] = useState(0);
+  const [editServiceAddOnDuration, setEditServiceAddOnDuration] = useState(0);
 
   // Edit service form state
   const [editingServiceId, setEditingServiceId] = useState<string | null>(null);
@@ -297,6 +313,7 @@ export default function SettingsView() {
       setLoadingSettings(false);
     }
     try { setServices(await retryOnce(getServices)); } catch (e) { console.error('services fetch failed:', e); }
+    try { setServiceAddOns(await retryOnce(getServiceAddOns)); } catch (e) { console.error('service add-ons fetch failed:', e); }
     try { setBusinessVariables(await retryOnce(getBusinessVariables)); } catch (e) { console.error('business variables fetch failed:', e); }
     try { setSmsTemplate((await retryOnce(getSmsTemplate)).template); } catch (e) { console.error('sms template fetch failed:', e); }
     try { setBookingReminder(await retryOnce(getBookingReminderConfig)); } catch (e) { console.error('booking reminder settings fetch failed:', e); }
@@ -1126,6 +1143,63 @@ export default function SettingsView() {
       triggerBanner('error', 'Failed to save services configuration.');
     } finally {
       setSavingServices(false);
+    }
+  };
+
+  const handleAddServiceAddOn = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!newServiceAddOnName.trim()) return;
+    setServiceAddOns(current => [...current, {
+      id: `addon_${Date.now()}`,
+      name: newServiceAddOnName.trim(),
+      description: newServiceAddOnDesc.trim(),
+      price: Math.max(0, newServiceAddOnPrice),
+      duration: Math.max(0, newServiceAddOnDuration),
+    }]);
+    setNewServiceAddOnName('');
+    setNewServiceAddOnDesc('');
+    setNewServiceAddOnPrice(0);
+    setNewServiceAddOnDuration(0);
+    triggerBanner('success', 'Add-on added. Click Save Add-ons to apply.');
+  };
+
+  const startEditServiceAddOn = (addOn: ServiceAddOn) => {
+    setEditingServiceAddOnId(addOn.id);
+    setEditServiceAddOnName(addOn.name);
+    setEditServiceAddOnDesc(addOn.description);
+    setEditServiceAddOnPrice(addOn.price);
+    setEditServiceAddOnDuration(addOn.duration);
+  };
+
+  const handleUpdateServiceAddOn = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!editingServiceAddOnId || !editServiceAddOnName.trim()) return;
+    setServiceAddOns(current => current.map(addOn => addOn.id === editingServiceAddOnId ? {
+      ...addOn,
+      name: editServiceAddOnName.trim(),
+      description: editServiceAddOnDesc.trim(),
+      price: Math.max(0, editServiceAddOnPrice),
+      duration: Math.max(0, editServiceAddOnDuration),
+    } : addOn));
+    setEditingServiceAddOnId(null);
+    triggerBanner('success', 'Add-on updated. Click Save Add-ons to apply.');
+  };
+
+  const handleDeleteServiceAddOn = (id: string) => {
+    setServiceAddOns(current => current.filter(addOn => addOn.id !== id));
+    triggerBanner('success', 'Add-on removed. Click Save Add-ons to apply.');
+  };
+
+  const handleSaveServiceAddOns = async () => {
+    setSavingServiceAddOns(true);
+    try {
+      await saveServiceAddOns(serviceAddOns);
+      triggerBanner('success', 'Shared add-ons saved for both lines.');
+    } catch (error) {
+      console.error(error);
+      triggerBanner('error', 'Failed to save shared add-ons.');
+    } finally {
+      setSavingServiceAddOns(false);
     }
   };
 
@@ -2461,6 +2535,99 @@ export default function SettingsView() {
                     >
                       {savingServices ? 'Saving services list...' : 'Save Services List'}
                     </button>
+                  </div>
+
+                  {/* Shared service add-ons */}
+                  <div className="flex flex-col gap-4 pt-5 border-t border-slate-150">
+                    <div>
+                      <h3 className="font-bold text-slate-800 text-xs">Shared Service Add-ons & Extras</h3>
+                      <p className="text-[10px] text-slate-500 mt-0.5">Optional extras that apply to both Line 1 and Line 2. They are available for the AI to discuss, but are not standalone booking services.</p>
+                    </div>
+
+                    <div className="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 divide-y divide-slate-200">
+                      {serviceAddOns.length === 0 ? (
+                        <div className="py-6 text-center text-xs text-slate-400">No shared add-ons configured yet.</div>
+                      ) : (
+                        serviceAddOns.map(addOn => editingServiceAddOnId === addOn.id ? (
+                          <form key={addOn.id} onSubmit={handleUpdateServiceAddOn} className="p-3 bg-indigo-50/50 flex flex-col gap-2.5">
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                              <input
+                                value={editServiceAddOnName}
+                                onChange={event => setEditServiceAddOnName(event.target.value)}
+                                placeholder="Add-on name"
+                                className="text-xs border border-slate-300 rounded p-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
+                                required
+                              />
+                              <input
+                                type="number"
+                                min="0"
+                                value={editServiceAddOnPrice}
+                                onChange={event => setEditServiceAddOnPrice(Number(event.target.value) || 0)}
+                                placeholder="Extra price ($)"
+                                className="text-xs border border-slate-300 rounded p-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
+                              />
+                              <input
+                                type="number"
+                                min="0"
+                                value={editServiceAddOnDuration}
+                                onChange={event => setEditServiceAddOnDuration(Number(event.target.value) || 0)}
+                                placeholder="Extra time (mins)"
+                                className="text-xs border border-slate-300 rounded p-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
+                              />
+                            </div>
+                            <textarea
+                              value={editServiceAddOnDesc}
+                              onChange={event => setEditServiceAddOnDesc(event.target.value)}
+                              placeholder="What is included?"
+                              rows={2}
+                              className="text-xs border border-slate-300 rounded p-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
+                            />
+                            <div className="flex justify-end gap-2">
+                              <button type="button" onClick={() => setEditingServiceAddOnId(null)} className="px-2.5 py-1 text-[10px] font-bold border border-slate-300 rounded text-slate-600 hover:bg-slate-100 bg-white">Cancel</button>
+                              <button type="submit" className="px-2.5 py-1 text-[10px] font-bold bg-indigo-650 hover:bg-indigo-700 text-white rounded">Update</button>
+                            </div>
+                          </form>
+                        ) : (
+                          <div key={addOn.id} className="p-3 flex justify-between items-start gap-4">
+                            <div className="flex flex-col gap-1">
+                              <span className="font-bold text-slate-800 text-xs flex flex-wrap items-center gap-1.5">
+                                {addOn.name}
+                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded border bg-emerald-100 text-emerald-700 border-emerald-200">Both lines</span>
+                                {addOn.duration > 0 && <span className="text-[9px] bg-slate-200 text-slate-650 font-bold px-1.5 py-0.5 rounded">+{addOn.duration} mins</span>}
+                              </span>
+                              {addOn.description && <span className="text-[10px] text-slate-500 line-clamp-2">{addOn.description}</span>}
+                            </div>
+                            <div className="flex items-center gap-3 shrink-0">
+                              <span className="font-bold text-slate-800 text-xs flex items-center"><DollarSign className="w-3.5 h-3.5 text-slate-400 stroke-[2.5]" />+{addOn.price}</span>
+                              <div className="flex items-center gap-1.5">
+                                <button onClick={() => startEditServiceAddOn(addOn)} className="p-1 hover:bg-indigo-100 rounded text-indigo-600" title="Edit add-on"><Edit className="w-3.5 h-3.5" /></button>
+                                <button onClick={() => handleDeleteServiceAddOn(addOn.id)} className="p-1 hover:bg-rose-100 rounded text-rose-600" title="Delete add-on"><Trash2 className="w-3.5 h-3.5" /></button>
+                              </div>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+
+                    <form onSubmit={handleAddServiceAddOn} className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg flex flex-col gap-3">
+                      <h4 className="font-bold text-slate-700 text-xs flex items-center gap-1"><Plus className="w-3.5 h-3.5 text-slate-400" /> Add Shared Add-on</h4>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                        <input value={newServiceAddOnName} onChange={event => setNewServiceAddOnName(event.target.value)} placeholder="Add-on name (e.g. Hot stones)" className="text-xs border border-slate-300 rounded p-2 focus:outline-none focus:ring-1 focus:ring-indigo-500" required />
+                        <input type="number" min="0" value={newServiceAddOnPrice} onChange={event => setNewServiceAddOnPrice(Number(event.target.value) || 0)} placeholder="Extra price ($)" className="text-xs border border-slate-300 rounded p-2 focus:outline-none focus:ring-1 focus:ring-indigo-500" />
+                        <input type="number" min="0" value={newServiceAddOnDuration} onChange={event => setNewServiceAddOnDuration(Number(event.target.value) || 0)} placeholder="Extra time (mins)" className="text-xs border border-slate-300 rounded p-2 focus:outline-none focus:ring-1 focus:ring-indigo-500" />
+                      </div>
+                      <textarea value={newServiceAddOnDesc} onChange={event => setNewServiceAddOnDesc(event.target.value)} placeholder="What is included?" rows={2} className="text-xs border border-slate-300 rounded p-2 focus:outline-none focus:ring-1 focus:ring-indigo-500" />
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-semibold text-slate-500">Applies to both SMS lines</span>
+                        <button type="submit" className="bg-slate-800 hover:bg-slate-700 text-white font-bold text-[11px] px-3.5 py-1.5 rounded shadow-sm">Add to list</button>
+                      </div>
+                    </form>
+
+                    <div className="flex justify-end pt-2 border-t border-slate-150">
+                      <button onClick={handleSaveServiceAddOns} disabled={savingServiceAddOns} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs px-4 py-2.5 rounded-lg shadow-sm disabled:opacity-50">
+                        {savingServiceAddOns ? 'Saving add-ons...' : 'Save Add-ons'}
+                      </button>
+                    </div>
                   </div>
 
                   {/* Standalone Booking Form Embedding Snippet */}

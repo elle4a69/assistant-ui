@@ -31,7 +31,7 @@ try:
     )
     from backend.schemas.domain import (
         PushSubscriptionInput, DraftUpdateInput, QARuleItem,
-        ServicesListInput, LocantoMessagePayload,
+        ServicesListInput, ServiceAddOnsInput, LocantoMessagePayload,
     )
     from backend.knowledge import (
         is_style_examples_enabled,
@@ -55,6 +55,8 @@ try:
     from backend.services.settings_service import (
         load_line_services,
         load_all_line_services,
+        load_service_addons,
+        save_service_addons,
         get_business_variable_values,
         build_business_context,
         _line_services_path,
@@ -80,7 +82,7 @@ except ImportError:
     )
     from schemas.domain import (
         PushSubscriptionInput, DraftUpdateInput, QARuleItem,
-        ServicesListInput, LocantoMessagePayload,
+        ServicesListInput, ServiceAddOnsInput, LocantoMessagePayload,
     )
     from knowledge import (
         is_style_examples_enabled,
@@ -104,6 +106,8 @@ except ImportError:
     from services.settings_service import (
         load_line_services,
         load_all_line_services,
+        load_service_addons,
+        save_service_addons,
         get_business_variable_values,
         build_business_context,
         _line_services_path,
@@ -457,6 +461,20 @@ def save_services(payload: ServicesListInput):
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save services: {e}")
+
+
+@router.get("/api/service-addons")
+def get_service_addons():
+    return load_service_addons()
+
+
+@router.post("/api/service-addons")
+def save_service_addons_route(payload: ServiceAddOnsInput):
+    try:
+        save_service_addons([addon.model_dump() for addon in payload.addons])
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save service add-ons: {e}")
 
 
 @router.post("/api/locanto/sync")
