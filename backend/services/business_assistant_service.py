@@ -13,9 +13,11 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 try:
-    from backend.models.domain import OperationsAction
+    from backend.core.constants import OPERATIONS_CODE_SECRET_RE, OPERATIONS_MEMORY_PRIVATE_RE
+    from backend.models.domain import SupportTicket
     from backend.services.operations_service import (
         OPERATIONS_TOOL_SCHEMAS,
+        _operations_start_coding_task,
         execute_operations_tool,
     )
     from backend.services.learning_service import (
@@ -30,8 +32,9 @@ try:
         run_knowledge_curator,
     )
 except ImportError:
-    from models.domain import OperationsAction
-    from services.operations_service import OPERATIONS_TOOL_SCHEMAS, execute_operations_tool
+    from core.constants import OPERATIONS_CODE_SECRET_RE, OPERATIONS_MEMORY_PRIVATE_RE
+    from models.domain import SupportTicket
+    from services.operations_service import OPERATIONS_TOOL_SCHEMAS, _operations_start_coding_task, execute_operations_tool
     from services.learning_service import (
         approve_learned_information_entry,
         generate_manual_learning,
@@ -158,19 +161,21 @@ BUSINESS_ASSISTANT_TOOL_SCHEMAS = [
         "type": "function",
         "name": "create_maintenance_handoff",
         "description": (
-            "Create a structured maintenance handoff when the owner's problem appears technical. "
-            "This records the issue for the separate maintenance/engineering agent and performs no coding or deployment."
+            "Create an anonymised support ticket for a bug, feature request, upgrade or technical problem. It may be queued "
+            "for the separate coding agent and prepare a deployment request, but can never deploy without owner approval."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "title": {"type": "string", "minLength": 3, "maxLength": 200},
+                "category": {"type": "string", "enum": ["bug", "feature_request", "upgrade", "access", "security"]},
                 "observed_behavior": {"type": "string", "minLength": 3, "maxLength": 2000},
                 "affected_area": {"type": "string", "minLength": 2, "maxLength": 200},
                 "user_impact": {"type": "string", "minLength": 2, "maxLength": 1000},
                 "evidence": {"type": "string", "maxLength": 2000},
+                "desired_outcome": {"type": "string", "minLength": 5, "maxLength": 1000},
             },
-            "required": ["title", "observed_behavior", "affected_area", "user_impact", "evidence"],
+            "required": ["title", "category", "observed_behavior", "affected_area", "user_impact", "evidence", "desired_outcome"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -198,7 +203,8 @@ def business_assistant_instructions(snapshot: str, memory: str = "[]", conversat
         "owner explicitly asks. You have absolutely no coding, source-file, GitHub, shell, deployment, infrastructure or "
         "developer-setting capability. Never claim otherwise and never try to work around this boundary. If a reported "
         "problem appears technical, inspect only the safe evidence available to you, then call create_maintenance_handoff "
-        "with a concise problem statement for the separate maintenance agent. Do not design code changes yourself. "
+        "to create a concise support ticket for the separate maintenance agent. Tickets may be implemented and independently "
+        "checked on a private review branch, but never deploy without the owner's later approval. Do not design code changes yourself. "
         "Dynamic facts such as current prices, durations, availability and booking times must come from their live "
         "authoritative settings/calendar rather than being memorised as literal rules. Keep primary, secondary and shared "
         "business knowledge separated correctly. Be warm, concise and practical, use Australian English and avoid "
@@ -329,43 +335,51 @@ def execute_business_assistant_tool(
     if name == "create_maintenance_handoff":
         payload = {
             "title": str(arguments.get("title") or "").strip()[:200],
+            "category": str(arguments.get("category") or "bug").strip(),
             "observed_behavior": str(arguments.get("observed_behavior") or "").strip()[:2000],
             "affected_area": str(arguments.get("affected_area") or "").strip()[:200],
             "user_impact": str(arguments.get("user_impact") or "").strip()[:1000],
             "evidence": str(arguments.get("evidence") or "").strip()[:2000],
+            "desired_outcome": str(arguments.get("desired_outcome") or "").strip()[:1000],
             "source": "business_assistant",
         }
+        if payload["category"] not in {"bug", "feature_request", "upgrade", "access", "security"} or not all(payload[key] for key in ("title", "observed_behavior", "affected_area", "user_impact", "desired_outcome")):
+            return {"status": "rejected", "reason": "The support ticket is incomplete or has an invalid category."}
+        if OPERATIONS_MEMORY_PRIVATE_RE.search("\n".join(str(value) for value in payload.values())) or OPERATIONS_CODE_SECRET_RE.search("\n".join(str(value) for value in payload.values())):
+            return {"status": "rejected", "reason": "Remove customer contact details and secret values before creating an engineering ticket."}
         existing = (
-            db.query(OperationsAction)
-            .filter(
-                OperationsAction.action_type == "maintenance_handoff",
-                OperationsAction.status == "pending",
-            )
-            .order_by(OperationsAction.created_at.desc())
+            db.query(SupportTicket).filter(SupportTicket.status.in_({"received", "engineering_queued", "engineering_in_progress", "awaiting_deployment"}))
+            .order_by(SupportTicket.created_at.desc())
             .limit(20)
             .all()
         )
         for item in existing:
-            try:
-                prior = json.loads(item.payload or "{}")
-            except (TypeError, json.JSONDecodeError):
-                prior = {}
-            if prior.get("title", "").casefold() == payload["title"].casefold():
-                return {"status": "already_pending", "handoff_id": item.id, "title": payload["title"]}
-        action = OperationsAction(
-            action_type="maintenance_handoff",
-            payload=json.dumps(payload, ensure_ascii=False),
-            reason=payload["observed_behavior"][:1000],
-            status="pending",
+            if item.title.casefold() == payload["title"].casefold():
+                return {"status": "already_pending", "ticket_id": item.id, "title": payload["title"]}
+        ticket = SupportTicket(
+            source=payload["source"], category=payload["category"], title=payload["title"],
+            observed_behavior=payload["observed_behavior"], affected_area=payload["affected_area"],
+            user_impact=payload["user_impact"], evidence=payload["evidence"], status="received",
         )
-        db.add(action)
+        db.add(ticket)
         db.commit()
-        db.refresh(action)
+        db.refresh(ticket)
+        if ticket.category in {"access", "security"}:
+            ticket.status = "awaiting_authorisation"
+            ticket.resolution_summary = "This sensitive request needs explicit owner approval before engineering starts."
+            db.commit()
+            return {"status": "ticket_created", "ticket_id": ticket.id, "coding_task_id": None, "title": ticket.title, "ticket_status": ticket.status}
+        instructions = ("Investigate this anonymised support ticket. Confirm it from the codebase and tests, then implement the smallest safe end-to-end correction. Do not access customer records, secrets, or production data.\n\n"
+            f"Category: {payload['category']}\nObserved behaviour: {payload['observed_behavior']}\nAffected area: {payload['affected_area']}\nUser impact: {payload['user_impact']}\nDesired outcome: {payload['desired_outcome']}\nEvidence: {payload['evidence'] or 'None supplied.'}")
+        started = _operations_start_coding_task(db, ticket.title, instructions, payload["desired_outcome"], support_ticket_id=ticket.id, queue_if_busy=True, auto_propose_deployment=True)
+        ticket.coding_task_id = str(started.get("task_id") or "") or None
+        ticket.status = "engineering_in_progress" if started.get("status") == "started" else "engineering_queued" if started.get("status") == "queued" else "needs_review"
+        ticket.resolution_summary = None if ticket.coding_task_id else str(started.get("reason") or "The coding queue could not accept this ticket.")[:1000]
+        db.commit()
         return {
-            "status": "handed_off",
-            "handoff_id": action.id,
-            "title": payload["title"],
-            "note": "Recorded for the separate maintenance/engineering agent. No code or deployment action was taken.",
+            "status": "ticket_created", "ticket_id": ticket.id, "coding_task_id": ticket.coding_task_id,
+            "title": ticket.title, "ticket_status": ticket.status,
+            "note": "Coding may prepare a review branch, but production deployment always needs owner approval.",
         }
     return {"status": "rejected", "reason": "Unsupported business-assistant tool."}
 

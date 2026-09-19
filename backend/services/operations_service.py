@@ -123,6 +123,7 @@ try:
         OperationsAgentRun,
         OperationsChatMessage,
         OperationsMemory,
+        SupportTicket,
         Thread,
         ThreadEvent,
     )
@@ -212,6 +213,7 @@ except ImportError:
         OperationsAgentRun,
         OperationsChatMessage,
         OperationsMemory,
+        SupportTicket,
         Thread,
         ThreadEvent,
     )
@@ -3089,6 +3091,9 @@ def _operations_start_coding_task(
     *,
     lock_timeout_seconds: Optional[float] = None,
     origin_run_id: Optional[str] = None,
+    support_ticket_id: Optional[str] = None,
+    queue_if_busy: bool = False,
+    auto_propose_deployment: bool = False,
 ) -> Dict[str, Any]:
     code_access_fn = _dyn("operations_code_access_available", operations_code_access_available)
     if not code_access_fn():
@@ -3123,6 +3128,11 @@ def _operations_start_coding_task(
             .first()
         )
         if active:
+            if queue_if_busy:
+                action_id = str(uuid.uuid4())
+                queued = OperationsAction(id=action_id, action_type="coding_task", status="pending", reason=f"Approved support-ticket coding task: {title}", payload=json.dumps({"title": title, "instructions": instructions, "acceptance_test": acceptance_test, "instructions_sha256": hashlib.sha256(instructions.encode("utf-8")).hexdigest(), "stage": "awaiting_queue", "branch": f"ops/task-{action_id}", "support_ticket_id": support_ticket_id, "auto_propose_deployment": bool(auto_propose_deployment)}))
+                db.add(queued); db.commit()
+                return {"status": "queued", "task_id": action_id, "title": title, "deployment": "will require owner approval after checks"}
             return {
                 "status": "already_running",
                 "task_id": active.id,
@@ -3139,6 +3149,8 @@ def _operations_start_coding_task(
             "stage": "awaiting_runner",
             "branch": branch,
             "queued_at": datetime.utcnow().isoformat() + "Z",
+            "support_ticket_id": support_ticket_id,
+            "auto_propose_deployment": bool(auto_propose_deployment),
         }
         if origin_run_id:
             payload["origin_agent_run_id"] = str(origin_run_id)
@@ -3146,7 +3158,7 @@ def _operations_start_coding_task(
             id=action_id,
             action_type="coding_task",
             payload=json.dumps(payload),
-            reason=f"Owner-authorised coding task: {title}",
+            reason=f"Approved support-ticket coding task: {title}" if support_ticket_id else f"Owner-authorised coding task: {title}",
             status="queued",
         )
         db.add(action)
@@ -3228,6 +3240,35 @@ def _operations_cancel_coding_task(
         "task_id": task_id,
         "next_step": "The task will not be claimed or deployed.",
     }
+
+
+def _operations_sync_support_ticket(db: Session, action: OperationsAction, deployment_id: Optional[str] = None) -> None:
+    ticket_id = str(_operations_action_payload(action).get("support_ticket_id") or "")
+    ticket = db.get(SupportTicket, ticket_id) if ticket_id else None
+    if not ticket:
+        return
+    ticket.coding_task_id = action.id
+    if deployment_id:
+        ticket.deployment_action_id = deployment_id
+    if action.status in {"queued", "running"}:
+        ticket.status = "engineering_in_progress"
+    elif action.status == "pending":
+        ticket.status = "engineering_queued"
+    elif action.status == "completed":
+        ticket.status = "awaiting_deployment"
+        ticket.resolution_summary = "Implementation and independent checks passed; awaiting owner deployment approval."
+    else:
+        ticket.status = "needs_review"
+    db.commit()
+
+
+def _operations_promote_next_support_ticket(db: Session) -> None:
+    if db.query(OperationsAction).filter(OperationsAction.action_type == "coding_task", OperationsAction.status.in_(OPERATIONS_CODE_ACTIVE_STATUSES)).first():
+        return
+    next_action = db.query(OperationsAction).filter(OperationsAction.action_type == "coding_task", OperationsAction.status == "pending").order_by(OperationsAction.created_at.asc()).first()
+    if next_action:
+        payload = _operations_action_payload(next_action); payload["stage"] = "awaiting_runner"
+        next_action.payload = json.dumps(payload); next_action.status = "queued"; db.commit()
 
 
 def _operations_matching_task_run(action: OperationsAction) -> Optional[Dict[str, Any]]:
@@ -3345,6 +3386,12 @@ def _operations_refresh_coding_task(db: Session, action: OperationsAction) -> Op
         action.payload = json.dumps(payload, ensure_ascii=False)
         action.executed_at = datetime.utcnow()
         db.commit()
+        _operations_sync_support_ticket(db, action)
+        if action.status == "completed" and payload.get("auto_propose_deployment"):
+            proposal = _operations_propose_code_deployment(db, action.id, "Verified support-ticket implementation is ready for owner deployment approval.")
+            if proposal.get("status") in {"pending_confirmation", "already_proposed"}:
+                _operations_sync_support_ticket(db, action, str(proposal.get("action_id") or "") or None)
+        _operations_promote_next_support_ticket(db)
         return None
     except OperationsGitHubError as exc:
         return str(exc)
