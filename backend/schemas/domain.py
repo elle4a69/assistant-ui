@@ -430,6 +430,20 @@ class ServicesListInput(BaseModel):
     services: List[ServiceItem]
 
 
+class ServiceAddOnItem(BaseModel):
+    """A shared optional extra that may be offered with a booked service."""
+
+    id: str
+    name: str
+    description: str = ""
+    price: int = Field(default=0, ge=0)
+    duration: int = Field(default=0, ge=0)
+
+
+class ServiceAddOnsInput(BaseModel):
+    addons: List[ServiceAddOnItem]
+
+
 class WorkingHourEntry(BaseModel):
     day: str
     enabled: bool
@@ -533,6 +547,8 @@ __all__ = [
     "FilePurgeInput",
     "ServiceItem",
     "ServicesListInput",
+    "ServiceAddOnItem",
+    "ServiceAddOnsInput",
     "WorkingHourEntry",
     "WorkingHoursInput",
     "MobileMessageConfigInput",

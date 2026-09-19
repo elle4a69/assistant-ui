@@ -68,6 +68,12 @@ def _line_services_path(account_key: str) -> str:
     return os.path.join(data_dir, LINE_SERVICE_FILENAMES[account_key])
 
 
+def _service_addons_path() -> str:
+    """Location of the one shared catalogue available to both SMS lines."""
+    data_dir = _dyn("DATA_DIR", DATA_DIR)
+    return os.path.join(data_dir, "service_addons.json")
+
+
 def _service_line_key(service: Dict[str, Any]) -> str:
     explicit = str(service.get("lineKey") or service.get("smsAccountKey") or "").strip().lower()
     if explicit in FIRST_CONTACT_ACCOUNT_KEYS:
@@ -116,6 +122,21 @@ def load_all_line_services() -> List[Dict[str, Any]]:
     return [service for key in FIRST_CONTACT_ACCOUNT_KEYS for service in load_line_services(key)]
 
 
+def load_service_addons() -> List[Dict[str, Any]]:
+    """Load optional extras shared by both SMS lines."""
+    return _read_service_catalogue(_service_addons_path())
+
+
+def save_service_addons(addons: List[Dict[str, Any]]) -> None:
+    """Atomically save the shared add-on catalogue."""
+    path = _service_addons_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = f"{path}.tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(addons, handle, indent=2, ensure_ascii=False)
+    os.replace(temporary, path)
+
+
 def get_live_services_context(account_key: str = "primary") -> str:
     """Read the current Settings service catalogue for every AI reply.
 
@@ -123,7 +144,8 @@ def get_live_services_context(account_key: str = "primary") -> str:
     conversation without a restart or a separate knowledge-base upload.
     """
     services = load_line_services(account_key)
-    if not services:
+    addons = load_service_addons()
+    if not services and not addons:
         return ""
 
     rendered = ["[Live services and prices from Settings]"]
@@ -149,6 +171,29 @@ def get_live_services_context(account_key: str = "primary") -> str:
         if description:
             details.append(f"Description: {description}")
         rendered.append("\n".join(details))
+
+    if addons:
+        rendered.append(
+            "[Shared service add-ons — available to both SMS lines]\n"
+            "These are optional extras to a base service, not standalone booking services."
+        )
+        for addon in addons:
+            name = str(addon.get("name", "")).strip()
+            if not name:
+                continue
+            details = [name]
+            price = addon.get("price")
+            if price is not None:
+                details.append(f"Additional price: ${price}")
+            duration = addon.get("duration")
+            if duration:
+                details.append(f"Additional time: {duration} minutes")
+            description = re.sub(
+                r"\s+", " ", str(addon.get("description", "")).strip()
+            )
+            if description:
+                details.append(f"Description: {description}")
+            rendered.append("\n".join(details))
     return "\n\n".join(rendered) if len(rendered) > 1 else ""
 
 
@@ -466,11 +511,14 @@ def render_message_export_csv(db: Session) -> str:
 
 __all__ = [
     "_line_services_path",
+    "_service_addons_path",
     "_service_line_key",
     "_read_service_catalogue",
     "_ensure_line_service_catalogues",
     "load_line_services",
     "load_all_line_services",
+    "load_service_addons",
+    "save_service_addons",
     "get_live_services_context",
     "load_business_variables",
     "get_business_variable_values",
