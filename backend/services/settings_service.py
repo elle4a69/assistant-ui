@@ -134,6 +134,8 @@ def get_live_services_context(account_key: str = "primary") -> str:
         if not name:
             continue
         details = [name]
+        if service.get("itemType") == "addon":
+            details[0] = f"Add-on: {name} (available with any service; not a standalone public service)"
         service_id = str(service.get("id", "")).strip()
         if service_id:
             details.append(f"Booking service ID: {service_id}")

@@ -174,6 +174,24 @@ def test_live_service_settings_are_read_without_restart(tmp_path, monkeypatch):
     assert "Price: $250" in get_live_services_context()
 
 
+def test_unpublished_addon_remains_available_to_ai_context(tmp_path, monkeypatch):
+    monkeypatch.setattr("main.DATA_DIR", str(tmp_path))
+    (tmp_path / "line_1_services.json").write_text(json.dumps([{
+        "id": "addon-one",
+        "name": "Extended care",
+        "description": "May be attached to a booking.",
+        "price": 25,
+        "duration": 15,
+        "itemType": "addon",
+        "published": False,
+    }]), encoding="utf-8")
+
+    context = get_live_services_context()
+
+    assert "Add-on: Extended care" in context
+    assert "available with any service" in context
+
+
 def test_application_startup_does_not_drop_the_database():
     source = Path(__file__).with_name("main.py").read_text(encoding="utf-8")
     startup_section = source.split("# RAG Knowledge Base Loader", maxsplit=1)[0]

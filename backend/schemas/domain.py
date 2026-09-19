@@ -310,6 +310,7 @@ class UpdateBookingInput(BaseModel):
 
 class ManualBookingInput(BaseModel):
     serviceId: str
+    addonIds: List[str] = Field(default_factory=list)
     name: str
     phone: str
     startTime: str
@@ -424,6 +425,8 @@ class ServiceItem(BaseModel):
     duration: int
     showDuration: Optional[bool] = True
     lineKey: Literal["primary", "secondary"] = "primary"
+    itemType: Literal["service", "addon"] = "service"
+    published: bool = True
 
 
 class ServicesListInput(BaseModel):

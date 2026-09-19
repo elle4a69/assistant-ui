@@ -440,7 +440,7 @@ def create_manual_booking(
                 
         service = None
         for s in services:
-            if s.get("id") == payload.serviceId:
+            if s.get("id") == payload.serviceId and s.get("itemType", "service") != "addon":
                 service = s
                 break
                 
@@ -451,14 +451,30 @@ def create_manual_booking(
                 "price": 100
             }
             
-        duration = service.get("duration", 60)
+        requested_addon_ids = set(payload.addonIds)
+        addons = [
+            item for item in services
+            if item.get("itemType") == "addon" and item.get("id") in requested_addon_ids
+        ]
+        if len(addons) != len(requested_addon_ids):
+            raise HTTPException(status_code=422, detail="One or more selected add-ons are unavailable for this service line.")
+
+        duration = int(service.get("duration", 60) or 0) + sum(
+            int(addon.get("duration", 0) or 0) for addon in addons
+        )
+        service_label = service["name"]
+        if addons:
+            service_label += " + " + " + ".join(str(addon["name"]) for addon in addons)
+        total_price = int(service.get("price", 0) or 0) + sum(
+            int(addon.get("price", 0) or 0) for addon in addons
+        )
         end_dt = start_dt + timedelta(minutes=duration)
         avail_err_fn = _dyn("booking_availability_error", booking_availability_error)
         availability_error = avail_err_fn(start_dt, duration, sms_account_key)
         if availability_error:
             raise HTTPException(status_code=409, detail=availability_error)
 
-        summary = f"{payload.name} - {service['name']} ({provider['name']})"
+        summary = f"{payload.name} - {service_label} ({provider['name']})"
         cal_service = _dyn("calendar_service", calendar_service)
         booking_id = cal_service.create_booking(
             summary=summary,
@@ -481,7 +497,7 @@ def create_manual_booking(
         )
         local_booking = _arrival_booking(db, str(booking_id))
         if local_booking:
-            local_booking.amount = int(service.get("price", 0) or 0)
+            local_booking.amount = total_price
         arrival_link = _arrival_public_link(arrival_token)
             
         template_path = os.path.join(PROMPTS_DIR, "sms_confirmation_template.txt")
@@ -497,7 +513,7 @@ def create_manual_booking(
         confirmation_variables = {
             **get_business_variable_values(),
             "name": payload.name,
-            "service": service["name"],
+            "service": service_label,
             "provider": provider["name"],
             "time": formatted_time,
             "arrival_link": arrival_link,
@@ -566,7 +582,7 @@ def create_manual_booking(
             type="sms-delivery-failed" if delivery_failure else "resolution",
             agent_id="system",
             meta=json.dumps({
-                "detail": f"Booked {service['name']} for {payload.name}",
+                "detail": f"Booked {service_label} for {payload.name}",
                 **({"reason": delivery_failure[:500]} if delivery_failure else {}),
             }),
             at=datetime.utcnow()
@@ -588,6 +604,7 @@ def create_manual_booking(
             "smsError": "Booking saved, but the confirmation SMS was not sent." if delivery_failure else None,
             "arrivalLink": arrival_link,
             "arrivalSessionId": arrival_session.id,
+            "addons": [{"id": addon["id"], "name": addon["name"]} for addon in addons],
         }
     except HTTPException:
         db.rollback()

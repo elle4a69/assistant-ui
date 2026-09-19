@@ -37,7 +37,7 @@ import {
   searchKnowledgeFile,
   purgeKnowledgeFile,
   SearchResultItem,
-  getServices,
+  getSettingsServices,
   saveServices,
   getSmsTemplate,
   saveSmsTemplate,
@@ -226,6 +226,19 @@ export default function SettingsView() {
   const [newServiceShowDuration, setNewServiceShowDuration] = useState(true);
   const [newServiceLineKey, setNewServiceLineKey] = useState<'primary' | 'secondary'>('primary');
 
+  // Independent add-ons are private catalogue items available with any service.
+  const [newAddonName, setNewAddonName] = useState('');
+  const [newAddonDesc, setNewAddonDesc] = useState('');
+  const [newAddonPrice, setNewAddonPrice] = useState(25);
+  const [newAddonDuration, setNewAddonDuration] = useState(15);
+  const [newAddonLineKey, setNewAddonLineKey] = useState<'primary' | 'secondary'>('primary');
+  const [editingAddonId, setEditingAddonId] = useState<string | null>(null);
+  const [editAddonName, setEditAddonName] = useState('');
+  const [editAddonDesc, setEditAddonDesc] = useState('');
+  const [editAddonPrice, setEditAddonPrice] = useState(25);
+  const [editAddonDuration, setEditAddonDuration] = useState(15);
+  const [editAddonLineKey, setEditAddonLineKey] = useState<'primary' | 'secondary'>('primary');
+
   // Edit service form state
   const [editingServiceId, setEditingServiceId] = useState<string | null>(null);
   const [editServiceName, setEditServiceName] = useState('');
@@ -296,7 +309,7 @@ export default function SettingsView() {
     } finally {
       setLoadingSettings(false);
     }
-    try { setServices(await retryOnce(getServices)); } catch (e) { console.error('services fetch failed:', e); }
+    try { setServices(await retryOnce(getSettingsServices)); } catch (e) { console.error('services fetch failed:', e); }
     try { setBusinessVariables(await retryOnce(getBusinessVariables)); } catch (e) { console.error('business variables fetch failed:', e); }
     try { setSmsTemplate((await retryOnce(getSmsTemplate)).template); } catch (e) { console.error('sms template fetch failed:', e); }
     try { setBookingReminder(await retryOnce(getBookingReminderConfig)); } catch (e) { console.error('booking reminder settings fetch failed:', e); }
@@ -1039,6 +1052,8 @@ export default function SettingsView() {
       duration: newServiceDuration,
       showDuration: newServiceShowDuration,
       lineKey: newServiceLineKey,
+      itemType: 'service',
+      published: true,
     };
     setServices([...services, newService]);
     setNewServiceName('');
@@ -1114,6 +1129,53 @@ export default function SettingsView() {
 
   const cancelEditService = () => {
     setEditingServiceId(null);
+  };
+
+  const handleAddAddon = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newAddonName.trim()) return;
+    setServices([...services, {
+      id: `addon_${Date.now()}`,
+      name: newAddonName.trim(),
+      description: newAddonDesc.trim(),
+      price: newAddonPrice,
+      duration: newAddonDuration,
+      showDuration: true,
+      lineKey: newAddonLineKey,
+      itemType: 'addon',
+      published: false,
+    }]);
+    setNewAddonName('');
+    setNewAddonDesc('');
+    setNewAddonPrice(25);
+    setNewAddonDuration(15);
+    triggerBanner('success', 'Add-on added. Save the catalogue to apply.');
+  };
+
+  const startEditAddon = (addon: Service) => {
+    setEditingAddonId(addon.id);
+    setEditAddonName(addon.name);
+    setEditAddonDesc(addon.description);
+    setEditAddonPrice(addon.price);
+    setEditAddonDuration(addon.duration);
+    setEditAddonLineKey(addon.lineKey || 'primary');
+  };
+
+  const handleUpdateAddon = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingAddonId || !editAddonName.trim()) return;
+    setServices(services.map(item => item.id === editingAddonId ? {
+      ...item,
+      name: editAddonName.trim(),
+      description: editAddonDesc.trim(),
+      price: editAddonPrice,
+      duration: editAddonDuration,
+      lineKey: editAddonLineKey,
+      itemType: 'addon',
+      published: false,
+    } : item));
+    setEditingAddonId(null);
+    triggerBanner('success', 'Add-on updated. Save the catalogue to apply.');
   };
 
   const handleSaveServices = async () => {
@@ -1277,6 +1339,9 @@ export default function SettingsView() {
     setCopiedIframe(true);
     setTimeout(() => setCopiedIframe(false), 3000);
   };
+
+  const serviceItems = services.filter(item => item.itemType !== 'addon');
+  const addonItems = services.filter(item => item.itemType === 'addon');
 
   return (
     <div className="flex-1 overflow-y-auto bg-slate-50 p-1 sm:p-3 md:p-6 font-sans">
@@ -2164,7 +2229,7 @@ export default function SettingsView() {
             <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
               <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
                 <Sliders className="w-5 h-5 text-indigo-650" />
-                <h2 className="font-bold text-slate-800 text-sm">Services & Booking Configuration</h2>
+                <h2 className="font-bold text-slate-800 text-sm">Services, Extras/Add-ons &amp; Booking Configuration</h2>
               </summary>
               
               <div className="p-3 sm:p-5 flex flex-col gap-6 font-sans">
@@ -2229,12 +2294,13 @@ export default function SettingsView() {
 
                   {/* List of services */}
                   <div className="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 divide-y divide-slate-200 max-h-[250px] overflow-y-auto">
-                    {services.length === 0 ? (
+                    {serviceItems.length === 0 ? (
                       <div className="py-8 text-center text-xs text-slate-400">
                         No services configured. Use the form below to add.
                       </div>
                     ) : (
-                      services.map((srv, index) => {
+                      serviceItems.map((srv) => {
+                        const index = services.findIndex(item => item.id === srv.id);
                         if (editingServiceId === srv.id) {
                           return (
                             <form key={srv.id} onSubmit={handleUpdateService} className="p-3 bg-indigo-50/50 flex flex-col gap-2.5 font-sans">
@@ -2451,6 +2517,81 @@ export default function SettingsView() {
                       </button>
                     </div>
                   </form>
+
+                  {/* Independent unpublished add-ons */}
+                  <section aria-labelledby="addons-heading" className="flex flex-col gap-3 rounded-xl border border-emerald-200 bg-emerald-50/40 p-3.5">
+                    <div>
+                      <h3 id="addons-heading" className="font-bold text-slate-800 text-xs">Extras / Add-ons</h3>
+                      <p className="text-[10px] text-slate-600 mt-0.5">
+                        Add-ons are available with any service for this line. The AI can use them, but they are never listed as standalone services on the public booking website.
+                      </p>
+                    </div>
+
+                    <div className="overflow-hidden rounded-lg border border-emerald-200 bg-white divide-y divide-slate-200">
+                      {addonItems.length === 0 ? (
+                        <div className="py-5 text-center text-xs text-slate-400">No add-ons configured.</div>
+                      ) : addonItems.map(addon => editingAddonId === addon.id ? (
+                        <form key={addon.id} onSubmit={handleUpdateAddon} className="flex flex-col gap-2.5 bg-emerald-50/50 p-3">
+                          <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
+                            <input required value={editAddonName} onChange={event => setEditAddonName(event.target.value)} placeholder="Add-on name" className="rounded border border-slate-300 bg-white p-1.5 text-xs md:col-span-2" />
+                            <input required type="number" min="0" value={editAddonPrice} onChange={event => setEditAddonPrice(Number(event.target.value) || 0)} aria-label="Add-on price" className="rounded border border-slate-300 bg-white p-1.5 text-xs" />
+                            <input required type="number" min="0" value={editAddonDuration} onChange={event => setEditAddonDuration(Number(event.target.value) || 0)} aria-label="Add-on duration in minutes" className="rounded border border-slate-300 bg-white p-1.5 text-xs" />
+                          </div>
+                          <textarea value={editAddonDesc} onChange={event => setEditAddonDesc(event.target.value)} placeholder="What this add-on includes" rows={2} className="rounded border border-slate-300 bg-white p-1.5 text-xs" />
+                          <div className="flex items-center justify-between gap-2">
+                            <label className="flex items-center gap-2 text-[10px] font-bold text-slate-650">
+                              Service line
+                              <select value={editAddonLineKey} onChange={event => setEditAddonLineKey(event.target.value as 'primary' | 'secondary')} className="rounded border border-slate-300 bg-white px-2 py-1 text-xs font-normal">
+                                <option value="primary">Line 1</option>
+                                <option value="secondary">Line 2</option>
+                              </select>
+                            </label>
+                            <div className="flex gap-2">
+                              <button type="button" onClick={() => setEditingAddonId(null)} className="rounded border border-slate-300 bg-white px-2.5 py-1 text-[10px] font-bold text-slate-600">Cancel</button>
+                              <button type="submit" className="rounded bg-emerald-700 px-2.5 py-1 text-[10px] font-bold text-white">Update add-on</button>
+                            </div>
+                          </div>
+                        </form>
+                      ) : (
+                        <div key={addon.id} className="flex items-start justify-between gap-3 p-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="text-xs font-bold text-slate-800">{addon.name}</span>
+                              <span className="rounded border border-emerald-200 bg-emerald-100 px-1.5 py-0.5 text-[9px] font-bold text-emerald-800">unpublished add-on</span>
+                              <span className={`rounded border px-1.5 py-0.5 text-[9px] font-bold ${addon.lineKey === 'secondary' ? 'border-violet-200 bg-violet-100 text-violet-700' : 'border-sky-200 bg-sky-100 text-sky-700'}`}>{addon.lineKey === 'secondary' ? 'Line 2' : 'Line 1'}</span>
+                            </div>
+                            <p className="mt-1 text-[10px] text-slate-500">{addon.description}</p>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-2 text-xs font-bold text-slate-700">
+                            <span>${addon.price}</span>
+                            <span className="text-slate-400">+{addon.duration} min</span>
+                            <button type="button" onClick={() => startEditAddon(addon)} title="Edit add-on" className="rounded p-1 text-indigo-600 hover:bg-indigo-50"><Edit className="h-3.5 w-3.5" /></button>
+                            <button type="button" onClick={() => handleDeleteService(addon.id)} title="Delete add-on" className="rounded p-1 text-rose-600 hover:bg-rose-50"><Trash2 className="h-3.5 w-3.5" /></button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <form onSubmit={handleAddAddon} className="flex flex-col gap-2.5 rounded-lg border border-emerald-200 bg-white p-3">
+                      <h4 className="flex items-center gap-1 text-xs font-bold text-slate-700"><Plus className="h-3.5 w-3.5" /> Add new add-on</h4>
+                      <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
+                        <input required value={newAddonName} onChange={event => setNewAddonName(event.target.value)} placeholder="Add-on name" className="rounded border border-slate-300 p-2 text-xs md:col-span-2" />
+                        <input required type="number" min="0" value={newAddonPrice} onChange={event => setNewAddonPrice(Number(event.target.value) || 0)} placeholder="Price ($)" aria-label="New add-on price" className="rounded border border-slate-300 p-2 text-xs" />
+                        <input required type="number" min="0" value={newAddonDuration} onChange={event => setNewAddonDuration(Number(event.target.value) || 0)} placeholder="Extra minutes" aria-label="New add-on duration in minutes" className="rounded border border-slate-300 p-2 text-xs" />
+                      </div>
+                      <textarea value={newAddonDesc} onChange={event => setNewAddonDesc(event.target.value)} placeholder="What this add-on includes" rows={2} className="rounded border border-slate-300 p-2 text-xs" />
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="flex items-center gap-2 text-[10px] font-bold text-slate-650">
+                          Service line
+                          <select value={newAddonLineKey} onChange={event => setNewAddonLineKey(event.target.value as 'primary' | 'secondary')} className="rounded border border-slate-300 bg-white px-2 py-1.5 text-xs font-normal">
+                            <option value="primary">Line 1</option>
+                            <option value="secondary">Line 2</option>
+                          </select>
+                        </label>
+                        <button type="submit" className="rounded bg-emerald-700 px-3.5 py-1.5 text-[11px] font-bold text-white hover:bg-emerald-800">Add to catalogue</button>
+                      </div>
+                    </form>
+                  </section>
 
                   {/* Save services control */}
                   <div className="flex justify-end pt-2 border-t border-slate-150">

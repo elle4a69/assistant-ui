@@ -279,7 +279,9 @@ def get_service_for_booking(service_id: str, account_key: Optional[str] = None) 
         services = all_loader() if callable(all_loader) else []
     return next((
         service for service in services
-        if isinstance(service, dict) and service.get("id") == service_id
+        if isinstance(service, dict)
+        and service.get("itemType", "service") != "addon"
+        and service.get("id") == service_id
     ), None)
 
 
@@ -1100,6 +1102,8 @@ def parse_customer_requested_slot(message: str, received_at: datetime) -> Option
 def explicitly_requested_service(message: str, services: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     normalized = " ".join(re.sub(r"[^a-z0-9]+", " ", (message or "").casefold()).split())
     for service in services:
+        if service.get("itemType", "service") == "addon":
+            continue
         service_id = str(service.get("id") or "").casefold()
         name = " ".join(re.sub(r"[^a-z0-9]+", " ", str(service.get("name") or "").casefold()).split())
         if (service_id and re.search(rf"(?<![a-z0-9]){re.escape(service_id)}(?![a-z0-9])", normalized)) or (name and re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", normalized)):

@@ -73,7 +73,18 @@ def get_live_routes() -> List[Dict[str, Any]]:
     """Inspect and extract metadata for all live routes."""
     from backend.main import app
 
-    return [extract_route_metadata(r) for r in app.routes]
+    def expand(routes: List[Any]):
+        for route in routes:
+            # FastAPI 0.116+ may retain include_router() calls as lazy
+            # _IncludedRouter wrappers. The contract is the wrapped routes,
+            # not those implementation-detail placeholders.
+            original_router = getattr(route, "original_router", None)
+            if original_router is not None:
+                yield from expand(list(original_router.routes))
+            else:
+                yield route
+
+    return [extract_route_metadata(r) for r in expand(list(app.routes))]
 
 
 def load_baseline_routes() -> List[Dict[str, Any]]:

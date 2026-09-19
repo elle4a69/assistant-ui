@@ -256,6 +256,8 @@ class LegacyCalendarDiscoveryProvider:
         for service in self.services_loader():
             if not isinstance(service, dict) or not service.get("id") or not service.get("name"):
                 continue
+            if service.get("itemType", "service") == "addon":
+                continue
             public_service = {
                 "id": str(service.get("id", "")),
                 "name": str(service.get("name", "")),
@@ -277,7 +279,9 @@ class LegacyCalendarDiscoveryProvider:
         service = next(
             (
                 item for item in self.services_loader()
-                if isinstance(item, dict) and str(item.get("id", "")) == service_id
+                if isinstance(item, dict)
+                and item.get("itemType", "service") != "addon"
+                and str(item.get("id", "")) == service_id
             ),
             None,
         )
@@ -315,7 +319,12 @@ class LegacyCalendarDiscoveryProvider:
         return slots
 
     def check_exact_time(self, service_id: str, start: datetime) -> dict[str, Any] | None:
-        service = next((item for item in self.services_loader() if isinstance(item, dict) and str(item.get("id", "")) == service_id), None)
+        service = next((
+            item for item in self.services_loader()
+            if isinstance(item, dict)
+            and item.get("itemType", "service") != "addon"
+            and str(item.get("id", "")) == service_id
+        ), None)
         if not service:
             raise BookingToolError("That service is not available.")
         duration = timedelta(minutes=max(1, int(service.get("duration", 60))))

@@ -90,6 +90,26 @@ def test_legacy_adapter_uses_service_duration_hours_and_busy_slots():
     ]
 
 
+def test_legacy_adapter_does_not_offer_addons_as_standalone_services():
+    provider = LegacyCalendarDiscoveryProvider(
+        services_loader=lambda: [
+            {"id": "service", "name": "Service", "duration": 30},
+            {"id": "extra", "name": "Extra", "duration": 15, "itemType": "addon", "published": False},
+        ],
+        working_hours_loader=lambda: [],
+        busy_slots_loader=lambda start, end: [],
+        timezone_name=TIMEZONE,
+    )
+
+    assert [item["id"] for item in provider.list_services()] == ["service"]
+    try:
+        provider.search_availability("extra", datetime.now(TZ), datetime.now(TZ) + timedelta(days=1), 1)
+    except Exception as exc:
+        assert str(exc) == "That service is not available."
+    else:
+        raise AssertionError("add-on was accepted as a standalone booking service")
+
+
 def test_one_hour_booking_requires_four_consecutive_fifteen_minute_increments():
     provider = LegacyCalendarDiscoveryProvider(
         services_loader=lambda: [{

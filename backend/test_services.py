@@ -60,6 +60,15 @@ def test_services_and_manual_bookings(monkeypatch, tmp_path):
                     "description": "An intense, premium body massage.",
                     "price": 180,
                     "duration": 60
+                },
+                {
+                    "id": "addon_1",
+                    "name": "Extended care",
+                    "description": "An independent extra.",
+                    "price": 25,
+                    "duration": 15,
+                    "itemType": "addon",
+                    "published": False
                 }
             ]
         }
@@ -73,6 +82,13 @@ def test_services_and_manual_bookings(monkeypatch, tmp_path):
         assert len(services) == 1
         assert services[0]["id"] == "test_srv_1"
         assert services[0]["price"] == 180
+
+        # The owner catalogue includes add-ons, while the public booking API
+        # never publishes them as standalone services.
+        settings_services = client.get("/api/settings/services")
+        assert settings_services.status_code == 200
+        assert [item["id"] for item in settings_services.json()] == ["test_srv_1", "addon_1"]
+        assert settings_services.json()[1]["published"] is False
 
         # 3. Test GET/POST SMS confirmation template
         response = client.get("/api/settings/sms-confirmation")
@@ -91,6 +107,7 @@ def test_services_and_manual_bookings(monkeypatch, tmp_path):
         # 4. Test POST manual booking
         booking_payload = {
             "serviceId": "test_srv_1",
+            "addonIds": ["addon_1"],
             "name": "Alex Jones",
             "phone": "+61411222333",
             "startTime": "2026-08-09T05:00:00Z",
@@ -102,6 +119,8 @@ def test_services_and_manual_bookings(monkeypatch, tmp_path):
         assert res_data["status"] == "success"
         assert "Alex Jones" in res_data["smsSent"]
         assert "Luxury Deep Tissue Massage" in res_data["smsSent"]
+        assert "Extended care" in res_data["smsSent"]
+        assert res_data["addons"] == [{"id": "addon_1", "name": "Extended care"}]
         assert "Sunday, Aug 09 at 03:00 PM" in res_data["smsSent"]
         assert res_data["arrivalLink"].startswith("http")
         assert "/a/" in res_data["arrivalLink"]
@@ -114,6 +133,7 @@ def test_services_and_manual_bookings(monkeypatch, tmp_path):
             **booking_payload,
             "startTime": "2026-08-09T06:00:00Z",
             "providerKey": "anonymous",
+            "addonIds": [],
         }
         response = client.post("/api/calendar/bookings", json=secondary_payload)
         assert response.status_code == 200

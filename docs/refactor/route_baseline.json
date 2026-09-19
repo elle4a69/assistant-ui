@@ -1215,6 +1215,17 @@
     "response_model": null
   },
   {
+    "path": "/api/settings/services",
+    "name": "get_settings_services",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_settings_services",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
     "path": "/api/services",
     "name": "get_services",
     "route_type": "APIRoute",

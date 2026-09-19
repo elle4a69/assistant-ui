@@ -435,6 +435,18 @@ def clear_review_only_threads(db: Session = Depends(get_db)):
 
 @router.get("/api/services")
 def get_services():
+    # This route is intentionally public for the website booking embed. Keep
+    # unpublished catalogue records (including owner-managed add-ons) private.
+    return [
+        service for service in load_all_line_services()
+        if service.get("published", True) is not False
+        and service.get("itemType", "service") != "addon"
+    ]
+
+
+@router.get("/api/settings/services")
+def get_settings_services():
+    """Return the complete owner catalogue, including unpublished add-ons."""
     return load_all_line_services()
 
 

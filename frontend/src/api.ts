@@ -1261,11 +1261,16 @@ export interface Service {
   showDuration?: boolean;
   /** The SMS line whose AI may use this service. */
   lineKey?: 'primary' | 'secondary';
+  /** Add-ons remain catalogue records for staff/AI but are not standalone services. */
+  itemType?: 'service' | 'addon';
+  /** Whether a standalone service is visible on the public booking website. */
+  published?: boolean;
 }
 
 
 export interface BookingPayload {
   serviceId: string;
+  addonIds?: string[];
   name: string;
   phone: string;
   startTime: string;
@@ -1277,6 +1282,14 @@ export async function getServices(): Promise<Service[]> {
   const response = await apiFetch(`${API_BASE}/api/services`);
   if (!response.ok) {
     throw new Error(`Failed to fetch services: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function getSettingsServices(): Promise<Service[]> {
+  const response = await apiFetch(`${API_BASE}/api/settings/services`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch settings catalogue: ${response.statusText}`);
   }
   return response.json();
 }
