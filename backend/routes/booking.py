@@ -35,6 +35,7 @@ try:
     )
     from backend.services.settings_service import (
         get_business_variable_values, load_business_variables, load_line_services,
+        load_service_addons,
     )
     from backend.services.sms_service import find_thread_by_phone
     from backend.services.arrival_service import (
@@ -63,6 +64,7 @@ except ImportError:
     )
     from services.settings_service import (
         get_business_variable_values, load_business_variables, load_line_services,
+        load_service_addons,
     )
     from services.sms_service import find_thread_by_phone
     from services.arrival_service import (
@@ -443,7 +445,15 @@ def create_manual_booking(
             if s.get("id") == payload.serviceId:
                 service = s
                 break
-                
+
+        if not service and any(
+            addon.get("id") == payload.serviceId for addon in load_service_addons()
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Add-ons cannot be booked as standalone services.",
+            )
+
         if not service:
             service = {
                 "name": "Custom Appointment",

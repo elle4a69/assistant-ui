@@ -430,6 +430,18 @@ class ServicesListInput(BaseModel):
     services: List[ServiceItem]
 
 
+class ServiceAddonItem(BaseModel):
+    id: str
+    name: str
+    description: str
+    price: int
+    duration: int
+
+
+class ServiceAddonsListInput(BaseModel):
+    addons: List[ServiceAddonItem]
+
+
 class WorkingHourEntry(BaseModel):
     day: str
     enabled: bool

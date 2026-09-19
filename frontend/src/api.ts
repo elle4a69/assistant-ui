@@ -1263,6 +1263,14 @@ export interface Service {
   lineKey?: 'primary' | 'secondary';
 }
 
+export interface ServiceAddon {
+  id: string;
+  name: string;
+  description: string;
+  price: number;
+  duration: number;
+}
+
 
 export interface BookingPayload {
   serviceId: string;
@@ -1563,6 +1571,22 @@ export async function getSupportTickets(): Promise<{ tickets: SupportTicket[] }>
     const payload = await response.json().catch(() => null);
     throw new Error(payload?.detail || `Failed to load support tickets: ${response.statusText}`);
   }
+  return response.json();
+}
+
+export async function getServiceAddons(): Promise<ServiceAddon[]> {
+  const response = await apiFetch(`${API_BASE}/api/settings/service-addons`);
+  if (!response.ok) throw new Error(`Failed to fetch service add-ons: ${response.statusText}`);
+  return response.json();
+}
+
+export async function saveServiceAddons(addons: ServiceAddon[]): Promise<{ status: string }> {
+  const response = await apiFetch(`${API_BASE}/api/settings/service-addons`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ addons }),
+  });
+  if (!response.ok) throw new Error(`Failed to save service add-ons: ${response.statusText}`);
   return response.json();
 }
 

@@ -31,7 +31,7 @@ try:
     )
     from backend.schemas.domain import (
         PushSubscriptionInput, DraftUpdateInput, QARuleItem,
-        ServicesListInput, LocantoMessagePayload,
+        ServicesListInput, ServiceAddonsListInput, LocantoMessagePayload,
     )
     from backend.knowledge import (
         is_style_examples_enabled,
@@ -55,9 +55,11 @@ try:
     from backend.services.settings_service import (
         load_line_services,
         load_all_line_services,
+        load_service_addons,
         get_business_variable_values,
         build_business_context,
         _line_services_path,
+        _service_addons_path,
     )
     from backend.services.booking_service import (
         load_working_hours,
@@ -80,7 +82,7 @@ except ImportError:
     )
     from schemas.domain import (
         PushSubscriptionInput, DraftUpdateInput, QARuleItem,
-        ServicesListInput, LocantoMessagePayload,
+        ServicesListInput, ServiceAddonsListInput, LocantoMessagePayload,
     )
     from knowledge import (
         is_style_examples_enabled,
@@ -104,9 +106,11 @@ except ImportError:
     from services.settings_service import (
         load_line_services,
         load_all_line_services,
+        load_service_addons,
         get_business_variable_values,
         build_business_context,
         _line_services_path,
+        _service_addons_path,
     )
     from services.booking_service import (
         load_working_hours,
@@ -459,6 +463,26 @@ def save_services(payload: ServicesListInput):
         raise HTTPException(status_code=500, detail=f"Failed to save services: {e}")
 
 
+@router.get("/api/settings/service-addons")
+def get_service_addons():
+    return load_service_addons()
+
+
+@router.post("/api/settings/service-addons")
+def save_service_addons(payload: ServiceAddonsListInput):
+    """Persist shared extras independently; they are not booking services."""
+    try:
+        path = _dyn("_service_addons_path", _service_addons_path)()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        temporary = f"{path}.tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump([addon.model_dump() for addon in payload.addons], handle, indent=2)
+        os.replace(temporary, path)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save service add-ons: {e}")
+
+
 @router.post("/api/locanto/sync")
 def handle_locanto_message(payload: LocantoMessagePayload, db: Session = Depends(get_db)):
     """
@@ -721,6 +745,8 @@ __all__ = [
     "clear_review_only_threads",
     "get_services",
     "save_services",
+    "get_service_addons",
+    "save_service_addons",
     "handle_locanto_message",
     "serve_spa",
 ]

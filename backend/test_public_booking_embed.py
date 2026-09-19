@@ -35,6 +35,8 @@ def test_live_booking_embed_api_is_public():
 
 def test_booking_admin_writes_remain_private():
     assert not is_public_request(request_for("/api/services", method="POST"))
+    assert not is_public_request(request_for("/api/settings/service-addons"))
+    assert not is_public_request(request_for("/api/settings/service-addons", method="POST"))
 
 
 def test_similarly_named_private_route_is_not_public():

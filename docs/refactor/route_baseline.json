@@ -1237,6 +1237,54 @@
     "response_model": null
   },
   {
+    "path": "/api/settings/service-addons",
+    "name": "get_service_addons",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_service_addons",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/service-addons",
+    "name": "save_service_addons",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "save_service_addons",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/support-tickets",
+    "name": "list_support_tickets",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "list_support_tickets",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/support-tickets/{ticket_id}/deploy",
+    "name": "approve_support_ticket_deployment",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "approve_support_ticket_deployment",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
     "path": "/api/settings/sms-confirmation",
     "name": "get_sms_confirmation",
     "route_type": "APIRoute",
