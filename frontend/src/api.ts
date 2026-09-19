@@ -1543,6 +1543,40 @@ export interface OperationsChatCapabilities {
   requiresConfirmation: boolean;
 }
 
+export interface SupportTicket {
+  id: string;
+  category: 'bug' | 'feature_request' | 'upgrade' | 'access' | 'security';
+  title: string;
+  affectedArea: string;
+  status: string;
+  resolutionSummary: string | null;
+  codingTaskId: string | null;
+  deploymentActionId: string | null;
+  deploymentState: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function getSupportTickets(): Promise<{ tickets: SupportTicket[] }> {
+  const response = await apiFetch(`${API_BASE}/api/settings/support-tickets`, { cache: 'no-store' });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Failed to load support tickets: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function approveSupportTicketDeployment(ticketId: string): Promise<{ status: string }> {
+  const response = await apiFetch(`${API_BASE}/api/settings/support-tickets/${encodeURIComponent(ticketId)}/deploy`, {
+    method: 'POST',
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Deployment approval failed: ${response.statusText}`);
+  }
+  return response.json();
+}
+
 export async function getOperationsChatMessages(): Promise<{ messages: OperationsChatMessage[] }> {
   const response = await apiFetch(`${API_BASE}/api/settings/operations-chat/messages`, {
     cache: 'no-store',
