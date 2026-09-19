@@ -12,6 +12,7 @@ from main import (
     ThreadEvent,
     get_threads,
     is_clear_customer_arrival,
+    customer_arrival_has_been_recorded,
     record_customer_arrival_event,
     run_sms_reply_logic,
 )
@@ -140,4 +141,35 @@ def test_arrival_is_a_terminal_boundary_for_the_automated_responder():
         Message.thread_id == thread.id,
         Message.role.in_(["system", "draft"]),
     ).count() == 0
+    db.close()
+
+
+def test_arrival_hard_stop_expires_after_two_hours():
+    test_engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=test_engine)
+    db = sessionmaker(bind=test_engine)()
+    now = datetime.utcnow()
+    thread = Thread(
+        id="expired-arrival-window-thread",
+        customer_phone="+61412345670",
+        sms_account_key="primary",
+        state="auto-reply",
+        priority="medium",
+        sla_due_at=now + timedelta(hours=1),
+        unread_count=0,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(thread)
+    db.add(ThreadEvent(
+        id="expired-arrival-window-event",
+        thread_id=thread.id,
+        type="customer-arrived",
+        agent_id=None,
+        meta="{}",
+        at=now - timedelta(hours=2, minutes=1),
+    ))
+    db.commit()
+
+    assert customer_arrival_has_been_recorded(db, thread.id) is False
     db.close()

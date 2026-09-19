@@ -743,11 +743,20 @@ def is_clear_customer_arrival(message: str) -> bool:
     return any(re.search(pattern, normalized) for pattern in ARRIVAL_POSITIVE_PATTERNS)
 
 
+ARRIVAL_AUTO_REPLY_BLOCK_WINDOW = timedelta(hours=2)
+
+
 def customer_arrival_has_been_recorded(db: Session, thread_id: str) -> bool:
-    """Return whether this conversation is in its post-arrival no-auto-reply state."""
+    """Return whether an arrival blocks automated replies for the next two hours.
+
+    The window protects the active arrival and appointment conversation without
+    permanently preventing a returning customer from booking again later.
+    """
+    cutoff = datetime.utcnow() - ARRIVAL_AUTO_REPLY_BLOCK_WINDOW
     return db.query(ThreadEvent.id).filter(
         ThreadEvent.thread_id == thread_id,
         ThreadEvent.type == "customer-arrived",
+        ThreadEvent.at >= cutoff,
     ).first() is not None
 
 
@@ -821,6 +830,7 @@ __all__ = [
     "ARRIVAL_POSITIVE_PATTERNS",
     "ARRIVAL_ALERT_INTERVAL_SECONDS",
     "ARRIVAL_ALERT_LEASE_SECONDS",
+    "ARRIVAL_AUTO_REPLY_BLOCK_WINDOW",
     "_ensure_persistent_vapid_keypair",
     "_vapid_private_key",
     "_vapid_public_key",
