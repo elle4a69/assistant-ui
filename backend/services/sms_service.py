@@ -1068,7 +1068,8 @@ def process_inbound_sms(
             from services.arrival_service import record_customer_arrival_event as arrival_record_fn
 
     arrival_notification_key = ""
-    if callable(arrival_check_fn) and arrival_check_fn(payload.body):
+    customer_arrived_now = bool(callable(arrival_check_fn) and arrival_check_fn(payload.body))
+    if customer_arrived_now:
         if callable(arrival_record_fn):
             arrival_recorded = arrival_record_fn(db, thread, customer_message.id, "clear-phrase")
             if arrival_recorded:
@@ -1141,6 +1142,36 @@ def process_inbound_sms(
 
     # Preserve the established first-contact task ordering; it is part of the
     # responder's immediate behaviour and the ntfy task can follow it.
+    # Arrival is a terminal boundary for automated SMS. Do this before the
+    # first-contact responder too: a customer who is already at the premises
+    # must never receive an automated greeting, directions, room access, or
+    # any other generated message.
+    arrival_state_fn = _dyn("customer_arrival_has_been_recorded", None)
+    if arrival_state_fn is None:
+        try:
+            from backend.services.arrival_service import customer_arrival_has_been_recorded as arrival_state_fn
+        except ImportError:
+            from services.arrival_service import customer_arrival_has_been_recorded as arrival_state_fn
+    if customer_arrived_now or (callable(arrival_state_fn) and arrival_state_fn(db, thread.id)):
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread.id,
+            type="ai-reply-skipped",
+            agent_id=None,
+            meta=json.dumps({
+                "message_id": customer_message.id,
+                "reason": "customer-arrived-no-auto-reply",
+                "sms_account_key": thread.sms_account_key,
+            }),
+            at=received_at_naive,
+        ))
+        db.commit()
+        return {
+            "status": "success",
+            "thread_id": thread.id,
+            "auto_reply_skipped": "customer-arrived",
+        }
+
     if not payload.isSimulation and not first_contact_eligible:
         schedule_inbound_notification()
 
@@ -1264,6 +1295,26 @@ def run_sms_reply_logic(
     account_ai_fn = _dyn("account_allows_conversational_ai", lambda key: key in CONVERSATIONAL_AI_ACCOUNT_KEYS)
     if not account_ai_fn(thread.sms_account_key):
         print(f"[Conversational AI Skipped] Disabled for {thread.sms_account_key}.")
+        return False, False
+
+    # Recheck at generation time. A delayed job may have been queued before
+    # an arrival message or arrival-link activation was recorded.
+    arrival_state_fn = _dyn("customer_arrival_has_been_recorded", None)
+    if arrival_state_fn is None:
+        try:
+            from backend.services.arrival_service import customer_arrival_has_been_recorded as arrival_state_fn
+        except ImportError:
+            from services.arrival_service import customer_arrival_has_been_recorded as arrival_state_fn
+    if callable(arrival_state_fn) and arrival_state_fn(db, thread_id):
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread_id,
+            type="ai-reply-cancelled",
+            agent_id=None,
+            meta=json.dumps({"reason": "customer-arrived-no-auto-reply"}),
+            at=datetime.utcnow(),
+        ))
+        db.commit()
         return False, False
 
     if not is_latest_customer_turn(db, thread_id, provider_message_id, received_at_naive, body):
@@ -2574,6 +2625,18 @@ def run_sms_reply_logic(
             thread.pending_slots = None
     else:
         db.expire_all()
+        if callable(arrival_state_fn) and arrival_state_fn(db, thread_id):
+            db.add(ThreadEvent(
+                id=str(uuid.uuid4()),
+                thread_id=thread_id,
+                type="ai-reply-cancelled",
+                agent_id=None,
+                meta=json.dumps({"reason": "customer-arrived-during-generation"}),
+                at=datetime.utcnow(),
+            ))
+            db.commit()
+            print(f"[Conversational AI Cancelled] Customer arrived while AI was working on {thread_id}.")
+            return False, False
         if human_replied_after(db, thread_id, received_at_naive):
             thread = db.query(Thread).filter(Thread.id == thread_id).first()
             if thread:
@@ -2832,6 +2895,15 @@ def _process_first_contact_auto_reply(
             return
         if not thread.auto_reply_enabled or thread.state == "taken-over":
             print(f"[First Contact Delay] Automatic replies are off for {thread_id}. Reply canceled.")
+            return
+        arrival_state_fn = _dyn("customer_arrival_has_been_recorded", None)
+        if arrival_state_fn is None:
+            try:
+                from backend.services.arrival_service import customer_arrival_has_been_recorded as arrival_state_fn
+            except ImportError:
+                from services.arrival_service import customer_arrival_has_been_recorded as arrival_state_fn
+        if callable(arrival_state_fn) and arrival_state_fn(db, thread_id):
+            print(f"[First Contact Delay] Customer has arrived on {thread_id}. Reply canceled.")
             return
         if is_contact_blocked(db, thread.sms_account_key, thread.customer_phone):
             print(f"[First Contact Delay] Contact is blocked for {thread_id}. Reply canceled.")
