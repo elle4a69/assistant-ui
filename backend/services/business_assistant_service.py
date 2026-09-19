@@ -143,7 +143,7 @@ BUSINESS_ASSISTANT_TOOL_SCHEMAS = [
                         "keep_all_examples", "select_current_rule", "create_merged_draft",
                         "needs_manual_investigation", "keep_both_distinct", "create_consolidation_draft",
                         "create_metadata_repair_draft", "add_safe_replacement_draft",
-                        "not_an_issue", "dismiss_for_now"
+                        "approve_pending_record", "not_an_issue", "dismiss_for_now"
                     ],
                 },
                 "selected_record_ids": {

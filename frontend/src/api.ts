@@ -855,7 +855,7 @@ export interface KnowledgeCuratorRecordPreview extends KnowledgeCuratorRecordRef
 export type KnowledgeCuratorResolution =
   | 'keep_all_examples' | 'select_current_rule' | 'create_merged_draft' | 'needs_manual_investigation'
   | 'keep_both_distinct' | 'create_consolidation_draft' | 'create_metadata_repair_draft'
-  | 'add_safe_replacement_draft' | 'not_an_issue' | 'dismiss_for_now';
+  | 'add_safe_replacement_draft' | 'approve_pending_record' | 'not_an_issue' | 'dismiss_for_now';
 
 export interface KnowledgeCuratorProposal {
   id: string;

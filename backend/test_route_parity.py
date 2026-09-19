@@ -20,43 +20,52 @@ BASELINE_PATH = REPO_ROOT / "docs" / "refactor" / "route_baseline.json"
 
 def extract_route_metadata(route: Any) -> Dict[str, Any]:
     """Extract structured metadata from a FastAPI / Starlette route."""
-    route_type = type(route).__name__
-    path = getattr(route, "path", "")
-    name = getattr(route, "name", "")
+    # Recent FastAPI versions represent routes from ``include_router`` as
+    # effective route contexts instead of copying them into ``app.routes``.
+    # The context contains the combined prefix/dependencies, while the
+    # original route still identifies the public route type recorded in the
+    # baseline.
+    original_route = getattr(route, "original_route", route)
+    metadata_route = route
+    if not isinstance(original_route, APIRoute):
+        metadata_route = getattr(route, "starlette_route", None) or original_route
+    route_type = type(original_route).__name__
+    path = getattr(metadata_route, "path", "")
+    name = getattr(metadata_route, "name", "")
 
-    if isinstance(route, APIWebSocketRoute):
+    if isinstance(original_route, APIWebSocketRoute):
         methods = ["WEBSOCKET"]
-    elif hasattr(route, "methods") and route.methods:
-        methods = sorted(list(route.methods))
+    elif hasattr(metadata_route, "methods") and metadata_route.methods:
+        methods = sorted(list(metadata_route.methods))
     else:
         methods = []
 
-    if hasattr(route, "endpoint") and route.endpoint is not None:
-        endpoint = getattr(route.endpoint, "__name__", str(route.endpoint))
-    elif isinstance(route, Mount):
-        endpoint = getattr(route.app, "__name__", type(route.app).__name__)
+    if hasattr(metadata_route, "endpoint") and metadata_route.endpoint is not None:
+        endpoint = getattr(metadata_route.endpoint, "__name__", str(metadata_route.endpoint))
+    elif isinstance(metadata_route, Mount):
+        endpoint = getattr(metadata_route.app, "__name__", type(metadata_route.app).__name__)
     else:
         endpoint = name or ""
 
     dep_names = set()
-    if hasattr(route, "dependencies") and route.dependencies:
-        for d in route.dependencies:
+    if hasattr(metadata_route, "dependencies") and metadata_route.dependencies:
+        for d in metadata_route.dependencies:
             call = getattr(d, "call", d)
             dep_names.add(getattr(call, "__name__", str(call)))
 
-    if hasattr(route, "dependant") and route.dependant and hasattr(route.dependant, "dependencies"):
-        for d in route.dependant.dependencies:
+    if hasattr(metadata_route, "dependant") and metadata_route.dependant and hasattr(metadata_route.dependant, "dependencies"):
+        for d in metadata_route.dependant.dependencies:
             call = getattr(d, "call", d)
             dep_names.add(getattr(call, "__name__", str(call)))
 
     dependencies = sorted(list(dep_names))
 
     response_model = None
-    if hasattr(route, "response_model") and route.response_model is not None:
-        if hasattr(route.response_model, "__name__"):
-            response_model = route.response_model.__name__
+    if hasattr(metadata_route, "response_model") and metadata_route.response_model is not None:
+        if hasattr(metadata_route.response_model, "__name__"):
+            response_model = metadata_route.response_model.__name__
         else:
-            response_model = str(route.response_model)
+            response_model = str(metadata_route.response_model)
 
     return {
         "path": path,
@@ -73,7 +82,17 @@ def get_live_routes() -> List[Dict[str, Any]]:
     """Inspect and extract metadata for all live routes."""
     from backend.main import app
 
-    return [extract_route_metadata(r) for r in app.routes]
+    live_routes = []
+    for route in app.routes:
+        effective_route_contexts = getattr(route, "effective_route_contexts", None)
+        if callable(effective_route_contexts):
+            live_routes.extend(
+                extract_route_metadata(context)
+                for context in effective_route_contexts()
+            )
+        else:
+            live_routes.append(extract_route_metadata(route))
+    return live_routes
 
 
 def load_baseline_routes() -> List[Dict[str, Any]]:

@@ -72,6 +72,23 @@ def test_private_internal_record_does_not_create_owner_question():
     assert "owner_answer_required" not in {item["finding_type"] for item in findings}
 
 
+def test_pending_sms_pair_template_is_routed_to_curator_approval():
+    findings = main.inspect_knowledge_integrity([
+        record(
+            "sms-pair-legacy",
+            source_type="sms_pair_template",
+            status="quarantined",
+            review_status="pending",
+            retrieval_enabled=False,
+        )
+    ], now=NOW)
+
+    proposal = next(item for item in findings if item["finding_type"] == "pending_legacy_approval")
+    assert proposal["proposed_action"] == "ask_owner"
+    assert proposal["records"] == [{"id": "sms-pair-legacy", "revision": 1}]
+    assert proposal["owner_questions"]
+
+
 def curator_paths(tmp_path, monkeypatch, records):
     knowledge = tmp_path / "knowledge"
     data = tmp_path / "data"
@@ -99,6 +116,33 @@ def test_curator_rerun_is_idempotent_and_state_is_content_free(tmp_path, monkeyp
     serialized = (data / "curator.json").read_text(encoding="utf-8")
     assert "The service costs $100" not in serialized
     assert "prompt" not in serialized.casefold()
+
+
+def test_curator_approval_of_legacy_sms_pair_uses_normal_safety_gate(tmp_path, monkeypatch):
+    pending = record(
+        "sms-pair-legacy",
+        source_type="sms_pair_template",
+        review_source="sms-pair-template",
+        status="quarantined",
+        review_status="pending",
+        retrieval_enabled=False,
+    )
+    curator_paths(tmp_path, monkeypatch, [pending])
+
+    proposal = next(
+        item for item in main.run_knowledge_curator()["proposals"]
+        if item["finding_type"] == "pending_legacy_approval"
+    )
+    resolved = main.resolve_knowledge_curator_proposal(proposal["id"], "approve_pending_record")
+    saved = {item["id"]: item for item in main.list_learned_information()}["sms-pair-legacy"]
+
+    assert resolved["status"] == "resolved"
+    assert resolved["resolution"] == "approve_pending_record"
+    assert saved["review_status"] == "approved"
+    # No classifier is configured in this test, so the existing fail-closed
+    # approval gate records approval while keeping the item out of replies.
+    assert saved["retrieval_enabled"] is False
+    assert main.run_knowledge_curator()["run"]["finding_counts"].get("pending_legacy_approval", 0) == 0
 
 
 def test_manual_curator_reports_quota_exhaustion_without_losing_deterministic_findings(tmp_path, monkeypatch):

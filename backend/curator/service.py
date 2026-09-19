@@ -57,6 +57,7 @@ KNOWLEDGE_CURATOR_FINDING_TYPES = {
     "shared_provider_specific",
     "apparently_superseded",
     "owner_answer_required",
+    "pending_legacy_approval",
 }
 KNOWLEDGE_CURATOR_ACTIONS = {
     "no_action",
@@ -71,6 +72,7 @@ KNOWLEDGE_CURATOR_RESOLUTIONS = {
     "keep_all_examples", "select_current_rule", "create_merged_draft", "needs_manual_investigation",
     "keep_both_distinct", "create_consolidation_draft", "create_metadata_repair_draft",
     "add_safe_replacement_draft", "not_an_issue", "dismiss_for_now",
+    "approve_pending_record",
 }
 KNOWLEDGE_CURATOR_CONTEXTUAL_SOURCE_MARKERS = ("sms", "pair", "staff-edited", "staff_edited")
 
@@ -549,6 +551,26 @@ def inspect_knowledge_integrity(records: Optional[List[Dict[str, Any]]] = None, 
                     replacement_draft=draft, evidence_details={"dynamic_type": dynamic_kind},
                 ))
 
+        # SMS-pair previews predate the unified curator workflow. Their kept
+        # candidates were written to the learning queue without a curator
+        # finding, so audits and curator interviews could never complete them.
+        # Route only that legacy source through an explicit owner decision.
+        source_type = str(item.get("source_type") or item.get("type") or "").casefold()
+        raw = item.get("_raw") if isinstance(item.get("_raw"), dict) else {}
+        review_source = str(raw.get("review_source") or "").casefold()
+        if (
+            item.get("review_status") != "approved"
+            and item.get("scope") in {"primary", "secondary"}
+            and (source_type == "sms_pair_template" or review_source == "sms-pair-template")
+        ):
+            findings.append(_curator_finding(
+                "pending_legacy_approval",
+                [item],
+                reason_code="curator_pending_sms_pair_approval",
+                action="ask_owner",
+                owner_question="Should this guidance retained from the SMS-pair review be approved for its service line?",
+            ))
+
         if item.get("scope") == "shared":
             text = str(item.get("text") or "")
             account_keys = get_main_attr("FIRST_CONTACT_ACCOUNT_KEYS", ("primary", "secondary"))
@@ -874,6 +896,7 @@ def resolve_knowledge_curator_proposal(proposal_id: str, resolution: str, select
             "exact_duplicate": {"keep_both_distinct", "create_consolidation_draft", "needs_manual_investigation", "not_an_issue", "dismiss_for_now"},
             "invalid_metadata": {"create_metadata_repair_draft", "needs_manual_investigation", "not_an_issue", "dismiss_for_now"},
             "literal_dynamic_authority": {"add_safe_replacement_draft", "not_an_issue", "dismiss_for_now"},
+            "pending_legacy_approval": {"approve_pending_record", "needs_manual_investigation", "not_an_issue", "dismiss_for_now"},
         }
         allowed = allowed_by_finding.get(str(proposal.get("finding_type")), {"needs_manual_investigation", "not_an_issue", "dismiss_for_now"})
         if resolution not in allowed:
@@ -882,6 +905,19 @@ def resolve_knowledge_curator_proposal(proposal_id: str, resolution: str, select
         now_text = datetime.utcnow().isoformat() + "Z"
         proposal["resolution"] = resolution
         proposal["selected_record_ids"] = selected
+        if resolution == "approve_pending_record":
+            if len(refs) != 1:
+                raise ValueError("A pending approval must reference exactly one current record.")
+            approve_entry = get_main_attr("approve_learned_information_entry")
+            if not callable(approve_entry):
+                raise ValueError("The learning approval service is unavailable.")
+            approved = approve_entry(str(refs[0].get("id") or ""))
+            if approved.get("review_status") != "approved":
+                raise ValueError("The learning approval was not recorded.")
+            proposal["status"] = "resolved"
+            proposal["updated_at"] = now_text
+            _save_curator_state(state)
+            return dict(proposal)
         if resolution not in draft_resolutions:
             proposal["status"] = "resolved_not_an_issue" if resolution == "not_an_issue" else "resolved"
             proposal["updated_at"] = now_text
@@ -990,5 +1026,4 @@ class KnowledgeCuratorService:
     @staticmethod
     def classify_model_failure(exc: Exception) -> str:
         return _classify_curator_model_failure(exc)
-
 
