@@ -132,7 +132,8 @@ def save_learned_information(
     entry["scope"] = account_key if account_key in FIRST_CONTACT_ACCOUNT_KEYS else "internal"
     entry["source_account_key"] = account_key
     upsert_fn = _dyn("_upsert_learned_information_entry", _upsert_learned_information_entry)
-    upsert_fn(entry)
+    if upsert_fn(entry) is False:
+        raise ValueError("The supplied information did not produce a safe, reusable knowledge record.")
     return LEARNED_INFORMATION_FILENAME
 
 

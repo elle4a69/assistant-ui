@@ -69,7 +69,10 @@ def test_openai_failure_creates_no_reply_or_draft(monkeypatch):
     assert generated == []
     assert thread.state == "needs-review"
     assert thread.pending_slots is None
-    assert json.loads(failure.meta)["message_id"] == customer.id
+    failure_meta = json.loads(failure.meta)
+    assert failure_meta["message_id"] == customer.id
+    assert failure_meta["failure_stage"] == "response_generation"
+    assert failure_meta["exception_type"] == "RuntimeError"
     db.close()
 
 

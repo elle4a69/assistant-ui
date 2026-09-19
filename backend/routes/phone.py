@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 try:
     from backend.core.database import get_db
     from backend.core.clients import canonical_phone_number, mobilemessage_service, openai_client
-    from backend.core.utils import format_dt, normalized_reply_fingerprint, _dyn
+    from backend.core.utils import format_dt, normalized_reply_fingerprint, safe_exception_diagnostic, _dyn
     from backend.core.state import get_thread_lock, SMS_REPLY_GLOBAL_LOCK, OUTBOUND_SMS_SEND_LOCK
     from backend.core.config import (
         AUTO_REPLY_GLOBAL_ENABLED,
@@ -54,7 +54,7 @@ try:
 except ImportError:
     from core.database import get_db
     from core.clients import canonical_phone_number, mobilemessage_service, openai_client
-    from core.utils import format_dt, normalized_reply_fingerprint, _dyn
+    from core.utils import format_dt, normalized_reply_fingerprint, safe_exception_diagnostic, _dyn
     from core.state import get_thread_lock, SMS_REPLY_GLOBAL_LOCK, OUTBOUND_SMS_SEND_LOCK
     from core.config import (
         AUTO_REPLY_GLOBAL_ENABLED,
@@ -624,13 +624,43 @@ def respond_to_information_request(
     if not customer_message:
         raise HTTPException(status_code=409, detail="The customer message for this request no longer exists.")
 
+    def record_failure(stage: str, exc: BaseException, *, knowledge_saved: Optional[bool] = None) -> None:
+        db.rollback()
+        failure_meta: Dict[str, Any] = {
+            "reason": "AI response unavailable; nothing was created or sent"
+            if stage == "response_generation"
+            else "Information-request response orchestration failed",
+            "message_id": customer_message.id,
+            "request_event_id": request_event.id,
+            "failure_stage": stage,
+            **safe_exception_diagnostic(exc),
+        }
+        if knowledge_saved is not None:
+            failure_meta["knowledge_saved"] = knowledge_saved
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread.id,
+            type="ai-reply-failed",
+            agent_id=payload.agentId,
+            meta=json.dumps(failure_meta),
+            at=datetime.utcnow(),
+        ))
+        db.commit()
+
     generate_fn = _dyn("generate_information_request_content", generate_information_request_content)
-    generated = generate_fn(
-        db,
-        thread,
-        customer_message,
-        payload.information,
-    )
+    try:
+        generated = generate_fn(
+            db,
+            thread,
+            customer_message,
+            payload.information,
+        )
+    except Exception as exc:
+        record_failure("response_generation", exc, knowledge_saved=False)
+        raise HTTPException(
+            status_code=502,
+            detail="The AI response was unavailable. Knowledge was not saved and no reply was sent.",
+        ) from exc
     reply_text = generated["customer_reply"]
     outbound = Message(
         id=str(uuid.uuid4()),
@@ -643,25 +673,44 @@ def respond_to_information_request(
     # Persist the reusable fact first. If SMS delivery fails, retrying this
     # request safely replaces the same knowledge entry instead of duplicating it.
     save_fn = _dyn("save_learned_information", save_learned_information)
-    knowledge_source = save_fn(
-        request_event.id,
-        customer_message.text,
-        payload.information,
-        generated["knowledge_summary"],
-        thread.sms_account_key,
-    )
+    try:
+        knowledge_source = save_fn(
+            request_event.id,
+            customer_message.text,
+            payload.information,
+            generated["knowledge_summary"],
+            thread.sms_account_key,
+        )
+    except Exception as exc:
+        record_failure("knowledge_persistence", exc)
+        raise HTTPException(
+            status_code=500,
+            detail="Knowledge could not be saved, so no reply was sent.",
+        ) from exc
 
     if not thread.customer_phone.startswith("locanto_"):
         mm_service = _dyn("mobilemessage_service", mobilemessage_service)
-        dispatch_result = mm_service.send_sms(
-            thread.customer_phone,
-            reply_text,
-            idempotency_key=outbound.id,
-            account_key=thread.sms_account_key,
-        )
-        delivery_failure = mm_service.delivery_error(dispatch_result)
+        try:
+            dispatch_result = mm_service.send_sms(
+                thread.customer_phone,
+                reply_text,
+                idempotency_key=outbound.id,
+                account_key=thread.sms_account_key,
+            )
+            delivery_failure = mm_service.delivery_error(dispatch_result)
+        except Exception as exc:
+            record_failure("outbound_send", exc, knowledge_saved=True)
+            raise HTTPException(
+                status_code=502,
+                detail="Knowledge was saved, but SMS was not sent due to an outbound provider error.",
+            ) from exc
         if delivery_failure:
-            raise HTTPException(status_code=502, detail=f"SMS was not sent. {delivery_failure[:500]}")
+            failure = RuntimeError("Outbound SMS provider rejected the message.")
+            record_failure("outbound_send", failure, knowledge_saved=True)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Knowledge was saved, but SMS was not sent. {delivery_failure[:500]}",
+            )
     request_meta.update({
         "status": "resolved",
         "resolved_at": datetime.utcnow().isoformat() + "Z",

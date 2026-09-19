@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import re
-from typing import Optional
+from typing import Any, Dict, Optional
 
 try:
     from backend.core.constants import URL_TRAILING_PUNCTUATION_RE
@@ -73,6 +73,21 @@ def customer_explicitly_requests_payment_details(message: str) -> bool:
     ))
 
 
+def safe_exception_diagnostic(exc: BaseException) -> Dict[str, Any]:
+    """Return content-free provider diagnostics suitable for persisted events."""
+    cause = exc
+    while cause.__cause__ is not None:
+        cause = cause.__cause__
+    diagnostic: Dict[str, Any] = {"exception_type": type(cause).__name__}
+    status_code = getattr(cause, "status_code", None)
+    if isinstance(status_code, int):
+        diagnostic["provider_status_code"] = status_code
+    error_code = getattr(cause, "code", None)
+    if isinstance(error_code, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", error_code):
+        diagnostic["provider_error_code"] = error_code
+    return diagnostic
+
+
 def _dyn(name: str, fallback: object = None) -> object:
     """Resolve a symbol dynamically from sys.modules to support test monkeypatching."""
     import sys
@@ -120,5 +135,6 @@ __all__ = [
     "sanitize_outgoing_urls",
     "customer_explicitly_requests_link",
     "customer_explicitly_requests_payment_details",
+    "safe_exception_diagnostic",
     "_dyn",
 ]

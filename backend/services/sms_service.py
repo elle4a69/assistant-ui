@@ -1722,6 +1722,7 @@ def run_sms_reply_logic(
     })
 
     assistant_reply: Optional[str] = precomputed_reply
+    generation_failure: Optional[Dict[str, Any]] = None
     if assistant_reply is None and thread.sms_account_key == "primary":
         qa_matcher = _dyn("match_qa_rule", None)
         if callable(qa_matcher):
@@ -1902,6 +1903,25 @@ def run_sms_reply_logic(
                 ]
                 if not tool_calls:
                     candidate_reply = response.output_text
+                    if not candidate_reply:
+                        response_status = getattr(response, "status", None)
+                        incomplete_details = getattr(response, "incomplete_details", None)
+                        incomplete_reason = getattr(incomplete_details, "reason", None)
+                        generation_failure = {
+                            "failure_stage": "response_validation",
+                            **(
+                                {"provider_response_status": response_status}
+                                if isinstance(response_status, str)
+                                and re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", response_status)
+                                else {}
+                            ),
+                            **(
+                                {"provider_incomplete_reason": incomplete_reason}
+                                if isinstance(incomplete_reason, str)
+                                and re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", incomplete_reason)
+                                else {}
+                            ),
+                        }
                     if (
                         delayed_reply_error(candidate_reply, delayed_request_time)
                         and delayed_correction_retries < 2
@@ -2325,8 +2345,24 @@ def run_sms_reply_logic(
         except SupersededCustomerTurn:
             assistant_reply = None
         except Exception as e:
-            print(f"OpenAI error: {e}. No reply was created or sent.")
+            diagnostic_fn = _dyn("safe_exception_diagnostic", None)
+            if diagnostic_fn is None:
+                try:
+                    from backend.core.utils import safe_exception_diagnostic as diagnostic_fn
+                except ImportError:
+                    from core.utils import safe_exception_diagnostic as diagnostic_fn
+            generation_failure = {
+                "failure_stage": "response_generation",
+                **diagnostic_fn(e),
+            }
+            print(f"OpenAI response generation failed: {json.dumps(generation_failure)}. No reply was created or sent.")
             assistant_reply = None
+
+    if not assistant_reply and not ai_client and not generation_failure:
+        generation_failure = {
+            "failure_stage": "client_configuration",
+            "exception_type": "AIClientUnavailable",
+        }
 
     if assistant_reply:
         cal_validator_fn = _dyn("validate_calendar_only_reply", None)
@@ -2450,6 +2486,7 @@ def run_sms_reply_logic(
             meta=json.dumps({
                 "reason": rejected_reply_reason or "AI response unavailable; nothing was created or sent",
                 "message_id": latest_cust_msg.id if latest_cust_msg else None,
+                **(generation_failure if generation_failure else {}),
             }),
             at=datetime.utcnow(),
         ))
