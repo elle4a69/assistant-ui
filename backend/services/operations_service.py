@@ -671,7 +671,9 @@ def operations_ai_instructions(
         "owner's current instruction does. Select the requested primary or secondary line, do not expose secrets or credentials, "
         "and do not claim an SMS was sent unless send_sms reports success. "
         "When the owner asks for customer follow-up work, use list_unanswered_threads to find candidates and "
-        "inspect_message_thread to open one. If the owner asks to save an approved follow-up for later review, use "
+        "inspect_message_thread to open one. When the owner asks to remove review tags from selected conversations, "
+        "use clear_thread_review_tags only for those selected thread IDs. It preserves drafts and does not send SMS. "
+        "If the owner asks to save an approved follow-up for later review, use "
         "prepare_customer_sms_context and save_sms_draft. A saved draft is never sent and does not call the SMS gateway. "
         "When asked why something "
         "happened, distinguish facts in the supplied live "
@@ -787,6 +789,29 @@ OPERATIONS_TOOL_SCHEMAS = [
             "type": "object",
             "properties": {"thread_id": {"type": "string", "minLength": 1, "maxLength": 100}},
             "required": ["thread_id"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "clear_thread_review_tags",
+        "description": (
+            "Remove the Needs Review tag from up to 20 selected customer threads after the owner asks. "
+            "This only returns those threads to auto-reply, preserves every message and unsent draft, "
+            "sends no SMS, and records an audit event for each changed thread."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "thread_ids": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 100},
+                    "minItems": 1,
+                    "maxItems": 20,
+                },
+            },
+            "required": ["thread_ids"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -2462,6 +2487,59 @@ def _operations_inspect_message_thread(db: Session, thread_id: str) -> Dict[str,
     }
 
 
+def _operations_clear_thread_review_tags(db: Session, thread_ids: Any) -> Dict[str, Any]:
+    """Clear selected review markers without touching messages, drafts, or SMS delivery."""
+
+    if not isinstance(thread_ids, list):
+        return {"status": "rejected", "reason": "thread_ids must be a list of selected thread IDs."}
+    selected_ids = []
+    for value in thread_ids:
+        thread_id = str(value or "").strip()
+        if not thread_id or len(thread_id) > 100:
+            return {"status": "rejected", "reason": "Each selected thread ID must be between 1 and 100 characters."}
+        if thread_id not in selected_ids:
+            selected_ids.append(thread_id)
+    if not selected_ids or len(selected_ids) > 20:
+        return {"status": "rejected", "reason": "Select between one and 20 threads."}
+
+    threads = {
+        thread.id: thread
+        for thread in db.query(Thread).filter(Thread.id.in_(selected_ids)).all()
+    }
+    cleared_at = datetime.utcnow()
+    cleared_thread_ids = []
+    unchanged_thread_ids = []
+    missing_thread_ids = []
+    for thread_id in selected_ids:
+        thread = threads.get(thread_id)
+        if not thread:
+            missing_thread_ids.append(thread_id)
+        elif thread.state != "needs-review":
+            unchanged_thread_ids.append(thread_id)
+        else:
+            thread.state = "auto-reply"
+            thread.pending_slots = None
+            thread.updated_at = cleared_at
+            db.add(ThreadEvent(
+                id=str(uuid.uuid4()),
+                thread_id=thread.id,
+                type="review-status-cleared",
+                agent_id="operations-ai-review-clear",
+                meta=json.dumps({"reason": "owner requested selected review-tag clear"}),
+                at=cleared_at,
+            ))
+            cleared_thread_ids.append(thread_id)
+    if cleared_thread_ids:
+        db.commit()
+    return {
+        "status": "success",
+        "cleared_thread_ids": cleared_thread_ids,
+        "unchanged_thread_ids": unchanged_thread_ids,
+        "not_found_thread_ids": missing_thread_ids,
+        "scope_note": "Only Needs Review tags were cleared; drafts and messages were preserved and no SMS was sent.",
+    }
+
+
 def execute_operations_voice_tool(db: Session, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     """Execute the realtime session's bounded audited allowlist."""
     if name not in OPERATIONS_VOICE_TOOL_NAMES:
@@ -2972,6 +3050,8 @@ def _operations_claim_worker_task(
         action.payload = json.dumps(payload, ensure_ascii=False)
         action.status = "running"
         db.commit()
+    if action.action_type == "coding_task":
+        _operations_update_support_ticket(db, action)
     if action.action_type == "code_deployment":
         return {
             "protocol_version": OPERATIONS_WORKER_PROTOCOL_VERSION,
@@ -3130,9 +3210,35 @@ def _operations_start_coding_task(
         if active:
             if queue_if_busy:
                 action_id = str(uuid.uuid4())
-                queued = OperationsAction(id=action_id, action_type="coding_task", status="pending", reason=f"Approved support-ticket coding task: {title}", payload=json.dumps({"title": title, "instructions": instructions, "acceptance_test": acceptance_test, "instructions_sha256": hashlib.sha256(instructions.encode("utf-8")).hexdigest(), "stage": "awaiting_queue", "branch": f"ops/task-{action_id}", "support_ticket_id": support_ticket_id, "auto_propose_deployment": bool(auto_propose_deployment)}))
-                db.add(queued); db.commit()
-                return {"status": "queued", "task_id": action_id, "title": title, "deployment": "will require owner approval after checks"}
+                payload = {
+                    "title": title,
+                    "instructions": instructions,
+                    "acceptance_test": acceptance_test,
+                    "instructions_sha256": hashlib.sha256(instructions.encode("utf-8")).hexdigest(),
+                    "stage": "awaiting_queue",
+                    "branch": f"ops/task-{action_id}",
+                    "queued_at": datetime.utcnow().isoformat() + "Z",
+                    "queue_reason": "Another verified coding task is currently active.",
+                    "auto_propose_deployment": bool(auto_propose_deployment),
+                }
+                if support_ticket_id:
+                    payload["support_ticket_id"] = str(support_ticket_id)
+                action = OperationsAction(
+                    id=action_id,
+                    action_type="coding_task",
+                    payload=json.dumps(payload),
+                    reason=f"Approved support-ticket coding task: {title}",
+                    status="pending",
+                )
+                db.add(action)
+                db.commit()
+                return {
+                    "status": "queued",
+                    "task_id": action_id,
+                    "title": title,
+                    "queue_position": "after the currently active coding task",
+                    "deployment": "will require owner approval after independent checks pass",
+                }
             return {
                 "status": "already_running",
                 "task_id": active.id,
@@ -3149,16 +3255,18 @@ def _operations_start_coding_task(
             "stage": "awaiting_runner",
             "branch": branch,
             "queued_at": datetime.utcnow().isoformat() + "Z",
-            "support_ticket_id": support_ticket_id,
             "auto_propose_deployment": bool(auto_propose_deployment),
         }
         if origin_run_id:
             payload["origin_agent_run_id"] = str(origin_run_id)
+        if support_ticket_id:
+            payload["support_ticket_id"] = str(support_ticket_id)
         action = OperationsAction(
             id=action_id,
             action_type="coding_task",
             payload=json.dumps(payload),
-            reason=f"Approved support-ticket coding task: {title}" if support_ticket_id else f"Owner-authorised coding task: {title}",
+            reason=(f"Approved support-ticket coding task: {title}" if support_ticket_id
+                    else f"Owner-authorised coding task: {title}"),
             status="queued",
         )
         db.add(action)
@@ -3185,6 +3293,80 @@ def _operations_start_coding_task(
         "deployment": "not authorised; this task cannot change main or deploy",
         "next_step": worker_request["worker_request_message"] + " The Operations agent will continue the task through its normal checks and recovery pass.",
     }
+
+
+def _operations_promote_next_coding_task(db: Session) -> Optional[str]:
+    """Move one support-ticket task into the existing single-worker queue."""
+    with _operations_code_task_lock:
+        active = db.query(OperationsAction).filter(
+            OperationsAction.action_type == "coding_task",
+            OperationsAction.status.in_(OPERATIONS_CODE_ACTIVE_STATUSES),
+        ).first()
+        if active:
+            return None
+        queued = db.query(OperationsAction).filter(
+            OperationsAction.action_type == "coding_task",
+            OperationsAction.status == "pending",
+        ).order_by(OperationsAction.created_at.asc(), OperationsAction.id.asc()).first()
+        if not queued:
+            return None
+        payload = _operations_action_payload(queued)
+        payload.update({
+            "stage": "awaiting_runner",
+            "promoted_at": datetime.utcnow().isoformat() + "Z",
+        })
+        queued.payload = json.dumps(payload, ensure_ascii=False)
+        queued.status = "queued"
+        db.commit()
+        return queued.id
+
+
+def _operations_update_support_ticket(
+    db: Session,
+    action: OperationsAction,
+    *,
+    deployment_action_id: Optional[str] = None,
+) -> None:
+    """Reflect private worker progress in the ticket's safe public lifecycle."""
+    ticket_id = str(_operations_action_payload(action).get("support_ticket_id") or "").strip()
+    if not ticket_id:
+        return
+    ticket = db.get(SupportTicket, ticket_id)
+    if not ticket:
+        return
+    ticket.coding_task_id = action.id
+    if deployment_action_id:
+        ticket.deployment_action_id = deployment_action_id
+    if action.status in {"queued", "running"}:
+        ticket.status = "engineering_in_progress"
+    elif action.status == "pending":
+        ticket.status = "engineering_queued"
+    elif action.status == "completed":
+        ticket.status = "awaiting_deployment"
+        ticket.resolution_summary = "Implementation and independent checks passed; awaiting owner deployment approval."
+    elif action.status == "completed_no_changes":
+        ticket.status = "needs_review"
+        ticket.resolution_summary = "The investigation completed without a deployable code change."
+    elif action.status in {"failed", "stale", "cancelled"}:
+        ticket.status = "needs_review"
+        ticket.resolution_summary = "Engineering work needs review before this request can continue."
+    db.commit()
+
+
+def _operations_update_support_ticket_deployment(db: Session, deployment: OperationsAction) -> None:
+    """Close or flag the linked customer-safe ticket after promotion finishes."""
+    ticket = db.query(SupportTicket).filter(
+        SupportTicket.deployment_action_id == deployment.id,
+    ).first()
+    if not ticket:
+        return
+    if deployment.status == "pushed":
+        ticket.status = "resolved"
+        ticket.resolution_summary = "The verified change was approved and deployed to production."
+    elif deployment.status == "failed":
+        ticket.status = "needs_review"
+        ticket.resolution_summary = "The approved deployment did not complete and needs review."
+    db.commit()
 
 
 def _operations_cancel_coding_task(
@@ -3240,35 +3422,6 @@ def _operations_cancel_coding_task(
         "task_id": task_id,
         "next_step": "The task will not be claimed or deployed.",
     }
-
-
-def _operations_sync_support_ticket(db: Session, action: OperationsAction, deployment_id: Optional[str] = None) -> None:
-    ticket_id = str(_operations_action_payload(action).get("support_ticket_id") or "")
-    ticket = db.get(SupportTicket, ticket_id) if ticket_id else None
-    if not ticket:
-        return
-    ticket.coding_task_id = action.id
-    if deployment_id:
-        ticket.deployment_action_id = deployment_id
-    if action.status in {"queued", "running"}:
-        ticket.status = "engineering_in_progress"
-    elif action.status == "pending":
-        ticket.status = "engineering_queued"
-    elif action.status == "completed":
-        ticket.status = "awaiting_deployment"
-        ticket.resolution_summary = "Implementation and independent checks passed; awaiting owner deployment approval."
-    else:
-        ticket.status = "needs_review"
-    db.commit()
-
-
-def _operations_promote_next_support_ticket(db: Session) -> None:
-    if db.query(OperationsAction).filter(OperationsAction.action_type == "coding_task", OperationsAction.status.in_(OPERATIONS_CODE_ACTIVE_STATUSES)).first():
-        return
-    next_action = db.query(OperationsAction).filter(OperationsAction.action_type == "coding_task", OperationsAction.status == "pending").order_by(OperationsAction.created_at.asc()).first()
-    if next_action:
-        payload = _operations_action_payload(next_action); payload["stage"] = "awaiting_runner"
-        next_action.payload = json.dumps(payload); next_action.status = "queued"; db.commit()
 
 
 def _operations_matching_task_run(action: OperationsAction) -> Optional[Dict[str, Any]]:
@@ -3339,6 +3492,8 @@ def _operations_refresh_coding_task(db: Session, action: OperationsAction) -> Op
             action.payload = json.dumps(payload, ensure_ascii=False)
             action.executed_at = datetime.utcnow()
             db.commit()
+            _operations_update_support_ticket(db, action)
+            _operations_promote_next_coding_task(db)
             _notify_operational_failure(
                 notification_type="coding_task_failed",
                 dedupe_key=f"coding-task-failed:{action.id}",
@@ -3365,6 +3520,8 @@ def _operations_refresh_coding_task(db: Session, action: OperationsAction) -> Op
             action.payload = json.dumps(payload, ensure_ascii=False)
             action.executed_at = datetime.utcnow()
             db.commit()
+            _operations_update_support_ticket(db, action)
+            _operations_promote_next_coding_task(db)
             return None
         files = comparison.get("files", [])
         if not isinstance(files, list):
@@ -3386,12 +3543,20 @@ def _operations_refresh_coding_task(db: Session, action: OperationsAction) -> Op
         action.payload = json.dumps(payload, ensure_ascii=False)
         action.executed_at = datetime.utcnow()
         db.commit()
-        _operations_sync_support_ticket(db, action)
+        _operations_update_support_ticket(db, action)
         if action.status == "completed" and payload.get("auto_propose_deployment"):
-            proposal = _operations_propose_code_deployment(db, action.id, "Verified support-ticket implementation is ready for owner deployment approval.")
+            proposal = _operations_propose_code_deployment(
+                db,
+                action.id,
+                "Verified support-ticket implementation is ready for owner deployment approval.",
+            )
             if proposal.get("status") in {"pending_confirmation", "already_proposed"}:
-                _operations_sync_support_ticket(db, action, str(proposal.get("action_id") or "") or None)
-        _operations_promote_next_support_ticket(db)
+                _operations_update_support_ticket(
+                    db,
+                    action,
+                    deployment_action_id=str(proposal.get("action_id") or "") or None,
+                )
+        _operations_promote_next_coding_task(db)
         return None
     except OperationsGitHubError as exc:
         return str(exc)
@@ -3530,6 +3695,9 @@ def _operations_reconcile_deployment_actions(db: Session) -> None:
             changed = True
         if changed:
             db.commit()
+            for action in active:
+                if action.status in {"pushed", "failed"}:
+                    _operations_update_support_ticket_deployment(db, action)
             for action in failed_actions:
                 _notify_operational_failure(
                     notification_type="deployment_failed",
@@ -3815,6 +3983,8 @@ def execute_operations_tool(
         )
     if tool_name == "inspect_message_thread":
         return _operations_inspect_message_thread(db, str(arguments.get("thread_id", "")))
+    if tool_name == "clear_thread_review_tags":
+        return _operations_clear_thread_review_tags(db, arguments.get("thread_ids"))
     if tool_name == "prepare_customer_sms_context":
         try:
             return _operations_prepare_customer_sms_context(

@@ -22,7 +22,7 @@ try:
     from backend.core.clients import openai_client
     from backend.core.constants import AGENT_CONSOLE_PROTOCOL_VERSION
     from backend.models.domain import (
-        OperationsAgentRun, OperationsAgentEvent, OperationsChatMessage,
+        OperationsAction, OperationsAgentRun, OperationsAgentEvent, OperationsChatMessage, SupportTicket,
     )
     from backend.schemas.domain import (
         OperationsChatInput, OperationsRealtimeTurnInput, OperationsRealtimeToolInput,
@@ -56,6 +56,8 @@ try:
         serialize_operations_chat_message,
         OPERATIONS_AI_TOOLS,
         _operations_claim_worker_task,
+        _operations_execute_code_deployment,
+        _operations_inspect_coding_task,
     )
     from backend.services.business_assistant_service import (
         BUSINESS_ASSISTANT_TOOLS,
@@ -69,7 +71,7 @@ except ImportError:
     from core.clients import openai_client
     from core.constants import AGENT_CONSOLE_PROTOCOL_VERSION
     from models.domain import (
-        OperationsAgentRun, OperationsAgentEvent, OperationsChatMessage,
+        OperationsAction, OperationsAgentRun, OperationsAgentEvent, OperationsChatMessage, SupportTicket,
     )
     from schemas.domain import (
         OperationsChatInput, OperationsRealtimeTurnInput, OperationsRealtimeToolInput,
@@ -103,6 +105,8 @@ except ImportError:
         serialize_operations_chat_message,
         OPERATIONS_AI_TOOLS,
         _operations_claim_worker_task,
+        _operations_execute_code_deployment,
+        _operations_inspect_coding_task,
     )
     from services.business_assistant_service import (
         BUSINESS_ASSISTANT_TOOLS,
@@ -268,6 +272,58 @@ def get_operations_chat_messages(db: Session = Depends(get_db)):
     )
     messages.reverse()
     return {"messages": [serialize_operations_chat_message(item) for item in messages]}
+
+
+@router.get("/api/settings/support-tickets")
+def list_support_tickets(limit: int = Query(default=50, ge=1, le=100), db: Session = Depends(get_db)):
+    """Owner-only ticket view: deliberately excludes private worker instructions and evidence."""
+    tickets = (
+        db.query(SupportTicket)
+        .order_by(SupportTicket.updated_at.desc(), SupportTicket.id.desc())
+        .limit(limit)
+        .all()
+    )
+    result = []
+    for ticket in tickets:
+        if ticket.coding_task_id:
+            _operations_inspect_coding_task(db, ticket.coding_task_id)
+            db.refresh(ticket)
+        deployment_state = None
+        if ticket.deployment_action_id:
+            action = db.get(OperationsAction, ticket.deployment_action_id)
+            deployment_state = action.status if action else None
+        result.append({
+            "id": ticket.id,
+            "category": ticket.category,
+            "title": ticket.title,
+            "affectedArea": ticket.affected_area,
+            "status": ticket.status,
+            "resolutionSummary": ticket.resolution_summary,
+            "codingTaskId": ticket.coding_task_id,
+            "deploymentActionId": ticket.deployment_action_id,
+            "deploymentState": deployment_state,
+            "createdAt": ticket.created_at.isoformat() + "Z",
+            "updatedAt": ticket.updated_at.isoformat() + "Z",
+        })
+    return {"tickets": result}
+
+
+@router.post("/api/settings/support-tickets/{ticket_id}/deploy")
+def approve_support_ticket_deployment(ticket_id: str, db: Session = Depends(get_db)):
+    """A deliberate authenticated owner click is the final production-release authorisation."""
+    ticket = db.get(SupportTicket, ticket_id)
+    if not ticket or not ticket.deployment_action_id:
+        raise HTTPException(status_code=404, detail="That support ticket has no deployment awaiting approval.")
+    result = _operations_execute_code_deployment(
+        db,
+        ticket.deployment_action_id,
+        f"deploy {ticket.deployment_action_id}",
+    )
+    if result.get("status") not in {"deployment_queued", "already_queued"}:
+        raise HTTPException(status_code=409, detail=result.get("reason") or "The deployment could not be approved.")
+    ticket.status = "deployment_in_progress"
+    db.commit()
+    return result
 
 
 @router.post("/api/settings/operations-chat/messages")

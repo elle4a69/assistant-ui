@@ -218,7 +218,13 @@ class OperationsAction(Base):
 
 
 class SupportTicket(Base):
-    """A customer-safe request with an optional private engineering hand-off."""
+    """A customer-safe request with an optional private engineering hand-off.
+
+    The ticket deliberately stores the customer-facing problem separately from
+    the coding runner's action payload.  That lets a future customer portal
+    expose status without ever exposing branch names, commits, worker logs, or
+    other implementation detail.
+    """
     __tablename__ = "support_tickets"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -301,6 +307,7 @@ __all__ = [
     "NotificationDelivery",
     "OperationsChatMessage",
     "OperationsAction",
+    "SupportTicket",
     "OperationsMemory",
     "OperationsAgentRun",
     "OperationsAgentEvent",

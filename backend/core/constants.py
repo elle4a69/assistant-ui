@@ -321,6 +321,7 @@ AGENT_CONSOLE_TERMINAL_STATUSES = {
 
 AGENT_CONSOLE_ALLOWED_TOOLS = frozenset({
     "cancel_coding_task",
+    "clear_thread_review_tags",
     "diagnose_message_handling",
     "execute_booking_recovery",
     "execute_code_deployment",
