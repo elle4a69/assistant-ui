@@ -13,6 +13,7 @@ from main import (
     get_threads,
     is_clear_customer_arrival,
     record_customer_arrival_event,
+    run_sms_reply_logic,
 )
 
 
@@ -86,4 +87,57 @@ def test_arrival_event_is_deduplicated_and_exposed_in_thread_list():
     )[0]
     assert item["lastArrivalEventId"] == arrival_events[0].id
     assert item["lastArrivalAt"] is not None
+    db.close()
+
+
+def test_arrival_is_a_terminal_boundary_for_the_automated_responder():
+    """A queued or retried AI job must not answer after a customer arrives."""
+    test_engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=test_engine)
+    db = sessionmaker(bind=test_engine)()
+    now = datetime.utcnow()
+    thread = Thread(
+        id="arrival-no-auto-reply-thread",
+        customer_phone="+61412345679",
+        sms_account_key="primary",
+        state="auto-reply",
+        priority="medium",
+        sla_due_at=now + timedelta(hours=1),
+        unread_count=1,
+        created_at=now,
+        updated_at=now,
+    )
+    message = Message(
+        id="arrival-no-auto-reply-message",
+        thread_id=thread.id,
+        role="customer",
+        text="I'm here",
+        provider_message_id="arrival-no-auto-reply-provider-message",
+        at=now,
+    )
+    db.add_all([thread, message])
+    db.flush()
+    assert record_customer_arrival_event(db, thread, message.id, "clear-phrase") is True
+    db.commit()
+
+    # The reply flow must return before it builds a prompt or considers a reply.
+    assert run_sms_reply_logic(
+        db,
+        thread.id,
+        message.text,
+        message.provider_message_id,
+        now,
+        dispatch_sms=True,
+    ) == (False, False)
+
+    events = db.query(ThreadEvent).filter(
+        ThreadEvent.thread_id == thread.id,
+        ThreadEvent.type == "ai-reply-cancelled",
+    ).all()
+    assert len(events) == 1
+    assert json.loads(events[0].meta)["reason"] == "customer-arrived-no-auto-reply"
+    assert db.query(Message).filter(
+        Message.thread_id == thread.id,
+        Message.role.in_(["system", "draft"]),
+    ).count() == 0
     db.close()
