@@ -138,6 +138,10 @@ async def lifespan(application: FastAPI):
     # Additive schema creation keeps the durable ntfy dedupe ledger available
     # on existing Fly volumes without altering or dropping application data.
     Base.metadata.create_all(bind=engine)
+    # Knowledge is persisted on the Fly volume but retrieved from this
+    # process-local index. Rebuild it on every process start so a deployment
+    # or restart cannot make approved knowledge appear to have disappeared.
+    load_knowledge_base()
     # Run synchronous startup recovery
     recover_interrupted_agent_console_runs()
 
