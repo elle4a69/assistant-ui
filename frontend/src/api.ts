@@ -415,9 +415,10 @@ export async function respondToBootcampInformationRequest(
 
 export interface InformationRequestResult {
   status: string;
-  message: Message;
+  message: Message | null;
   knowledgeSource: string;
   knowledgeSummary: string;
+  replySent: boolean;
 }
 
 export async function respondToInformationRequest(

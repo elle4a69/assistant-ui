@@ -175,7 +175,7 @@ def _information_request_db(*, account_key="secondary"):
     return db, thread, customer, request, payload
 
 
-def test_unavailable_generation_saves_no_learning_and_sends_no_sms(monkeypatch, tmp_path):
+def test_unavailable_generation_saves_owner_knowledge_without_sending_sms(monkeypatch, tmp_path):
     db, thread, _customer, request, payload = _information_request_db()
     monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
     monkeypatch.setattr(
@@ -183,19 +183,56 @@ def test_unavailable_generation_saves_no_learning_and_sends_no_sms(monkeypatch, 
         "generate_information_request_content",
         lambda *_args: (_ for _ in ()).throw(RuntimeError("provider unavailable")),
     )
+    monkeypatch.setattr(main, "classify_knowledge_entries", lambda entries: {
+        entries[0]["id"]: {
+            "scope": "secondary",
+            "category": "service_specific",
+            "retrieval_enabled": True,
+        },
+    })
     monkeypatch.setattr(
         main.mobilemessage_service,
         "send_sms",
         lambda *_args, **_kwargs: pytest.fail("SMS must not be sent"),
     )
 
-    with pytest.raises(HTTPException, match="AI response was unavailable"):
-        respond_to_information_request(thread.id, payload, db)
+    result = respond_to_information_request(thread.id, payload, db)
 
     db.refresh(request)
-    assert json.loads(request.meta)["status"] == "pending"
+    request_meta = json.loads(request.meta)
+    knowledge_entry = json.loads((tmp_path / main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8"))
+    assert result["status"] == "knowledge-saved"
+    assert result["replySent"] is False
+    assert result["message"] is None
+    assert request_meta["status"] == "knowledge-saved"
+    assert request_meta["reply_unavailable_reason"] == "AI response unavailable"
     assert db.query(Message).filter(Message.role != "customer").count() == 0
-    assert db.query(ThreadEvent).filter(ThreadEvent.type == "ai-reply-failed").count() == 1
+    assert db.query(ThreadEvent).filter(ThreadEvent.type == "information-request-knowledge-saved").count() == 1
+    assert knowledge_entry["text"] == payload.information
+    assert knowledge_entry["status"] == "active"
+    db.close()
+
+
+def test_unavailable_generation_does_not_save_after_arrival(monkeypatch, tmp_path):
+    db, thread, _customer, _request, payload = _information_request_db()
+    monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        main,
+        "generate_information_request_content",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("provider unavailable")),
+    )
+    monkeypatch.setattr(main, "customer_arrival_has_been_recorded", lambda *_args: True)
+    monkeypatch.setattr(
+        main.mobilemessage_service,
+        "send_sms",
+        lambda *_args, **_kwargs: pytest.fail("SMS must not be sent"),
+    )
+
+    with pytest.raises(HTTPException, match="conversation changed"):
+        respond_to_information_request(thread.id, payload, db)
+
+    assert db.query(Message).filter(Message.role != "customer").count() == 0
+    assert db.query(ThreadEvent).filter(ThreadEvent.type == "ai-reply-cancelled").count() == 1
     assert not (tmp_path / main.LEARNED_INFORMATION_FILENAME).exists()
     db.close()
 

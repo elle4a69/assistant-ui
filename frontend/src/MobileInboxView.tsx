@@ -531,7 +531,9 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
         information,
       )
       setRequestedInformation('')
-      setNotice(`Knowledge saved to ${result.knowledgeSource}. Reply sent.`)
+      setNotice(result.replySent
+        ? `Knowledge saved to ${result.knowledgeSource}. Reply sent.`
+        : `Knowledge saved to ${result.knowledgeSource}. AI reply was unavailable, so no message was sent; reply manually when ready.`)
       await Promise.all([loadThread(), loadThreads()])
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The information could not be used. No reply was sent.')
