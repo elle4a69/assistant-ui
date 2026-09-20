@@ -122,17 +122,30 @@ def save_learned_information(
         "status": "quarantined",
         "supersedes_id": None,
         "revision": 1,
-        "review_status": "pending",
+        "review_status": "approved",
         "retrieval_enabled": False,
     }
     classify_fn = _dyn("classify_knowledge_entries", classify_knowledge_entries)
-    entry.update(classify_fn([entry]).get(entry["id"], _quarantined_knowledge_classification()))
-    entry["review_status"] = "pending"
-    entry["retrieval_enabled"] = False
+    classification = classify_fn([entry]).get(entry["id"], _quarantined_knowledge_classification())
+    entry.update(classification)
     entry["scope"] = account_key if account_key in FIRST_CONTACT_ACCOUNT_KEYS else "internal"
     entry["source_account_key"] = account_key
+    unsafe = (
+        classification.get("category") in {
+            "availability_or_booking_state", "customer_specific", "internal_or_uncertain",
+        }
+        or has_unsafe_literal_learning_detail(entry["text"])
+    )
+    entry["review_status"] = "approved"
+    entry["status"] = "quarantined" if unsafe else "active"
+    entry["retrieval_enabled"] = bool(
+        classification.get("retrieval_enabled")
+        and not unsafe
+        and entry["scope"] in {"primary", "secondary"}
+    )
     upsert_fn = _dyn("_upsert_learned_information_entry", _upsert_learned_information_entry)
-    upsert_fn(entry)
+    if upsert_fn(entry) is False:
+        raise ValueError("The supplied information did not produce a safe, reusable knowledge record.")
     return LEARNED_INFORMATION_FILENAME
 
 
