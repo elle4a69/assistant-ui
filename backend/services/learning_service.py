@@ -111,7 +111,10 @@ def save_learned_information(
     entry = {
         "id": request_event_id,
         "type": "information_request_resolution",
-        "source_type": "information_request_resolution",
+        # Owner submissions are durable audit records first.  They are
+        # classified before retrieval, but must not be discarded merely
+        # because they cannot be converted into a reusable reply template.
+        "source_type": "owner_information_submission",
         "canonical_key": _canonical_knowledge_key(knowledge_summary),
         "sms_account_key": account_key,
         "question": customer_question.strip(),
@@ -136,7 +139,7 @@ def save_learned_information(
         }
         or has_unsafe_literal_learning_detail(entry["text"])
     )
-    entry["review_status"] = "approved"
+    entry["review_status"] = "pending" if unsafe else "approved"
     entry["status"] = "quarantined" if unsafe else "active"
     entry["retrieval_enabled"] = bool(
         classification.get("retrieval_enabled")
@@ -154,7 +157,7 @@ def _upsert_learned_information_entry(entry: Dict[str, Any]) -> bool:
     # All learning sources converge here.  Re-run the deterministic gate so a
     # UI client, staff-edited draft, or future caller cannot persist a duplicate
     # or unsafe reusable candidate by bypassing its earlier preview path.
-    if entry.get("source_type") != "curator_proposal":
+    if entry.get("source_type") not in {"curator_proposal", "owner_information_submission"}:
         prepared = prepare_learning_candidate(entry)
         if prepared is None:
             return False
