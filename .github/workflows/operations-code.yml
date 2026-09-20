@@ -164,8 +164,8 @@ jobs:
           baseline_log="$RUNNER_TEMP/operations-baseline-checks.log"
           : > "$baseline_log"
           failed=0
-          python -m pytest backend -q >> "$baseline_log" 2>&1 || failed=1
           npm run build --prefix frontend >> "$baseline_log" 2>&1 || failed=1
+          python -m pytest backend -q >> "$baseline_log" 2>&1 || failed=1
           if [ "$failed" -eq 0 ]; then
             rm -f "$baseline_log"
           else
@@ -279,8 +279,8 @@ jobs:
           validation_log="$RUNNER_TEMP/operations-validation-checks.log"
           : > "$validation_log"
           failed=0
-          python -m pytest backend -q >> "$validation_log" 2>&1 || failed=1
           npm run build --prefix frontend >> "$validation_log" 2>&1 || failed=1
+          python -m pytest backend -q >> "$validation_log" 2>&1 || failed=1
           git diff --check "$OPERATIONS_REVIEW_BASE" >> "$validation_log" 2>&1 || failed=1
           if [ "$failed" -eq 0 ]; then
             echo "passed=true" >> "$GITHUB_OUTPUT"
@@ -366,8 +366,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pytest backend -q
           npm run build --prefix frontend
+          python -m pytest backend -q
           git diff --check "$OPERATIONS_REVIEW_BASE"
           rm -f "$RUNNER_TEMP/operations-worker-credential"
 
