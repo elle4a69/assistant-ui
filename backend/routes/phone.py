@@ -675,22 +675,9 @@ def respond_to_information_request(
             return "The contact is blocked"
         return None
 
-    def save_for_manual_reply(error: Exception) -> Dict[str, Any]:
-        logger.warning(
-            "Information-request generation failed; saving owner knowledge for manual reply "
-            "(request_event_id=%s, error_type=%s)",
-            request_event.id,
-            type(error).__name__,
-        )
-        cancellation_reason = reply_cancellation_reason()
-        if cancellation_reason:
-            fail_closed(
-                "The conversation changed before the answer was ready. Knowledge was not saved and no reply was sent.",
-                cancellation_reason,
-                "ai-reply-cancelled",
-            )
+    def save_owner_knowledge() -> str:
         try:
-            knowledge_source = save_fn(
+            return save_fn(
                 request_event.id,
                 customer_message.text,
                 payload.information,
@@ -699,15 +686,22 @@ def respond_to_information_request(
             )
         except Exception as save_error:
             logger.exception(
-                "Unable to save owner knowledge after generation failed "
-                "(request_event_id=%s, error_type=%s)",
+                "Unable to save owner knowledge (request_event_id=%s, error_type=%s)",
                 request_event.id,
                 type(save_error).__name__,
             )
             fail_closed(
-                "The AI response was unavailable and the supplied information could not be saved. No reply was sent.",
-                "AI response and knowledge save both failed",
+                "The supplied information could not be saved. No reply was sent.",
+                "Knowledge save failed",
             )
+
+    def save_for_manual_reply(error: Exception, knowledge_source: str) -> Dict[str, Any]:
+        logger.warning(
+            "Information-request generation failed after owner knowledge was saved for manual reply "
+            "(request_event_id=%s, error_type=%s)",
+            request_event.id,
+            type(error).__name__,
+        )
 
         request_meta.update({
             "status": "knowledge-saved",
@@ -742,6 +736,17 @@ def respond_to_information_request(
             "replySent": False,
         }
 
+    cancellation_reason = reply_cancellation_reason()
+    if cancellation_reason:
+        fail_closed(
+            "The conversation changed before the answer was ready. Knowledge was not saved and no reply was sent.",
+            cancellation_reason,
+            "ai-reply-cancelled",
+        )
+    # Owner-provided facts are durable knowledge first. Reply composition is
+    # optional and must never make a fact submission disappear.
+    knowledge_source = save_owner_knowledge()
+
     generate_fn = _dyn("generate_information_request_content", generate_information_request_content)
     try:
         generated = generate_fn(
@@ -753,7 +758,7 @@ def respond_to_information_request(
         reply_text = str(generated["customer_reply"]).strip()
         knowledge_summary = str(generated["knowledge_summary"]).strip()
     except Exception as error:
-        return save_for_manual_reply(error)
+        return save_for_manual_reply(error, knowledge_source)
 
     validation_error = (
         "AI returned incomplete response content"
@@ -779,16 +784,6 @@ def respond_to_information_request(
         role="draft" if draft_only else "system",
         text=reply_text,
         at=datetime.utcnow(),
-    )
-
-    # Persist the reusable fact first. If SMS delivery fails, retrying this
-    # request safely replaces the same knowledge entry instead of duplicating it.
-    knowledge_source = save_fn(
-        request_event.id,
-        customer_message.text,
-        payload.information,
-        knowledge_summary,
-        thread.sms_account_key,
     )
 
     if not draft_only and not thread.customer_phone.startswith("locanto_"):

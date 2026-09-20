@@ -93,7 +93,7 @@ def test_information_request_saves_knowledge_sends_reply_and_resolves(monkeypatc
     assert thread.unread_count == 0
     assert request_meta["status"] == "resolved"
     assert knowledge_entry["id"] == request_event.id
-    assert knowledge_entry["text"] == "Couples are accepted for the couples service."
+    assert knowledge_entry["text"] == "Yes, couples are accepted for that service."
     assert knowledge_entry["status"] == "active"
     assert knowledge_entry["review_status"] == "approved"
     assert knowledge_entry["retrieval_enabled"] is True
@@ -178,11 +178,11 @@ def _information_request_db(*, account_key="secondary"):
 def test_unavailable_generation_saves_owner_knowledge_without_sending_sms(monkeypatch, tmp_path):
     db, thread, _customer, request, payload = _information_request_db()
     monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
-    monkeypatch.setattr(
-        main,
-        "generate_information_request_content",
-        lambda *_args: (_ for _ in ()).throw(RuntimeError("provider unavailable")),
-    )
+    def unavailable_after_knowledge_save(*_args):
+        assert (tmp_path / main.LEARNED_INFORMATION_FILENAME).exists()
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(main, "generate_information_request_content", unavailable_after_knowledge_save)
     monkeypatch.setattr(main, "classify_knowledge_entries", lambda entries: {
         entries[0]["id"]: {
             "scope": "secondary",
@@ -269,7 +269,7 @@ def test_training_mode_creates_draft_without_sms(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("guard", ["availability", "superseded", "arrival"])
-def test_response_validation_guards_save_no_learning_and_send_no_sms(monkeypatch, tmp_path, guard):
+def test_response_validation_guards_never_send_sms_and_only_save_current_owner_knowledge(monkeypatch, tmp_path, guard):
     db, thread, customer, request, payload = _information_request_db()
     monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
     reply = "Yes, it is available tomorrow at 2pm." if guard == "availability" else "Yes, we offer it."
@@ -294,7 +294,7 @@ def test_response_validation_guards_save_no_learning_and_send_no_sms(monkeypatch
         lambda *_args, **_kwargs: pytest.fail("SMS must not be sent"),
     )
 
-    with pytest.raises(HTTPException, match="did not pass current conversation safeguards"):
+    with pytest.raises(HTTPException, match="conversation changed|did not pass current conversation safeguards"):
         respond_to_information_request(thread.id, payload, db)
 
     db.refresh(request)
@@ -302,5 +302,10 @@ def test_response_validation_guards_save_no_learning_and_send_no_sms(monkeypatch
     assert db.query(Message).filter(Message.role == "system").count() == 0
     expected_event = "ai-reply-failed" if guard == "availability" else "ai-reply-cancelled"
     assert db.query(ThreadEvent).filter(ThreadEvent.type == expected_event).count() == 1
-    assert not (tmp_path / main.LEARNED_INFORMATION_FILENAME).exists()
+    knowledge_path = tmp_path / main.LEARNED_INFORMATION_FILENAME
+    if guard == "availability":
+        assert knowledge_path.exists()
+        assert json.loads(knowledge_path.read_text(encoding="utf-8"))["text"] == payload.information
+    else:
+        assert not knowledge_path.exists()
     db.close()
