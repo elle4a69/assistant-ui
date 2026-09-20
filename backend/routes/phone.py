@@ -94,6 +94,7 @@ except ImportError:
     from services.learning_service import save_learned_information
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 @router.post("/api/threads/{thread_id}/autoresponder")
 def toggle_autoresponder(thread_id: str, payload: AutoresponderInput, db: Session = Depends(get_db)):
@@ -647,6 +648,100 @@ def respond_to_information_request(
         db.commit()
         raise HTTPException(status_code=502, detail=detail)
 
+    # Saving an owner's supplied business fact must not depend on a second AI
+    # request.  The same request-event ID makes this idempotent if they retry.
+    save_fn = _dyn("save_learned_information", save_learned_information)
+    arrival_state_fn = _dyn(
+        "customer_arrival_has_been_recorded",
+        customer_arrival_has_been_recorded,
+    )
+
+    def reply_cancellation_reason() -> Optional[str]:
+        db.expire_all()
+        current_thread = db.query(Thread).filter(Thread.id == thread_id).first()
+        if not current_thread:
+            return "The conversation no longer exists"
+        if not is_latest_customer_turn(
+            db,
+            current_thread.id,
+            customer_message.provider_message_id or "",
+            customer_message.at,
+            customer_message.text,
+        ):
+            return "The customer message was superseded before the answer was ready"
+        if callable(arrival_state_fn) and arrival_state_fn(db, current_thread.id):
+            return "The customer arrived before the answer was ready"
+        if is_contact_blocked(db, current_thread.sms_account_key, current_thread.customer_phone):
+            return "The contact is blocked"
+        return None
+
+    def save_for_manual_reply(error: Exception) -> Dict[str, Any]:
+        logger.warning(
+            "Information-request generation failed; saving owner knowledge for manual reply "
+            "(request_event_id=%s, error_type=%s)",
+            request_event.id,
+            type(error).__name__,
+        )
+        cancellation_reason = reply_cancellation_reason()
+        if cancellation_reason:
+            fail_closed(
+                "The conversation changed before the answer was ready. Knowledge was not saved and no reply was sent.",
+                cancellation_reason,
+                "ai-reply-cancelled",
+            )
+        try:
+            knowledge_source = save_fn(
+                request_event.id,
+                customer_message.text,
+                payload.information,
+                payload.information,
+                thread.sms_account_key,
+            )
+        except Exception as save_error:
+            logger.exception(
+                "Unable to save owner knowledge after generation failed "
+                "(request_event_id=%s, error_type=%s)",
+                request_event.id,
+                type(save_error).__name__,
+            )
+            fail_closed(
+                "The AI response was unavailable and the supplied information could not be saved. No reply was sent.",
+                "AI response and knowledge save both failed",
+            )
+
+        request_meta.update({
+            "status": "knowledge-saved",
+            "knowledge_saved_at": datetime.utcnow().isoformat() + "Z",
+            "knowledge_saved_by": payload.agentId,
+            "customer_message_id": customer_message.id,
+            "knowledge_source": knowledge_source,
+            "knowledge_summary": payload.information,
+            "reply_unavailable_reason": "AI response unavailable",
+        })
+        request_event.meta = json.dumps(request_meta)
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread.id,
+            type="information-request-knowledge-saved",
+            agent_id=payload.agentId,
+            meta=json.dumps({
+                "request_event_id": request_event.id,
+                "knowledge_source": knowledge_source,
+                "reply_sent": False,
+            }),
+            at=datetime.utcnow(),
+        ))
+        thread.state = "needs-review"
+        thread.updated_at = datetime.utcnow()
+        db.commit()
+        return {
+            "status": "knowledge-saved",
+            "message": None,
+            "knowledgeSource": knowledge_source,
+            "knowledgeSummary": payload.information,
+            "replySent": False,
+        }
+
     generate_fn = _dyn("generate_information_request_content", generate_information_request_content)
     try:
         generated = generate_fn(
@@ -657,11 +752,8 @@ def respond_to_information_request(
         )
         reply_text = str(generated["customer_reply"]).strip()
         knowledge_summary = str(generated["knowledge_summary"]).strip()
-    except Exception:
-        fail_closed(
-            "The AI response was unavailable. Knowledge was not saved and no reply was sent.",
-            "AI response unavailable; nothing was created or sent",
-        )
+    except Exception as error:
+        return save_for_manual_reply(error)
 
     validation_error = (
         "AI returned incomplete response content"
@@ -669,29 +761,10 @@ def respond_to_information_request(
         else unsafe_ai_reply_reason(reply_text)
         or validate_calendar_only_reply(reply_text, live_lookup_succeeded=False)
     )
-    db.expire_all()
-    thread = db.query(Thread).filter(Thread.id == thread_id).first()
-    arrival_state_fn = _dyn(
-        "customer_arrival_has_been_recorded",
-        customer_arrival_has_been_recorded,
-    )
-    latest_turn = is_latest_customer_turn(
-        db,
-        thread.id,
-        customer_message.provider_message_id or "",
-        customer_message.at,
-        customer_message.text,
-    )
-    cancellation = False
-    if not latest_turn:
-        validation_error = "The customer message was superseded before the answer was ready"
-        cancellation = True
-    elif callable(arrival_state_fn) and arrival_state_fn(db, thread.id):
-        validation_error = "The customer arrived before the answer was ready"
-        cancellation = True
-    elif is_contact_blocked(db, thread.sms_account_key, thread.customer_phone):
-        validation_error = "The contact is blocked"
-        cancellation = True
+    cancellation_reason = reply_cancellation_reason()
+    cancellation = bool(cancellation_reason)
+    if cancellation_reason:
+        validation_error = cancellation_reason
     if validation_error:
         fail_closed(
             "The generated response did not pass current conversation safeguards. Knowledge was not saved and no reply was sent.",
@@ -710,7 +783,6 @@ def respond_to_information_request(
 
     # Persist the reusable fact first. If SMS delivery fails, retrying this
     # request safely replaces the same knowledge entry instead of duplicating it.
-    save_fn = _dyn("save_learned_information", save_learned_information)
     knowledge_source = save_fn(
         request_event.id,
         customer_message.text,
@@ -779,6 +851,7 @@ def respond_to_information_request(
         },
         "knowledgeSource": knowledge_source,
         "knowledgeSummary": knowledge_summary,
+        "replySent": not draft_only,
     }
 
 
