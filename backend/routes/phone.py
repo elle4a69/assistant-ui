@@ -48,8 +48,11 @@ try:
         find_thread_by_phone,
         run_sms_reply_logic,
         is_contact_blocked,
+        is_latest_customer_turn,
+        unsafe_ai_reply_reason,
     )
-    from backend.services.booking_service import current_business_time
+    from backend.services.booking_service import current_business_time, validate_calendar_only_reply
+    from backend.services.arrival_service import customer_arrival_has_been_recorded
     from backend.services.learning_service import save_learned_information
 except ImportError:
     from core.database import get_db
@@ -83,8 +86,11 @@ except ImportError:
         find_thread_by_phone,
         run_sms_reply_logic,
         is_contact_blocked,
+        is_latest_customer_turn,
+        unsafe_ai_reply_reason,
     )
-    from services.booking_service import current_business_time
+    from services.booking_service import current_business_time, validate_calendar_only_reply
+    from services.arrival_service import customer_arrival_has_been_recorded
     from services.learning_service import save_learned_information
 
 router = APIRouter()
@@ -624,18 +630,80 @@ def respond_to_information_request(
     if not customer_message:
         raise HTTPException(status_code=409, detail="The customer message for this request no longer exists.")
 
+    def fail_closed(detail: str, reason: str, event_type: str = "ai-reply-failed") -> None:
+        db.rollback()
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread.id,
+            type=event_type,
+            agent_id=payload.agentId,
+            meta=json.dumps({
+                "reason": reason,
+                "message_id": customer_message.id,
+                "request_event_id": request_event.id,
+            }),
+            at=datetime.utcnow(),
+        ))
+        db.commit()
+        raise HTTPException(status_code=502, detail=detail)
+
     generate_fn = _dyn("generate_information_request_content", generate_information_request_content)
-    generated = generate_fn(
-        db,
-        thread,
-        customer_message,
-        payload.information,
+    try:
+        generated = generate_fn(
+            db,
+            thread,
+            customer_message,
+            payload.information,
+        )
+        reply_text = str(generated["customer_reply"]).strip()
+        knowledge_summary = str(generated["knowledge_summary"]).strip()
+    except Exception:
+        fail_closed(
+            "The AI response was unavailable. Knowledge was not saved and no reply was sent.",
+            "AI response unavailable; nothing was created or sent",
+        )
+
+    validation_error = (
+        "AI returned incomplete response content"
+        if not reply_text or not knowledge_summary
+        else unsafe_ai_reply_reason(reply_text)
+        or validate_calendar_only_reply(reply_text, live_lookup_succeeded=False)
     )
-    reply_text = generated["customer_reply"]
+    db.expire_all()
+    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+    arrival_state_fn = _dyn(
+        "customer_arrival_has_been_recorded",
+        customer_arrival_has_been_recorded,
+    )
+    latest_turn = is_latest_customer_turn(
+        db,
+        thread.id,
+        customer_message.provider_message_id or "",
+        customer_message.at,
+        customer_message.text,
+    )
+    cancellation = False
+    if not latest_turn:
+        validation_error = "The customer message was superseded before the answer was ready"
+        cancellation = True
+    elif callable(arrival_state_fn) and arrival_state_fn(db, thread.id):
+        validation_error = "The customer arrived before the answer was ready"
+        cancellation = True
+    elif is_contact_blocked(db, thread.sms_account_key, thread.customer_phone):
+        validation_error = "The contact is blocked"
+        cancellation = True
+    if validation_error:
+        fail_closed(
+            "The generated response did not pass current conversation safeguards. Knowledge was not saved and no reply was sent.",
+            validation_error,
+            "ai-reply-cancelled" if cancellation else "ai-reply-failed",
+        )
+
+    draft_only = bool(_dyn("TRAINING_MODE_ENABLED", False))
     outbound = Message(
         id=str(uuid.uuid4()),
         thread_id=thread.id,
-        role="system",
+        role="draft" if draft_only else "system",
         text=reply_text,
         at=datetime.utcnow(),
     )
@@ -647,11 +715,11 @@ def respond_to_information_request(
         request_event.id,
         customer_message.text,
         payload.information,
-        generated["knowledge_summary"],
+        knowledge_summary,
         thread.sms_account_key,
     )
 
-    if not thread.customer_phone.startswith("locanto_"):
+    if not draft_only and not thread.customer_phone.startswith("locanto_"):
         mm_service = _dyn("mobilemessage_service", mobilemessage_service)
         dispatch_result = mm_service.send_sms(
             thread.customer_phone,
@@ -668,7 +736,7 @@ def respond_to_information_request(
         "resolved_by": payload.agentId,
         "customer_message_id": customer_message.id,
         "knowledge_source": knowledge_source,
-        "knowledge_summary": generated["knowledge_summary"],
+        "knowledge_summary": knowledge_summary,
         "reply_message_id": outbound.id,
     })
     request_event.meta = json.dumps(request_meta)
@@ -685,7 +753,19 @@ def respond_to_information_request(
         }),
         at=datetime.utcnow(),
     ))
-    thread.state = "auto-reply"
+    if draft_only:
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread.id,
+            type="draft-created",
+            agent_id=payload.agentId,
+            meta=json.dumps({
+                "message_id": outbound.id,
+                "source": "information-request-response",
+            }),
+            at=datetime.utcnow(),
+        ))
+    thread.state = "needs-review" if draft_only else "auto-reply"
     thread.unread_count = 0
     thread.updated_at = datetime.utcnow()
     db.commit()
@@ -698,7 +778,7 @@ def respond_to_information_request(
             "at": format_dt(outbound.at),
         },
         "knowledgeSource": knowledge_source,
-        "knowledgeSummary": generated["knowledge_summary"],
+        "knowledgeSummary": knowledge_summary,
     }
 
 
