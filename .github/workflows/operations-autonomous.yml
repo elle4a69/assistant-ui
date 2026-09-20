@@ -141,8 +141,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pytest backend -q
           npm run build --prefix frontend
+          python -m pytest backend -q
           git diff --check "$OPERATIONS_BASE..$GITHUB_SHA"
 
       - name: Fast-forward exact reviewed commit to main
