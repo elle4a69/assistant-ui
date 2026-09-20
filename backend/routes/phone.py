@@ -52,6 +52,7 @@ try:
         unsafe_ai_reply_reason,
     )
     from backend.services.booking_service import current_business_time, validate_calendar_only_reply
+    from backend.services.arrival_service import customer_arrival_has_been_recorded
     from backend.services.learning_service import save_learned_information
 except ImportError:
     from core.database import get_db
@@ -89,6 +90,7 @@ except ImportError:
         unsafe_ai_reply_reason,
     )
     from services.booking_service import current_business_time, validate_calendar_only_reply
+    from services.arrival_service import customer_arrival_has_been_recorded
     from services.learning_service import save_learned_information
 
 router = APIRouter()
@@ -669,7 +671,10 @@ def respond_to_information_request(
     )
     db.expire_all()
     thread = db.query(Thread).filter(Thread.id == thread_id).first()
-    arrival_state_fn = _dyn("customer_arrival_has_been_recorded", None)
+    arrival_state_fn = _dyn(
+        "customer_arrival_has_been_recorded",
+        customer_arrival_has_been_recorded,
+    )
     latest_turn = is_latest_customer_turn(
         db,
         thread.id,
