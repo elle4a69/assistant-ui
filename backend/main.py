@@ -212,7 +212,7 @@ async def require_basic_auth(request: Request, call_next):
     if is_public_request(request):
         return await call_next(request)
 
-    if not AUTH_PASSWORD:
+    if not authentication_enabled():
         return await call_next(request)
 
     if _valid_admin_session(request.cookies.get(AUTH_COOKIE_NAME, "")):
@@ -235,7 +235,7 @@ async def require_basic_auth(request: Request, call_next):
 
     if _valid_admin_credentials(supplied_username, supplied_password):
         response = await call_next(request)
-        _set_admin_session_cookie(response, request)
+        _set_admin_session_cookie(response, request, supplied_username)
         return response
 
     headers = {}

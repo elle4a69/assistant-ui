@@ -11,7 +11,7 @@ import re
 from typing import Any, Dict, List, Optional
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import func, and_
 from sqlalchemy.orm import Session
 
@@ -51,6 +51,7 @@ try:
     )
     from backend.services.booking_service import current_business_time
     from backend.services.learning_service import save_learned_information
+    from backend.services.auth_service import allowed_sms_accounts
 except ImportError:
     from core.database import get_db
     from core.clients import canonical_phone_number, mobilemessage_service, openai_client
@@ -86,12 +87,26 @@ except ImportError:
     )
     from services.booking_service import current_business_time
     from services.learning_service import save_learned_information
+    from services.auth_service import allowed_sms_accounts
 
 router = APIRouter()
 
+
+def _visible_thread(db: Session, thread_id: str, request: Optional[Request]) -> Optional[Thread]:
+    query = db.query(Thread).filter(Thread.id == thread_id)
+    account_keys = allowed_sms_accounts(request)
+    if account_keys is not None:
+        query = query.filter(Thread.sms_account_key.in_(account_keys))
+    return query.first()
+
+
+def _scope_threads(query, request: Optional[Request]):
+    account_keys = allowed_sms_accounts(request)
+    return query if account_keys is None else query.filter(Thread.sms_account_key.in_(account_keys))
+
 @router.post("/api/threads/{thread_id}/autoresponder")
-def toggle_autoresponder(thread_id: str, payload: AutoresponderInput, db: Session = Depends(get_db)):
-    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+def toggle_autoresponder(thread_id: str, payload: AutoresponderInput, db: Session = Depends(get_db), request: Request = None):
+    thread = _visible_thread(db, thread_id, request)
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
         
@@ -113,8 +128,8 @@ def toggle_autoresponder(thread_id: str, payload: AutoresponderInput, db: Sessio
 
 
 @router.post("/api/threads/{thread_id}/pin")
-def set_thread_pinned(thread_id: str, payload: ThreadPinnedInput, db: Session = Depends(get_db)):
-    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+def set_thread_pinned(thread_id: str, payload: ThreadPinnedInput, db: Session = Depends(get_db), request: Request = None):
+    thread = _visible_thread(db, thread_id, request)
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
     thread.pinned = payload.pinned
@@ -124,8 +139,8 @@ def set_thread_pinned(thread_id: str, payload: ThreadPinnedInput, db: Session = 
 
 
 @router.post("/api/threads/{thread_id}/block")
-def set_thread_blocked(thread_id: str, payload: ThreadBlockedInput, db: Session = Depends(get_db)):
-    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+def set_thread_blocked(thread_id: str, payload: ThreadBlockedInput, db: Session = Depends(get_db), request: Request = None):
+    thread = _visible_thread(db, thread_id, request)
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
     customer_phone = canonical_phone_number(thread.customer_phone)
@@ -150,7 +165,8 @@ def get_threads(
     filterStatus: Optional[str] = Query(None),
     filterPriority: Optional[str] = Query(None),
     onlyUnread: Optional[bool] = Query(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    request: Request = None,
 ):
     query = db.query(Thread).outerjoin(
         BlockedContact,
@@ -160,6 +176,7 @@ def get_threads(
         ),
     ).add_columns(BlockedContact.id.label("blocked_contact_id"))
     
+    query = _scope_threads(query, request)
     if filterStatus:
         query = query.filter(Thread.state == filterStatus)
     if filterPriority:
@@ -288,21 +305,24 @@ def get_threads(
 
 
 @router.post("/api/threads/catch-up")
-def catch_up_missed_messages(db: Session = Depends(get_db)):
+def catch_up_missed_messages(db: Session = Depends(get_db), request: Request = None):
     """Send one safe AI reply for the oldest unanswered recent conversation."""
     auto_reply_enabled = _dyn("AUTO_REPLY_GLOBAL_ENABLED", AUTO_REPLY_GLOBAL_ENABLED)
     if not auto_reply_enabled:
         raise HTTPException(status_code=409, detail="Turn AI on before catching up missed messages.")
 
-    find_candidate = _dyn("find_oldest_catch_up_candidate", find_oldest_catch_up_candidate)
-    candidate = find_candidate(db)
+    list_candidates = _dyn("list_catch_up_candidates", list_catch_up_candidates)
+    account_keys = allowed_sms_accounts(request)
+    candidates = list_candidates(db)
+    if account_keys is not None:
+        candidates = [item for item in candidates if item[0].sms_account_key in account_keys]
+    candidate = candidates[0] if candidates else None
     if not candidate:
         return {"processed": False, "outcome": "complete", "remaining": 0}
 
     thread, customer_message = candidate
     thread_id = thread.id
     sms_reply_fn = _dyn("run_sms_reply_logic", run_sms_reply_logic)
-    list_candidates = _dyn("list_catch_up_candidates", list_catch_up_candidates)
     try:
         sms_reply_fn(
             db,
@@ -347,7 +367,7 @@ def catch_up_missed_messages(db: Session = Depends(get_db)):
             "processed": True,
             "threadId": thread_id,
             "outcome": "information-request",
-            "remaining": len(list_candidates(db)),
+            "remaining": len([item for item in list_candidates(db) if account_keys is None or item[0].sms_account_key in account_keys]),
         }
 
     latest = db.query(Message).filter(Message.thread_id == thread_id).order_by(
@@ -358,13 +378,13 @@ def catch_up_missed_messages(db: Session = Depends(get_db)):
         "processed": True,
         "threadId": thread_id,
         "outcome": outcome,
-        "remaining": len(list_candidates(db)),
+        "remaining": len([item for item in list_candidates(db) if account_keys is None or item[0].sms_account_key in account_keys]),
     }
 
 
 @router.get("/api/threads/{thread_id}")
-def get_thread_detail(thread_id: str, db: Session = Depends(get_db)):
-    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+def get_thread_detail(thread_id: str, db: Session = Depends(get_db), request: Request = None):
+    thread = _visible_thread(db, thread_id, request)
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
         
@@ -454,9 +474,9 @@ def get_thread_detail(thread_id: str, db: Session = Depends(get_db)):
 
 
 @router.delete("/api/threads/{thread_id}/review-flags")
-def clear_thread_review_flags(thread_id: str, db: Session = Depends(get_db)):
+def clear_thread_review_flags(thread_id: str, db: Session = Depends(get_db), request: Request = None):
     """Acknowledge review on only the selected account-owned conversation."""
-    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+    thread = _visible_thread(db, thread_id, request)
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
 
@@ -480,8 +500,8 @@ def clear_thread_review_flags(thread_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/api/threads/{thread_id}/takeover")
-def takeover_thread(thread_id: str, payload: TakeoverInput, db: Session = Depends(get_db)):
-    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+def takeover_thread(thread_id: str, payload: TakeoverInput, db: Session = Depends(get_db), request: Request = None):
+    thread = _visible_thread(db, thread_id, request)
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
         
@@ -505,12 +525,12 @@ def takeover_thread(thread_id: str, payload: TakeoverInput, db: Session = Depend
 
 
 @router.post("/api/threads/{thread_id}/reply")
-def reply_thread(thread_id: str, payload: ReplyInput, db: Session = Depends(get_db)):
+def reply_thread(thread_id: str, payload: ReplyInput, db: Session = Depends(get_db), request: Request = None):
     # Serialise manual gateway dispatches. This closes the race where a frozen
     # browser queues several POSTs before any one request commits its message.
     with OUTBOUND_SMS_SEND_LOCK:
         db.expire_all()
-        thread = db.query(Thread).filter(Thread.id == thread_id).first()
+        thread = _visible_thread(db, thread_id, request)
         if not thread:
             raise HTTPException(status_code=404, detail="Thread not found")
 
@@ -593,8 +613,9 @@ def respond_to_information_request(
     thread_id: str,
     payload: InformationRequestResponseInput,
     db: Session = Depends(get_db),
+    request: Request = None,
 ):
-    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+    thread = _visible_thread(db, thread_id, request)
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found.")
     if thread.state != "needs-review":
@@ -703,8 +724,8 @@ def respond_to_information_request(
 
 
 @router.post("/api/threads/{thread_id}/notes")
-def add_thread_note(thread_id: str, payload: NoteInput, db: Session = Depends(get_db)):
-    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+def add_thread_note(thread_id: str, payload: NoteInput, db: Session = Depends(get_db), request: Request = None):
+    thread = _visible_thread(db, thread_id, request)
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
         
@@ -729,8 +750,8 @@ def add_thread_note(thread_id: str, payload: NoteInput, db: Session = Depends(ge
 
 
 @router.post("/api/threads/{thread_id}/escalate")
-def escalate_thread(thread_id: str, payload: EscalateInput, db: Session = Depends(get_db)):
-    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+def escalate_thread(thread_id: str, payload: EscalateInput, db: Session = Depends(get_db), request: Request = None):
+    thread = _visible_thread(db, thread_id, request)
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
         
@@ -752,8 +773,8 @@ def escalate_thread(thread_id: str, payload: EscalateInput, db: Session = Depend
 
 
 @router.post("/api/threads/{thread_id}/resolve")
-def resolve_thread(thread_id: str, payload: ResolveInput, db: Session = Depends(get_db)):
-    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+def resolve_thread(thread_id: str, payload: ResolveInput, db: Session = Depends(get_db), request: Request = None):
+    thread = _visible_thread(db, thread_id, request)
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
         

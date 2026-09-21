@@ -25,6 +25,8 @@ try:
         AUTH_PASSWORD,
         AUTH_SESSION_MAX_AGE,
         AUTH_USERNAME,
+        FULL_ACCESS_PASSWORD,
+        FULL_ACCESS_USERNAME,
         PORTAL_SPA_PATHS,
         PUBLIC_EXACT_PATHS,
     )
@@ -35,6 +37,8 @@ except ImportError:
         AUTH_PASSWORD,
         AUTH_SESSION_MAX_AGE,
         AUTH_USERNAME,
+        FULL_ACCESS_PASSWORD,
+        FULL_ACCESS_USERNAME,
         PORTAL_SPA_PATHS,
         PUBLIC_EXACT_PATHS,
     )
@@ -51,47 +55,88 @@ def _dyn(name: str, fallback: Any = None) -> Any:
     return fallback
 
 
-def _valid_admin_credentials(username: str, password: str) -> bool:
+def _configured_accounts() -> tuple[tuple[str, str, Optional[tuple[str, ...]]], ...]:
     auth_password = _dyn("AUTH_PASSWORD", AUTH_PASSWORD)
     auth_username = _dyn("AUTH_USERNAME", AUTH_USERNAME)
-    return bool(
-        auth_password
-        and hmac.compare_digest(username, auth_username)
-        and hmac.compare_digest(password, auth_password)
+    full_access_username = _dyn("FULL_ACCESS_USERNAME", FULL_ACCESS_USERNAME)
+    full_access_password = _dyn("FULL_ACCESS_PASSWORD", FULL_ACCESS_PASSWORD)
+    accounts = []
+    if auth_password:
+        accounts.append((auth_username, auth_password, ("primary",)))
+    if full_access_password and full_access_username != auth_username:
+        accounts.append((full_access_username, full_access_password, None))
+    return tuple(accounts)
+
+
+def authentication_enabled() -> bool:
+    return bool(_configured_accounts())
+
+
+def _account_for_username(username: str) -> Optional[tuple[str, str, Optional[tuple[str, ...]]]]:
+    return next(
+        (account for account in _configured_accounts() if hmac.compare_digest(username, account[0])),
+        None,
     )
 
 
-def _admin_session_token(expires_at: int) -> str:
-    auth_password = _dyn("AUTH_PASSWORD", AUTH_PASSWORD)
+def _valid_admin_credentials(username: str, password: str) -> bool:
+    account = _account_for_username(username)
+    return bool(account and hmac.compare_digest(password, account[1]))
+
+
+def _admin_session_token(expires_at: int, username: Optional[str] = None) -> str:
     auth_username = _dyn("AUTH_USERNAME", AUTH_USERNAME)
-    payload = f"{auth_username}:{expires_at}"
+    account = _account_for_username(username or auth_username)
+    if not account:
+        raise ValueError("Cannot create a session for an unconfigured account.")
+    account_username, account_password, _allowed_accounts = account
+    payload = f"{account_username}:{expires_at}"
     signature = hmac.new(
-        auth_password.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+        account_password.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
     ).hexdigest()
     return base64.urlsafe_b64encode(f"{payload}:{signature}".encode("utf-8")).decode("ascii")
 
 
-def _valid_admin_session(token: str) -> bool:
-    auth_password = _dyn("AUTH_PASSWORD", AUTH_PASSWORD)
-    auth_username = _dyn("AUTH_USERNAME", AUTH_USERNAME)
-    if not auth_password or not token:
-        return False
+def _session_account(token: str) -> Optional[tuple[str, str, Optional[tuple[str, ...]]]]:
+    if not token:
+        return None
     try:
         decoded = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
         username, expires_text, signature = decoded.split(":", 2)
         expires_at = int(expires_text)
     except (ValueError, UnicodeDecodeError):
-        return False
+        return None
     if expires_at <= int(datetime.now(timezone.utc).timestamp()):
-        return False
+        return None
+    account = _account_for_username(username)
+    if not account:
+        return None
     payload = f"{username}:{expires_at}"
     expected = hmac.new(
-        auth_password.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+        account[1].encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
     ).hexdigest()
-    return hmac.compare_digest(username, auth_username) and hmac.compare_digest(signature, expected)
+    return account if hmac.compare_digest(signature, expected) else None
 
 
-def _set_admin_session_cookie(response: Response, request: Request) -> None:
+def _valid_admin_session(token: str) -> bool:
+    return _session_account(token) is not None
+
+
+def allowed_sms_accounts(request: Optional[Request]) -> Optional[tuple[str, ...]]:
+    """Return visible SMS lines; ``None`` means the full-access account.
+
+    Route unit tests may call handlers without an HTTP request. Those internal
+    calls retain their historical unrestricted behaviour; browser/API requests
+    always carry the signed session inspected here.
+    """
+    if request is None:
+        return None
+    cookie_name = _dyn("AUTH_COOKIE_NAME", AUTH_COOKIE_NAME)
+    account = _session_account(request.cookies.get(cookie_name, ""))
+    return account[2] if account else ()
+
+
+def _set_admin_session_cookie(response: Response, request: Request, username: Optional[str] = None) -> None:
     forwarded_proto = request.headers.get("x-forwarded-proto", "")
     secure = request.url.scheme == "https" or forwarded_proto.lower() == "https"
     max_age = _dyn("AUTH_SESSION_MAX_AGE", AUTH_SESSION_MAX_AGE)
@@ -99,7 +144,7 @@ def _set_admin_session_cookie(response: Response, request: Request) -> None:
     expires_at = int(datetime.now(timezone.utc).timestamp()) + max_age
     response.set_cookie(
         cookie_name,
-        _admin_session_token(expires_at),
+        _admin_session_token(expires_at, username),
         max_age=max_age,
         httponly=True,
         secure=secure,
@@ -182,6 +227,8 @@ __all__ = [
     "_valid_admin_credentials",
     "_admin_session_token",
     "_valid_admin_session",
+    "allowed_sms_accounts",
+    "authentication_enabled",
     "_set_admin_session_cookie",
     "is_public_request",
     "build_authority_context",

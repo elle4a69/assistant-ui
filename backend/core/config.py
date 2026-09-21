@@ -125,6 +125,11 @@ DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DB_FILE}")
 
 AUTH_USERNAME = os.getenv("APP_USERNAME", "admin")
 AUTH_PASSWORD = os.getenv("APP_PASSWORD", "")
+# The existing account deliberately remains the least-privileged operator: it
+# can work Line 1 only.  A separate full-access account is configured through
+# deployment secrets, never checked into source control.
+FULL_ACCESS_USERNAME = os.getenv("APP_FULL_ACCESS_USERNAME", "2lines")
+FULL_ACCESS_PASSWORD = os.getenv("APP_FULL_ACCESS_PASSWORD", "")
 AUTH_COOKIE_NAME = "assistant_ui_admin_session"
 AUTH_SESSION_MAX_AGE = 60 * 60 * 24 * 365
 

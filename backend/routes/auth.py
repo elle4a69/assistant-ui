@@ -5,20 +5,22 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request, Response
 
 try:
-    from backend.core.config import AUTH_PASSWORD, AUTH_COOKIE_NAME
+    from backend.core.config import AUTH_COOKIE_NAME
     from backend.schemas.domain import AdminLoginInput
     from backend.services.auth_service import (
         _set_admin_session_cookie,
         _valid_admin_credentials,
         _valid_admin_session,
+        authentication_enabled,
     )
 except ImportError:
-    from core.config import AUTH_PASSWORD, AUTH_COOKIE_NAME
+    from core.config import AUTH_COOKIE_NAME
     from schemas.domain import AdminLoginInput
     from services.auth_service import (
         _set_admin_session_cookie,
         _valid_admin_credentials,
         _valid_admin_session,
+        authentication_enabled,
     )
 
 router = APIRouter()
@@ -31,7 +33,7 @@ def health_check():
 
 @router.get("/api/auth/status")
 def admin_auth_status(request: Request):
-    if not AUTH_PASSWORD:
+    if not authentication_enabled():
         return {"authenticated": True}
     return {"authenticated": _valid_admin_session(request.cookies.get(AUTH_COOKIE_NAME, ""))}
 
@@ -40,7 +42,7 @@ def admin_auth_status(request: Request):
 def admin_auth_login(payload: AdminLoginInput, request: Request, response: Response):
     if not _valid_admin_credentials(payload.username, payload.password):
         raise HTTPException(status_code=401, detail="Incorrect username or password.")
-    _set_admin_session_cookie(response, request)
+    _set_admin_session_cookie(response, request, payload.username)
     return {"authenticated": True}
 
 
