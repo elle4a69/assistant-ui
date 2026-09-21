@@ -30,7 +30,7 @@ try:
         send_arrival_clear_notifications,
         send_arrival_push_notifications,
     )
-    from backend.services.auth_service import _valid_admin_session, allowed_sms_accounts
+    from backend.services.auth_service import _valid_admin_session
     from backend.core.config import AUTH_COOKIE_NAME
 except ImportError:
     from core.database import get_db
@@ -52,19 +52,11 @@ except ImportError:
         send_arrival_clear_notifications,
         send_arrival_push_notifications,
     )
-    from services.auth_service import _valid_admin_session, allowed_sms_accounts
+    from services.auth_service import _valid_admin_session
     from core.config import AUTH_COOKIE_NAME
     from core.config import AUTH_COOKIE_NAME
 
 router = APIRouter()
-
-
-def _visible_arrival_session(db: Session, session_id: str, request: Optional[Request]) -> Optional[ArrivalSession]:
-    query = db.query(ArrivalSession).filter(ArrivalSession.id == session_id)
-    account_keys = allowed_sms_accounts(request)
-    if account_keys is not None:
-        query = query.filter(ArrivalSession.sms_account_key.in_(account_keys))
-    return query.first()
 
 @router.post("/api/arrival/admin/bookings/{booking_id}/invite")
 def create_arrival_invite(
@@ -255,7 +247,7 @@ def send_client_arrival_message(
 
 
 @router.get("/api/arrival/admin/sessions")
-def list_arrival_sessions(db: Session = Depends(get_db), request: Request = None):
+def list_arrival_sessions(db: Session = Depends(get_db)):
     now = datetime.utcnow()
     db.query(ArrivalSession).filter(
         ArrivalSession.expires_at <= now,
@@ -265,25 +257,21 @@ def list_arrival_sessions(db: Session = Depends(get_db), request: Request = None
         ArrivalSession.next_alert_at: None,
     }, synchronize_session=False)
     db.commit()
-    sessions_query = db.query(ArrivalSession)
-    account_keys = allowed_sms_accounts(request)
-    if account_keys is not None:
-        sessions_query = sessions_query.filter(ArrivalSession.sms_account_key.in_(account_keys))
-    sessions = sessions_query.order_by(ArrivalSession.last_activity_at.desc()).limit(100).all()
+    sessions = db.query(ArrivalSession).order_by(ArrivalSession.last_activity_at.desc()).limit(100).all()
     return [_arrival_payload(db, session, include_messages=False) for session in sessions]
 
 
 @router.get("/api/arrival/admin/sessions/{session_id}")
-def get_admin_arrival_session(session_id: str, db: Session = Depends(get_db), request: Request = None):
-    session = _visible_arrival_session(db, session_id, request)
+def get_admin_arrival_session(session_id: str, db: Session = Depends(get_db)):
+    session = db.query(ArrivalSession).filter(ArrivalSession.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Arrival session not found.")
     return _arrival_payload(db, session)
 
 
 @router.post("/api/arrival/admin/sessions/{session_id}/messages")
-def send_admin_arrival_message(session_id: str, payload: ArrivalMessageInput, db: Session = Depends(get_db), request: Request = None):
-    session = _visible_arrival_session(db, session_id, request)
+def send_admin_arrival_message(session_id: str, payload: ArrivalMessageInput, db: Session = Depends(get_db)):
+    session = db.query(ArrivalSession).filter(ArrivalSession.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Arrival session not found.")
     if session.status != "active" or session.expires_at <= datetime.utcnow():
@@ -298,8 +286,8 @@ def send_admin_arrival_message(session_id: str, payload: ArrivalMessageInput, db
 
 
 @router.post("/api/arrival/admin/sessions/{session_id}/close")
-def close_arrival_session(session_id: str, db: Session = Depends(get_db), request: Request = None):
-    session = _visible_arrival_session(db, session_id, request)
+def close_arrival_session(session_id: str, db: Session = Depends(get_db)):
+    session = db.query(ArrivalSession).filter(ArrivalSession.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Arrival session not found.")
     if session.status not in {"closed", "expired"}:
@@ -317,14 +305,9 @@ def acknowledge_thread_arrival(
     session_id: str,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    request: Request = None,
 ):
     """Stop one arrival alert only when its exact account-scoped conversation is opened."""
-    thread_query = db.query(Thread).filter(Thread.id == thread_id)
-    account_keys = allowed_sms_accounts(request)
-    if account_keys is not None:
-        thread_query = thread_query.filter(Thread.sms_account_key.in_(account_keys))
-    thread = thread_query.first()
+    thread = db.query(Thread).filter(Thread.id == thread_id).first()
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
     session = db.query(ArrivalSession).filter(ArrivalSession.id == session_id).first()
