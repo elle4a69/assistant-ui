@@ -93,6 +93,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const [quickToolsOpen, setQuickToolsOpen] = useState(false)
   const [error, setError] = useState('')
   const touchStartX = useRef<number | null>(null)
+  const touchStartY = useRef<number | null>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const sendingRef = useRef(false)
   const reviewingDraftRef = useRef<string | null>(null)
@@ -543,14 +544,23 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   }
 
   const onTouchStart = (event: TouchEvent) => {
-    touchStartX.current = event.changedTouches[0]?.clientX ?? null
+    const touch = event.changedTouches[0]
+    touchStartX.current = touch?.clientX ?? null
+    touchStartY.current = touch?.clientY ?? null
   }
 
   const onTouchEnd = (event: TouchEvent) => {
-    if (touchStartX.current === null) return
-    const distance = (event.changedTouches[0]?.clientX ?? 0) - touchStartX.current
+    if (touchStartX.current === null || touchStartY.current === null) return
+    const touch = event.changedTouches[0]
+    const distanceX = (touch?.clientX ?? 0) - touchStartX.current
+    const distanceY = (touch?.clientY ?? 0) - touchStartY.current
     touchStartX.current = null
-    if (distance > 80) setSelectedId(null)
+    touchStartY.current = null
+    // Vertical scrolling can have horizontal drift on touch devices. Only
+    // treat the gesture as Back when it is clearly a horizontal swipe.
+    if (distanceX > 80 && Math.abs(distanceX) > Math.abs(distanceY) * 1.5) {
+      setSelectedId(null)
+    }
   }
 
   return (
