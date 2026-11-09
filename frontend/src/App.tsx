@@ -427,7 +427,7 @@ function PortalApp({ onLogout }: { onLogout: () => void }) {
             <div className="space-y-2 px-6 py-5 text-slate-800">
               <p className="text-lg font-black">{customerArrivalAlert.booking.summary || 'Customer booking'}</p>
               {customerArrivalAlert.booking.customerPhone && <p className="text-sm text-slate-500">{customerArrivalAlert.booking.customerPhone}</p>}
-              <p className="text-xs font-black uppercase tracking-wide text-indigo-600">{customerArrivalAlert.smsAccountKey === 'secondary' ? 'Anonymous · Line 2' : 'Tori · Line 1'}</p>
+              <p className="text-xs font-black uppercase tracking-wide text-indigo-600">Tori · SMS</p>
               <p className="text-sm font-bold text-emerald-700">The customer has activated their arrival link.</p>
             </div>
             <div className="grid grid-cols-2 gap-3 px-5 pb-5">

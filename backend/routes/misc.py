@@ -30,8 +30,8 @@ try:
         PushSubscription, ArrivalSession, Thread, Message, ThreadEvent,
     )
     from backend.schemas.domain import (
-        PushSubscriptionInput, DraftUpdateInput, QARuleItem,
-        ServicesListInput, LocantoMessagePayload,
+        PushSubscriptionInput, DraftUpdateInput, MessageCorrectionInput, QARuleItem,
+        ServicesListInput, ServiceAddonsInput, LocantoMessagePayload,
     )
     from backend.knowledge import (
         is_style_examples_enabled,
@@ -64,7 +64,7 @@ try:
         build_broad_availability_guidance,
     )
     from backend.services.knowledge_service import match_qa_rule
-    from backend.services.learning_service import save_edited_draft_learning
+    from backend.services.learning_service import curate_message_learning, save_ai_response_correction_learning, save_edited_draft_learning
 except ImportError:
     from core.config import (
         BASE_DIR, DATA_DIR, STYLE_PROFILE_STORE, PROMPTS_DIR, FIRST_CONTACT_ACCOUNT_KEYS,
@@ -79,8 +79,8 @@ except ImportError:
         PushSubscription, ArrivalSession, Thread, Message, ThreadEvent,
     )
     from schemas.domain import (
-        PushSubscriptionInput, DraftUpdateInput, QARuleItem,
-        ServicesListInput, LocantoMessagePayload,
+        PushSubscriptionInput, DraftUpdateInput, MessageCorrectionInput, QARuleItem,
+        ServicesListInput, ServiceAddonsInput, LocantoMessagePayload,
     )
     from knowledge import (
         is_style_examples_enabled,
@@ -113,7 +113,7 @@ except ImportError:
         build_broad_availability_guidance,
     )
     from services.knowledge_service import match_qa_rule
-    from services.learning_service import save_edited_draft_learning
+    from services.learning_service import curate_message_learning, save_ai_response_correction_learning, save_edited_draft_learning
 
 router = APIRouter()
 
@@ -267,29 +267,34 @@ def approve_draft_message(message_id: str, db: Session = Depends(get_db)):
         )
         db.add(approval_event)
         learning_saved = False
-        if was_edited:
-            try:
-                learning = save_edited_draft_learning(db, thread, msg)
-                if learning:
-                    db.add(ThreadEvent(
-                        id=str(uuid.uuid4()),
-                        thread_id=thread.id,
-                        type="approved-draft-learning-saved",
-                        agent_id="manual-approval",
-                        meta=json.dumps({
-                            "message_id": message_id,
-                            "learning_id": learning["id"],
-                            "retrieval_enabled": bool(learning.get("retrieval_enabled")),
-                            "category": learning.get("category"),
-                        }),
-                        at=datetime.utcnow(),
-                    ))
-                    learning_saved = True
-            except Exception as exc:
-                # Learning must never prevent a staff-approved reply from sending.
-                print(f"Edited draft learning was not saved: {exc}")
+        learning_curation = "queued"
+        try:
+            # A real user's approval is a useful positive signal even when the
+            # wording was left unchanged.  The curator, not the operator,
+            # decides whether that signal is safe to reuse.
+            learning = save_edited_draft_learning(db, thread, msg, was_edited=was_edited)
+            if learning:
+                curation = curate_message_learning(learning["id"])
+                learning_curation = str(curation.get("status") or "queued")
+                db.add(ThreadEvent(
+                    id=str(uuid.uuid4()),
+                    thread_id=thread.id,
+                    type="approved-draft-learning-saved",
+                    agent_id="manual-approval",
+                    meta=json.dumps({
+                        "message_id": message_id,
+                        "learning_id": learning["id"],
+                        "curation_status": learning_curation,
+                        "was_edited": was_edited,
+                    }),
+                    at=datetime.utcnow(),
+                ))
+                learning_saved = True
+        except Exception as exc:
+            # Learning must never prevent a staff-approved reply from sending.
+            print(f"Approved draft learning was not saved: {exc}")
         db.commit()
-        return {"status": "success", "duplicate": False, "learningSaved": learning_saved}
+        return {"status": "success", "duplicate": False, "learningSaved": learning_saved, "learningCuration": learning_curation}
 
 
 @router.patch("/api/messages/{message_id}/draft")
@@ -320,6 +325,102 @@ def update_draft_message(
     ))
     db.commit()
     return {"status": "success", "message": {"id": msg.id, "text": msg.text}}
+
+
+@router.post("/api/messages/{message_id}/corrections")
+def create_message_correction(
+    message_id: str,
+    payload: MessageCorrectionInput,
+    db: Session = Depends(get_db),
+):
+    """Queue feedback and create an unsent customer-facing correction draft."""
+    message = db.query(Message).filter(Message.id == message_id).first()
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found.")
+    if message.role not in {"system", "draft"}:
+        raise HTTPException(status_code=400, detail="Only AI replies can be corrected.")
+    thread = db.query(Thread).filter(Thread.id == message.thread_id).first()
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found.")
+    try:
+        suggested_reply = (payload.suggested_reply or "").strip()
+        if suggested_reply:
+            correction_draft_text = sanitize_outgoing_urls(suggested_reply)
+        else:
+            client = _dyn("openai_client", openai_client)
+            if not client:
+                raise HTTPException(status_code=503, detail="The AI is unavailable, so a correction draft could not be created.")
+            customer_message = db.query(Message).filter(
+                Message.thread_id == thread.id,
+                Message.role == "customer",
+                Message.at <= message.at,
+            ).order_by(Message.at.desc(), Message.id.desc()).first()
+            customer_context = customer_message.text.strip() if customer_message else "No earlier customer message is available."
+            draft_prompt = (
+                "Draft one concise SMS correction to the customer. Output only the SMS text. "
+                "Use the owner's correction as the authority. Correct the earlier AI reply without "
+                "inventing facts, prices, availability, links, booking times, or promises. Apologise only "
+                "when it helps. Do not mention internal systems, review queues, or that an AI made the error.\n\n"
+                f"Customer context: {customer_context}\n"
+                f"Earlier reply to correct: {message.text.strip()}\n"
+                f"Owner correction: {payload.correction}"
+            )
+            response = client.responses.create(
+                model="gpt-5.6-terra",
+                instructions="You write safe, customer-ready SMS corrections for a service business.",
+                input=draft_prompt,
+                store=False,
+            )
+            correction_draft_text = sanitize_outgoing_urls(response.output_text or "")
+        if not correction_draft_text:
+            raise HTTPException(status_code=502, detail="The AI could not produce a correction draft.")
+        if len(correction_draft_text) > 1600:
+            raise HTTPException(status_code=502, detail="The correction draft was too long. Please try a more specific report.")
+        learning = save_ai_response_correction_learning(
+            db, thread, message, payload.correction, payload.suggested_reply,
+        )
+        try:
+            learning_curation = curate_message_learning(learning["id"])
+        except Exception as exc:
+            print(f"Message-correction learning curator deferred: {type(exc).__name__}")
+            learning_curation = {"status": "queued", "retrievalEnabled": False}
+        draft_message = Message(
+            id=str(uuid.uuid4()),
+            thread_id=thread.id,
+            role="draft",
+            text=correction_draft_text,
+            at=datetime.utcnow(),
+        )
+        db.add(draft_message)
+        thread.state = "needs-review"
+        db.add(ThreadEvent(
+            id=str(uuid.uuid4()),
+            thread_id=thread.id,
+            type="ai-response-correction-queued",
+            agent_id="message-correction",
+            meta=json.dumps({
+                "message_id": message.id,
+                "learning_id": learning["id"],
+                "draft_message_id": draft_message.id,
+                "correction": payload.correction,
+                "has_suggested_reply": bool(payload.suggested_reply),
+                "curation_status": learning_curation.get("status"),
+            }),
+            at=datetime.utcnow(),
+        ))
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="The correction could not be queued for review.") from exc
+    return {
+        "status": "queued",
+        "learningId": learning["id"],
+        "reviewStatus": learning_curation.get("status"),
+        "draftMessageId": draft_message.id,
+    }
 
 
 @router.post("/api/messages/{message_id}/discard")
@@ -434,8 +535,12 @@ def clear_review_only_threads(db: Session = Depends(get_db)):
 
 
 @router.get("/api/services")
-def get_services():
-    return load_all_line_services()
+def get_services(active_only: bool = False):
+    services = load_all_line_services()
+    # Legacy catalogue entries predate this field and remain available by default.
+    if active_only:
+        services = [service for service in services if service.get("isActive", True) is not False]
+    return services
 
 
 @router.post("/api/services")
@@ -443,20 +548,68 @@ def save_services(payload: ServicesListInput):
     try:
         data_dir = _dyn("DATA_DIR", DATA_DIR)
         path_fn = _dyn("_line_services_path", _line_services_path)
-        grouped = {key: [] for key in FIRST_CONTACT_ACCOUNT_KEYS}
-        for item in payload.services:
-            service = item.model_dump()
-            grouped[service["lineKey"]].append(service)
         os.makedirs(data_dir, exist_ok=True)
-        for key, services in grouped.items():
-            path = path_fn(key)
-            temporary = f"{path}.tmp"
-            with open(temporary, "w", encoding="utf-8") as handle:
-                json.dump(services, handle, indent=2)
-            os.replace(temporary, path)
+        # Services are now one shared SMS catalogue.  Older lineKey values are
+        # deliberately not accepted or persisted.
+        path = path_fn("primary")
+        temporary = f"{path}.tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump([item.model_dump() for item in payload.services], handle, indent=2)
+        os.replace(temporary, path)
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save services: {e}")
+
+
+def _service_addons_path() -> str:
+    return os.path.join(_dyn("DATA_DIR", DATA_DIR), "service_addons.json")
+
+
+def _load_service_addons() -> List[Dict[str, Any]]:
+    """Read the existing add-on catalogue and upgrade its old duration label in memory."""
+    try:
+        with open(_service_addons_path(), "r", encoding="utf-8") as handle:
+            raw_items = json.load(handle)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(raw_items, list):
+        return []
+    addons: List[Dict[str, Any]] = []
+    for item in raw_items:
+        if not isinstance(item, dict) or not str(item.get("id") or "").strip():
+            continue
+        try:
+            addons.append({
+                "id": str(item["id"]),
+                "name": str(item.get("name") or "").strip(),
+                "description": str(item.get("description") or "").strip(),
+                "price": max(0, int(item.get("price") or 0)),
+                "extraTime": max(0, int(item.get("extraTime", item.get("duration", 0)) or 0)),
+                "serviceIds": list(dict.fromkeys(str(value).strip() for value in item.get("serviceIds", []) if str(value).strip())),
+            })
+        except (TypeError, ValueError):
+            continue
+    return addons
+
+
+@router.get("/api/service-addons")
+def get_service_addons():
+    return _load_service_addons()
+
+
+@router.post("/api/service-addons")
+def save_service_addons(payload: ServiceAddonsInput):
+    try:
+        path = _service_addons_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        temporary = f"{path}.tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump([item.model_dump() for item in payload.addons], handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(temporary, path)
+        return {"status": "success"}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to save service add-ons: {exc}") from exc
 
 
 @router.post("/api/locanto/sync")
@@ -716,6 +869,7 @@ __all__ = [
     "save_qa_rules",
     "approve_draft_message",
     "update_draft_message",
+    "create_message_correction",
     "discard_draft_message",
     "clear_pending_draft_messages",
     "clear_review_only_threads",

@@ -17,7 +17,7 @@ import {
   Service,
 } from './api'
 
-type AccountKey = 'primary' | 'secondary'
+type AccountKey = 'primary'
 type SheetView = 'tools' | 'edit' | 'calendar'
 
 const DEFAULT_REPLIES: QuickReply[] = [
@@ -88,10 +88,7 @@ export default function QuickToolsSheet({ open, accountKey, onClose, onInsert }:
   const pressTimerRef = useRef<number | null>(null)
   const longPressedIndexRef = useRef<number | null>(null)
 
-  const lineServices = useMemo(
-    () => services.filter(service => !service.lineKey || service.lineKey === accountKey),
-    [accountKey, services],
-  )
+  const lineServices = useMemo(() => services, [services])
   const selectedService = lineServices.find(service => service.id === selectedServiceId) ?? null
   const availabilityGroups = useMemo(() => groupAvailability(availability), [availability])
 
@@ -202,13 +199,13 @@ export default function QuickToolsSheet({ open, accountKey, onClose, onInsert }:
     setError('')
     setCalendarLoading(true)
     try {
-      const loadedServices = await getServices()
-      const availableServices = loadedServices.filter(service => !service.lineKey || service.lineKey === accountKey)
+      const loadedServices = await getServices({ activeOnly: true })
+      const availableServices = loadedServices
       setServices(loadedServices)
       setSelectedServiceId(current => (
         availableServices.some(service => service.id === current) ? current : availableServices[0]?.id ?? ''
       ))
-      if (availableServices.length === 0) setError('No services are configured for this SMS line.')
+      if (availableServices.length === 0) setError('No services are configured.')
     } catch {
       setError('Services could not be loaded for the availability view.')
     } finally {
@@ -246,7 +243,7 @@ export default function QuickToolsSheet({ open, accountKey, onClose, onInsert }:
           )}
           <div className="min-w-0 flex-1">
             <p className="text-[10px] font-black uppercase tracking-[0.18em] text-indigo-600">
-              {accountKey === 'secondary' ? 'SMS line 2' : 'SMS line 1'}
+              SMS
             </p>
             <h2 id="quick-tools-title" className="truncate text-lg font-black tracking-tight text-slate-900">{title}</h2>
           </div>

@@ -128,8 +128,11 @@ INTERNAL_INSTRUCTION_REPLY_PATTERNS = (
 # Account Keys, Labels & Formats
 # ===========================================================================
 
-FIRST_CONTACT_ACCOUNT_KEYS = ("primary", "secondary")
-CONVERSATIONAL_AI_ACCOUNT_KEYS = frozenset(FIRST_CONTACT_ACCOUNT_KEYS)
+# The application has one customer-facing SMS identity.  `primary` remains the
+# durable database value so existing records and integrations keep working.
+SMS_ACCOUNT_KEY = "primary"
+FIRST_CONTACT_ACCOUNT_KEYS = (SMS_ACCOUNT_KEY,)
+CONVERSATIONAL_AI_ACCOUNT_KEYS = frozenset({SMS_ACCOUNT_KEY})
 
 FIRST_CONTACT_AUTORESPONDER_DEFAULT = {
     "enabled": False,
@@ -138,7 +141,7 @@ FIRST_CONTACT_AUTORESPONDER_DEFAULT = {
     "message": "",
 }
 
-QUICK_REPLY_ACCOUNT_KEYS = ("primary", "secondary")
+QUICK_REPLY_ACCOUNT_KEYS = (SMS_ACCOUNT_KEY,)
 QUICK_REPLY_DEFAULT_LABELS = ("ADDR", "LINK", "INFO", "TEXT 4", "TEXT 5")
 
 MESSAGE_EXPORT_COLUMNS = (
@@ -150,24 +153,14 @@ MESSAGE_EXPORT_COLUMNS = (
     "contact_reference",
 )
 
-LINE_SERVICE_FILENAMES = {
-    "primary": "line_1_services.json",
-    "secondary": "line_2_services.json",
-}
+LINE_SERVICE_FILENAMES = {SMS_ACCOUNT_KEY: "services.json"}
 
 LINE_PROFILE_DEFAULTS = {
-    "primary": {
-        "displayName": "Line 1",
+    SMS_ACCOUNT_KEY: {
+        "displayName": "SMS",
         "providerName": "Tori",
         "informationUrl": "",
-        "userPrompt": "",
-        "timezone": "Australia/Hobart",
-    },
-    "secondary": {
-        "displayName": "Line 2",
-        "providerName": "Anonymous",
-        "informationUrl": "",
-        "userPrompt": "",
+        "autoReplyEnabled": True,
         "timezone": "Australia/Hobart",
     },
 }
@@ -262,6 +255,13 @@ BUSINESS_VARIABLE_DEFAULTS = [
         "description": "Direct link to online booking page",
         "required": False,
     },
+    {
+        "key": "service_addons",
+        "label": "Service add-ons",
+        "value": "",
+        "description": "Current add-ons from Services settings (system-managed)",
+        "required": False,
+    },
 ]
 
 
@@ -321,6 +321,7 @@ AGENT_CONSOLE_TERMINAL_STATUSES = {
 
 AGENT_CONSOLE_ALLOWED_TOOLS = frozenset({
     "cancel_coding_task",
+    "clear_thread_review_tags",
     "diagnose_message_handling",
     "execute_booking_recovery",
     "execute_code_deployment",

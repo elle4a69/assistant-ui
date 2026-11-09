@@ -1,10 +1,13 @@
 import { FormEvent, KeyboardEvent, ReactNode, useEffect, useRef, useState } from 'react';
-import { Bot, CornerDownLeft, Mic, PhoneOff, RefreshCw, Send, ShieldCheck, UserRound, Volume2 } from 'lucide-react';
+import { Bot, CornerDownLeft, Mic, PhoneOff, RefreshCw, Rocket, Send, ShieldCheck, TicketCheck, UserRound, Volume2 } from 'lucide-react';
 import {
+  approveSupportTicketDeployment,
   getKnowledgeCuratorState,
   getOperationsChatMessages,
+  getSupportTickets,
   OperationsChatMessage,
   sendOperationsChatMessage,
+  SupportTicket,
 } from './api';
 import { useOperationsRealtimeVoice } from './useOperationsRealtimeVoice';
 
@@ -26,17 +29,20 @@ export default function OperationsAIChat() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [curatorQuestionCount, setCuratorQuestionCount] = useState(0);
+  const [supportTickets, setSupportTickets] = useState<SupportTicket[]>([]);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
 
   const loadMessages = async () => {
     setLoading(true);
     setError(null);
     try {
-      const [result, curator] = await Promise.all([
+      const [result, curator, tickets] = await Promise.all([
         getOperationsChatMessages(),
         getKnowledgeCuratorState(),
+        getSupportTickets(),
       ]);
       setMessages(result.messages);
+      setSupportTickets(tickets.tickets);
       setCuratorQuestionCount(curator.proposals.filter((item) =>
         (item.status === 'proposed' || item.status === 'accepted') &&
         (item.owner_questions?.length || item.proposed_action === 'ask_owner')
@@ -96,6 +102,17 @@ export default function OperationsAIChat() {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
       void submitMessage();
+    }
+  };
+
+  const approveDeployment = async (ticket: SupportTicket) => {
+    if (!window.confirm(`Deploy the verified change for “${ticket.title}” to production?`)) return;
+    setError(null);
+    try {
+      await approveSupportTicketDeployment(ticket.id);
+      await loadMessages();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Could not approve the deployment.');
     }
   };
 
@@ -168,6 +185,35 @@ export default function OperationsAIChat() {
           Text and realtime voice share the same private business conversation. This assistant can onboard the business, refine customer-agent behaviour, work through curator questions and record confirmed rules. It has no coding or deployment capability; technical faults are handed to the separate maintenance agent.
         </p>
       </div>
+
+      {supportTickets.length > 0 && (
+        <div className="border-b border-slate-200 bg-slate-50 px-4 py-3" aria-label="Support and engineering requests">
+          <div className="mb-2 flex items-center gap-2 text-[10px] font-black uppercase tracking-wider text-slate-600">
+            <TicketCheck className="h-3.5 w-3.5 text-indigo-600" /> Support &amp; engineering requests
+          </div>
+          <div className="space-y-2">
+            {supportTickets.slice(0, 5).map((ticket) => (
+              <div key={ticket.id} className="flex flex-col gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <p className="truncate text-[11px] font-bold text-slate-800">{ticket.title}</p>
+                  <p className="mt-0.5 text-[10px] text-slate-500">
+                    {ticket.status.replace(/_/g, ' ')}{ticket.resolutionSummary ? ` · ${ticket.resolutionSummary}` : ''}
+                  </p>
+                </div>
+                {ticket.status === 'awaiting_deployment' && ticket.deploymentActionId && (
+                  <button
+                    type="button"
+                    onClick={() => void approveDeployment(ticket)}
+                    className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md bg-emerald-600 px-2.5 py-1.5 text-[10px] font-bold text-white transition hover:bg-emerald-700"
+                  >
+                    <Rocket className="h-3.5 w-3.5" /> Approve deployment
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div
         className="h-[420px] overflow-y-auto bg-slate-50 px-4 py-5"

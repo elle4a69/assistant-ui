@@ -217,6 +217,32 @@ class OperationsAction(Base):
     executed_at = Column(DateTime, nullable=True)
 
 
+class SupportTicket(Base):
+    """A customer-safe request with an optional private engineering hand-off.
+
+    The ticket deliberately stores the customer-facing problem separately from
+    the coding runner's action payload.  That lets a future customer portal
+    expose status without ever exposing branch names, commits, worker logs, or
+    other implementation detail.
+    """
+    __tablename__ = "support_tickets"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    source = Column(String, nullable=False, default="business_assistant", index=True)
+    category = Column(String, nullable=False, default="bug", index=True)
+    title = Column(String, nullable=False)
+    observed_behavior = Column(Text, nullable=False)
+    affected_area = Column(String, nullable=False)
+    user_impact = Column(Text, nullable=False)
+    evidence = Column(Text, nullable=False, default="")
+    status = Column(String, nullable=False, default="received", index=True)
+    coding_task_id = Column(String, nullable=True, index=True)
+    deployment_action_id = Column(String, nullable=True, index=True)
+    resolution_summary = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 class OperationsMemory(Base):
     """Durable, non-secret operating knowledge curated by Operations AI."""
     __tablename__ = "operations_memories"
@@ -281,6 +307,7 @@ __all__ = [
     "NotificationDelivery",
     "OperationsChatMessage",
     "OperationsAction",
+    "SupportTicket",
     "OperationsMemory",
     "OperationsAgentRun",
     "OperationsAgentEvent",

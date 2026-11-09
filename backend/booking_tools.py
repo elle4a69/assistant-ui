@@ -254,7 +254,12 @@ class LegacyCalendarDiscoveryProvider:
     def list_services(self) -> list[dict[str, Any]]:
         services = []
         for service in self.services_loader():
-            if not isinstance(service, dict) or not service.get("id") or not service.get("name"):
+            if (
+                not isinstance(service, dict)
+                or service.get("isActive", True) is False
+                or not service.get("id")
+                or not service.get("name")
+            ):
                 continue
             public_service = {
                 "id": str(service.get("id", "")),
@@ -277,7 +282,11 @@ class LegacyCalendarDiscoveryProvider:
         service = next(
             (
                 item for item in self.services_loader()
-                if isinstance(item, dict) and str(item.get("id", "")) == service_id
+                if (
+                    isinstance(item, dict)
+                    and item.get("isActive", True) is not False
+                    and str(item.get("id", "")) == service_id
+                )
             ),
             None,
         )
@@ -295,27 +304,59 @@ class LegacyCalendarDiscoveryProvider:
         while cursor < end and len(slots) < limit:
             day = hours.get(cursor.strftime("%A"))
             if day and day.get("enabled"):
-                opening = self._at_local_time(cursor, str(day.get("open", "09:00")))
-                closing = self._at_local_time(cursor, str(day.get("close", "17:00")))
-                candidate = max(cursor, opening)
-                candidate = self._round_up(candidate)
-                candidate_end = candidate + duration
-                if candidate_end <= closing and candidate_end <= end:
-                    if not any(
-                        candidate < item["end"] and candidate_end > item["start"]
-                        for item in busy
-                    ):
-                        slots.append({
-                            "service_id": str(service["id"]),
-                            "service_name": str(service["name"]),
-                            "start_time": candidate.isoformat(),
-                            "end_time": candidate_end.isoformat(),
-                        })
+                slots_list = day.get("slots")
+                if slots_list is not None:
+                    allowed_slots = set(slots_list)
+                    candidate = self._round_up(cursor)
+                    candidate_end = candidate + duration
+                    if candidate.date() == candidate_end.date() and candidate_end <= end and allowed_slots:
+                        c_start_m = candidate.hour * 60 + candidate.minute
+                        c_end_m = candidate_end.hour * 60 + candidate_end.minute
+                        k_min = c_start_m // 30
+                        k_max = (c_end_m - 1) // 30
+                        if all(
+                            f"{(k * 30) // 60:02d}:{(k * 30) % 60:02d}" in allowed_slots
+                            for k in range(k_min, k_max + 1)
+                        ):
+                            if not any(
+                                candidate < item["end"] and candidate_end > item["start"]
+                                for item in busy
+                            ):
+                                slots.append({
+                                    "service_id": str(service["id"]),
+                                    "service_name": str(service["name"]),
+                                    "start_time": candidate.isoformat(),
+                                    "end_time": candidate_end.isoformat(),
+                                })
+                else:
+                    opening = self._at_local_time(cursor, str(day.get("open", "09:00")))
+                    closing = self._at_local_time(cursor, str(day.get("close", "17:00")))
+                    candidate = max(cursor, opening)
+                    candidate = self._round_up(candidate)
+                    candidate_end = candidate + duration
+                    if candidate_end <= closing and candidate_end <= end:
+                        if not any(
+                            candidate < item["end"] and candidate_end > item["start"]
+                            for item in busy
+                        ):
+                            slots.append({
+                                "service_id": str(service["id"]),
+                                "service_name": str(service["name"]),
+                                "start_time": candidate.isoformat(),
+                                "end_time": candidate_end.isoformat(),
+                            })
             cursor += timedelta(minutes=self.slot_interval_minutes)
         return slots
 
     def check_exact_time(self, service_id: str, start: datetime) -> dict[str, Any] | None:
-        service = next((item for item in self.services_loader() if isinstance(item, dict) and str(item.get("id", "")) == service_id), None)
+        service = next((
+            item for item in self.services_loader()
+            if (
+                isinstance(item, dict)
+                and item.get("isActive", True) is not False
+                and str(item.get("id", "")) == service_id
+            )
+        ), None)
         if not service:
             raise BookingToolError("That service is not available.")
         duration = timedelta(minutes=max(1, int(service.get("duration", 60))))

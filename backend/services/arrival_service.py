@@ -578,7 +578,7 @@ def send_arrival_push_notifications(session_id: str, clear: bool = False) -> Non
             if callable(notify_fn):
                 booking = _arrival_booking(db, session.booking_id)
                 label = (booking.summary if booking else "Customer")[:160]
-                line_label = "Line 2" if session.sms_account_key == "secondary" else "Line 1"
+                line_label = "SMS"
                 click_url = (
                     build_notification_url("/chat", thread=session.thread_id)
                     if callable(build_notification_url) and session.thread_id
@@ -743,6 +743,20 @@ def is_clear_customer_arrival(message: str) -> bool:
     return any(re.search(pattern, normalized) for pattern in ARRIVAL_POSITIVE_PATTERNS)
 
 
+def customer_arrival_has_been_recorded(db: Session, thread_id: str) -> bool:
+    """Return whether this conversation is in its post-arrival no-auto-reply state.
+
+    Arrival is a terminal boundary for the SMS responder.  It deliberately
+    does not depend on an arrival session still being active or unacknowledged:
+    acknowledging an alert tells the provider that they saw it, not that the
+    customer is available for automated messages again.
+    """
+    return db.query(ThreadEvent.id).filter(
+        ThreadEvent.thread_id == thread_id,
+        ThreadEvent.type == "customer-arrived",
+    ).first() is not None
+
+
 def record_customer_arrival_event(
     db: Session,
     thread: Thread,
@@ -802,6 +816,7 @@ __all__ = [
     "_record_arrival_link_thread_event",
     "_require_arrival_client",
     "is_clear_customer_arrival",
+    "customer_arrival_has_been_recorded",
     "record_customer_arrival_event",
     "process_due_arrival_alerts",
     "arrival_alert_worker",

@@ -20,6 +20,7 @@ try:
         OperationsAgentRun,
         OperationsChatMessage,
         OperationsMemory,
+        SupportTicket,
         PushSubscription,
         Thread,
         ThreadEvent,
@@ -39,6 +40,7 @@ except ImportError:
         OperationsAgentRun,
         OperationsChatMessage,
         OperationsMemory,
+        SupportTicket,
         PushSubscription,
         Thread,
         ThreadEvent,
@@ -59,6 +61,7 @@ __all__ = [
     "OperationsChatMessage",
     "OperationsAction",
     "OperationsMemory",
+    "SupportTicket",
     "OperationsAgentRun",
     "OperationsAgentEvent",
 ]

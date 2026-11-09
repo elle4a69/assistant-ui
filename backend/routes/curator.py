@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy.orm import Session
 
 try:
-    from backend.core.config import DATA_DIR, KNOWLEDGE_DIR, BASE_DIR
+    from backend.core.config import DATA_DIR, KNOWLEDGE_DIR, BASE_DIR, PROMPTS_DIR
     from backend.core.database import get_db, SessionLocal
     from backend.core.clients import openai_client, GoogleCalendarService
     from backend.models.domain import Thread, Message
@@ -54,7 +54,7 @@ try:
     from backend.services.knowledge_service import load_knowledge_base
     from backend.curator.classifier import classify_all_learned_information
 except ImportError:
-    from core.config import DATA_DIR, KNOWLEDGE_DIR, BASE_DIR
+    from core.config import DATA_DIR, KNOWLEDGE_DIR, BASE_DIR, PROMPTS_DIR
     from core.database import get_db, SessionLocal
     from core.clients import openai_client, GoogleCalendarService
     from models.domain import Thread, Message

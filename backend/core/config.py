@@ -109,6 +109,7 @@ BOOTCAMP_OPENINGS_FILE = Path(
 BUSINESS_VARIABLES_PATH = os.path.join(DATA_DIR, "business_variables.json")
 LINE_PROFILES_PATH = os.path.join(DATA_DIR, "sms_line_profiles.json")
 WORKING_HOURS_PATH = os.path.join(DATA_DIR, "working_hours.json")
+AVAILABILITY_CONFIG_PATH = os.path.join(DATA_DIR, "availability_config.json")
 MESSAGE_UI_SETTINGS_PATH = os.path.join(DATA_DIR, "message_ui_settings.json")
 QUICK_REPLIES_PATH = os.path.join(DATA_DIR, "quick_replies.json")
 FIRST_CONTACT_AUTORESPONDER_PATH = os.path.join(DATA_DIR, "first_contact_autoresponder.json")

@@ -39,6 +39,9 @@ import {
   SearchResultItem,
   getServices,
   saveServices,
+  getServiceAddons,
+  saveServiceAddons,
+  ServiceAddon,
   getSmsTemplate,
   saveSmsTemplate,
   getBookingReminderConfig,
@@ -59,12 +62,11 @@ import {
   FirstContactAutoresponderSettings,
   clearPendingDrafts,
   clearReviewOnlyThreads,
-  getSmsLineProfiles,
-  saveSmsLineProfiles,
-  SmsLineProfile,
   listBlockedContacts,
   unblockContact,
   BlockedContact,
+  sendBulkSms,
+  BulkSmsResult,
 } from './api';
 import {
   Key,
@@ -89,10 +91,13 @@ import {
   Copy,
   Check,
   GripVertical,
+  Eye,
+  EyeOff,
   BellRing,
   Volume2,
   Download,
   Ban,
+  Send,
 } from 'lucide-react';
 import {
   getIncomingAlarmSettings,
@@ -126,6 +131,7 @@ const DEFAULT_BUSINESS_VARIABLES: BusinessVariable[] = [
   { key: 'email', token: '{email}', label: 'Email', value: '', description: 'Business contact email address', required: false, required_status: 'optional' },
   { key: 'booking_arrival_notes', token: '{booking_arrival_notes}', label: 'Booking arrival notes', value: '', description: 'Special instructions upon customer arrival', required: false, required_status: 'optional' },
   { key: 'booking_url', token: '{booking_url}', label: 'Booking URL', value: '', description: 'Direct link to online booking page', required: false, required_status: 'optional' },
+  { key: 'service_addons', token: '{service_addons}', label: 'Service add-ons', value: '', description: 'Current add-ons from Services settings (system-managed)', required: false, required_status: 'optional', readOnly: true },
 ];
 
 const retryOnce = async <T,>(operation: () => Promise<T>): Promise<T> => {
@@ -144,11 +150,6 @@ export default function SettingsView() {
   const [apiKey, setApiKey] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
   const [userPrompt, setUserPrompt] = useState('');
-  const [lineProfiles, setLineProfiles] = useState<Record<'primary' | 'secondary', SmsLineProfile>>({
-    primary: { displayName: 'Line 1', providerName: 'Tori', informationUrl: '', userPrompt: '' },
-    secondary: { displayName: 'Line 2', providerName: 'Anonymous', informationUrl: '', userPrompt: '' },
-  });
-  const [savingLineProfiles, setSavingLineProfiles] = useState(false);
   const [hasGoogleCreds, setHasGoogleCreds] = useState(false);
   const [showMessageAvatars, setShowMessageAvatars] = useState(true);
   const [savingMessageDisplay, setSavingMessageDisplay] = useState(false);
@@ -175,7 +176,7 @@ export default function SettingsView() {
   const [uploadingCreds, setUploadingCreds] = useState(false);
   const [learningTopic, setLearningTopic] = useState('');
   const [learningGuidance, setLearningGuidance] = useState('');
-  const [learningScope, setLearningScope] = useState<'shared' | 'primary' | 'secondary'>('shared');
+  const [learningScope] = useState<'shared'>('shared');
   const [savingLearning, setSavingLearning] = useState(false);
   const [redraftingPendingLearnings, setRedraftingPendingLearnings] = useState(false);
   const [lastSavedLearning, setLastSavedLearning] = useState<ManualLearningEntry | null>(null);
@@ -206,6 +207,7 @@ export default function SettingsView() {
 
   // Services & SMS Template states
   const [services, setServices] = useState<Service[]>([]);
+  const [serviceAddons, setServiceAddons] = useState<ServiceAddon[]>([]);
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
   const [smsTemplate, setSmsTemplate] = useState('');
   const [bookingReminder, setBookingReminder] = useState<BookingReminderConfig>({
@@ -224,7 +226,14 @@ export default function SettingsView() {
   const [newServicePrice, setNewServicePrice] = useState(100);
   const [newServiceDuration, setNewServiceDuration] = useState(60);
   const [newServiceShowDuration, setNewServiceShowDuration] = useState(true);
-  const [newServiceLineKey, setNewServiceLineKey] = useState<'primary' | 'secondary'>('primary');
+  const [newServiceAddonIds, setNewServiceAddonIds] = useState<string[]>([]);
+
+  // New add-on form state. Extra time is optional and defaults to zero.
+  const [newAddonName, setNewAddonName] = useState('');
+  const [newAddonDescription, setNewAddonDescription] = useState('');
+  const [newAddonPrice, setNewAddonPrice] = useState(0);
+  const [newAddonExtraTime, setNewAddonExtraTime] = useState(0);
+  const [newAddonServiceIds, setNewAddonServiceIds] = useState<string[]>([]);
 
   // Edit service form state
   const [editingServiceId, setEditingServiceId] = useState<string | null>(null);
@@ -233,7 +242,7 @@ export default function SettingsView() {
   const [editServicePrice, setEditServicePrice] = useState(100);
   const [editServiceDuration, setEditServiceDuration] = useState(60);
   const [editServiceShowDuration, setEditServiceShowDuration] = useState(true);
-  const [editServiceLineKey, setEditServiceLineKey] = useState<'primary' | 'secondary'>('primary');
+  const [editServiceAddonIds, setEditServiceAddonIds] = useState<string[]>([]);
 
 
   // Working hours state
@@ -260,13 +269,17 @@ export default function SettingsView() {
   const [firstContactConfig, setFirstContactConfig] = useState<FirstContactAutoresponderSettings>({
     accounts: {
       primary: { enabled: false, cooldownDays: 30, delaySeconds: 0, message: '' },
-      secondary: { enabled: false, cooldownDays: 30, delaySeconds: 0, message: '' }
     },
-    labels: { primary: 'Line 1', secondary: 'Line 2' }
+    labels: { primary: 'SMS' }
   });
   const [savingFirstContact, setSavingFirstContact] = useState(false);
   const [blockedContacts, setBlockedContacts] = useState<BlockedContact[]>([]);
   const [unblockingContactId, setUnblockingContactId] = useState<string | null>(null);
+  const [bulkSmsRecipients, setBulkSmsRecipients] = useState('');
+  const [bulkSmsMessage, setBulkSmsMessage] = useState('');
+  const [sendingBulkSms, setSendingBulkSms] = useState(false);
+  const [bulkSmsResult, setBulkSmsResult] = useState<BulkSmsResult | null>(null);
+  const [bulkSmsRequestId, setBulkSmsRequestId] = useState<string | null>(null);
 
   // Banners
   const [banner, setBanner] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -297,6 +310,7 @@ export default function SettingsView() {
       setLoadingSettings(false);
     }
     try { setServices(await retryOnce(getServices)); } catch (e) { console.error('services fetch failed:', e); }
+    try { setServiceAddons(await retryOnce(getServiceAddons)); } catch (e) { console.error('service add-ons fetch failed:', e); }
     try { setBusinessVariables(await retryOnce(getBusinessVariables)); } catch (e) { console.error('business variables fetch failed:', e); }
     try { setSmsTemplate((await retryOnce(getSmsTemplate)).template); } catch (e) { console.error('sms template fetch failed:', e); }
     try { setBookingReminder(await retryOnce(getBookingReminderConfig)); } catch (e) { console.error('booking reminder settings fetch failed:', e); }
@@ -310,7 +324,6 @@ export default function SettingsView() {
     } catch (e) { console.error('MobileMessage fetch failed:', e); }
     try { setQaRules(await retryOnce(getQARules)); } catch (e) { console.error('qa rules fetch failed:', e); }
     try { setFirstContactConfig(await retryOnce(getFirstContactAutoresponder)); } catch (e) { console.error('first-contact auto-responder fetch failed:', e); }
-    try { setLineProfiles(await retryOnce(getSmsLineProfiles)); } catch (e) { console.error('line profile fetch failed:', e); }
     try { setLearnedEntries(await retryOnce(listLearnedInformation)); } catch (e) { console.error('learned rules fetch failed:', e); }
     try { setKnowledgeCurator(await retryOnce(getKnowledgeCuratorState)); } catch (e) { console.error('knowledge curator fetch failed:', e); }
     try { setBlockedContacts(await retryOnce(listBlockedContacts)); } catch (e) { console.error('blocked contacts fetch failed:', e); }
@@ -475,6 +488,7 @@ export default function SettingsView() {
   const updateBusinessVariable = (index: number, field: keyof BusinessVariable, value: string) => {
     setBusinessVariables((current) => current.map((item, itemIndex) => {
       if (itemIndex !== index) return item;
+      if (item.readOnly) return item;
       const nextValue = field === 'key'
         ? value.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '')
         : value;
@@ -494,7 +508,7 @@ export default function SettingsView() {
   };
 
   const removeBusinessVariable = (index: number) => {
-    setBusinessVariables((current) => current.filter((_, itemIndex) => itemIndex !== index));
+    setBusinessVariables((current) => current.filter((item, itemIndex) => itemIndex !== index || item.readOnly));
   };
 
   const [variableInsertTarget, setVariableInsertTarget] = useState<{
@@ -529,11 +543,56 @@ export default function SettingsView() {
     try {
       await unblockContact(contact.smsAccountKey, contact.customerPhone);
       setBlockedContacts(current => current.filter(item => item.id !== contact.id));
-      triggerBanner('success', `${contact.customerPhone} was unblocked on ${contact.smsAccountKey === 'secondary' ? 'Line 2' : 'Line 1'}.`);
+      triggerBanner('success', `${contact.customerPhone} was unblocked.`);
     } catch {
       triggerBanner('error', 'Failed to unblock the contact.');
     } finally {
       setUnblockingContactId(null);
+    }
+  };
+
+  const handleBulkSms = async () => {
+    const recipients = bulkSmsRecipients
+      .split(/[\n,;]+/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+    const message = bulkSmsMessage.trim();
+    if (recipients.length === 0) {
+      triggerBanner('error', 'Add at least one mobile number, one per line or separated by commas.');
+      return;
+    }
+    if (!message) {
+      triggerBanner('error', 'Enter the generic message to send.');
+      return;
+    }
+    const lineName = 'SMS';
+    const confirmed = window.confirm(
+      `Send this message to ${recipients.length} number${recipients.length === 1 ? '' : 's'} from ${lineName}?\n\n${message.slice(0, 500)}${message.length > 500 ? '…' : ''}`
+    );
+    if (!confirmed) return;
+
+    setSendingBulkSms(true);
+    setBulkSmsResult(null);
+    try {
+      const requestId = bulkSmsRequestId || (typeof crypto?.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      setBulkSmsRequestId(requestId);
+      const result = await sendBulkSms(recipients, message, 'primary', requestId);
+      setBulkSmsResult(result);
+      if (result.failed > 0) {
+        triggerBanner('error', `${result.sent} of ${result.requested} SMS messages were sent. Review failed recipients below.`);
+      } else {
+        triggerBanner('success', `${result.sent} SMS message${result.sent === 1 ? '' : 's'} sent from ${lineName}.`);
+        setBulkSmsRecipients('');
+        setBulkSmsMessage('');
+        setBulkSmsRequestId(null);
+      }
+    } catch (err) {
+      console.error(err);
+      triggerBanner('error', err instanceof Error ? err.message : 'Bulk SMS could not be sent.');
+    } finally {
+      setSendingBulkSms(false);
     }
   };
 
@@ -607,23 +666,6 @@ export default function SettingsView() {
       triggerBanner('success', 'Learned rule updated.');
     } catch (err) {
       console.error(err); triggerBanner('error', err instanceof Error ? err.message : 'Failed to save learned rule.');
-    }
-  };
-
-  const updateLineProfile = (key: 'primary' | 'secondary', field: keyof SmsLineProfile, value: string) => {
-    setLineProfiles((current) => ({ ...current, [key]: { ...current[key], [field]: value } }));
-  };
-
-  const handleSaveLineProfiles = async () => {
-    setSavingLineProfiles(true);
-    try {
-      await saveSmsLineProfiles(lineProfiles);
-      triggerBanner('success', 'Line-specific customer conversation settings saved.');
-    } catch (err) {
-      console.error(err);
-      triggerBanner('error', err instanceof Error ? err.message : 'Failed to save line-specific settings.');
-    } finally {
-      setSavingLineProfiles(false);
     }
   };
 
@@ -1038,21 +1080,41 @@ export default function SettingsView() {
       price: newServicePrice,
       duration: newServiceDuration,
       showDuration: newServiceShowDuration,
-      lineKey: newServiceLineKey,
+      isActive: true,
+      addonIds: newServiceAddonIds,
     };
     setServices([...services, newService]);
+    setServiceAddons(current => current.map(addon => newServiceAddonIds.includes(addon.id)
+      ? { ...addon, serviceIds: Array.from(new Set([...addon.serviceIds, newService.id])) }
+      : addon));
     setNewServiceName('');
     setNewServiceDesc('');
     setNewServicePrice(100);
     setNewServiceDuration(60);
     setNewServiceShowDuration(true);
-    setNewServiceLineKey('primary');
+    setNewServiceAddonIds([]);
     triggerBanner('success', 'Service added. Click Save Services to apply.');
   };
 
   const handleDeleteService = (id: string) => {
     setServices(services.filter(s => s.id !== id));
+    setServiceAddons(current => current.map(addon => ({ ...addon, serviceIds: addon.serviceIds.filter(serviceId => serviceId !== id) })));
     triggerBanner('success', 'Service removed. Click Save Services to apply.');
+  };
+
+  const toggleServiceBookingVisibility = (id: string) => {
+    const service = services.find(item => item.id === id);
+    if (!service) return;
+    const willBeActive = service.isActive === false;
+    setServices(current => current.map(item => item.id === id
+      ? { ...item, isActive: willBeActive }
+      : item));
+    triggerBanner(
+      'success',
+      willBeActive
+        ? 'Service will appear in bookings. Click Save Services to apply.'
+        : 'Service will be hidden from bookings. Click Save Services to apply.',
+    );
   };
 
   const handleDragStart = (e: React.DragEvent, index: number) => {
@@ -1086,7 +1148,7 @@ export default function SettingsView() {
     setEditServicePrice(srv.price);
     setEditServiceDuration(srv.duration);
     setEditServiceShowDuration(srv.showDuration !== false);
-    setEditServiceLineKey(srv.lineKey || 'primary');
+    setEditServiceAddonIds(srv.addonIds || []);
   };
 
   const handleUpdateService = (e: React.FormEvent) => {
@@ -1102,11 +1164,17 @@ export default function SettingsView() {
           price: editServicePrice,
           duration: editServiceDuration,
           showDuration: editServiceShowDuration,
-          lineKey: editServiceLineKey,
+          addonIds: editServiceAddonIds,
         };
       }
       return srv;
     }));
+    setServiceAddons(current => current.map(addon => ({
+      ...addon,
+      serviceIds: editServiceAddonIds.includes(addon.id)
+        ? Array.from(new Set([...addon.serviceIds, editingServiceId]))
+        : addon.serviceIds.filter(serviceId => serviceId !== editingServiceId),
+    })));
 
     setEditingServiceId(null);
     triggerBanner('success', 'Service updated. Click Save Services to apply.');
@@ -1120,7 +1188,8 @@ export default function SettingsView() {
     setSavingServices(true);
     try {
       await saveServices(services);
-      triggerBanner('success', 'Services configured successfully on backend.');
+      await saveServiceAddons(serviceAddons);
+      triggerBanner('success', 'Services and add-ons configured successfully.');
     } catch (err) {
       console.error(err);
       triggerBanner('error', 'Failed to save services configuration.');
@@ -1162,7 +1231,7 @@ export default function SettingsView() {
   };
 
   const handleSaveFirstContact = async () => {
-    for (const key of ['primary', 'secondary'] as const) {
+    for (const key of ['primary'] as const) {
       const account = firstContactConfig.accounts[key];
       if (account.enabled && !account.message.trim()) {
         triggerBanner('error', `Enter a first-contact reply message for ${firstContactConfig.labels[key]} before enabling it.`);
@@ -1173,10 +1242,7 @@ export default function SettingsView() {
     try {
       const config = {
         ...firstContactConfig,
-        accounts: {
-          primary: normalizeFirstContactAccount(firstContactConfig.accounts.primary),
-          secondary: normalizeFirstContactAccount(firstContactConfig.accounts.secondary)
-        }
+        accounts: { primary: normalizeFirstContactAccount(firstContactConfig.accounts.primary) }
       };
       await saveFirstContactAutoresponder(config);
       setFirstContactConfig(config);
@@ -1199,7 +1265,7 @@ export default function SettingsView() {
   });
 
   const updateFirstContactAccount = (
-    key: 'primary' | 'secondary',
+    key: 'primary',
     update: Partial<FirstContactAutoresponderConfig>
   ) => {
     setFirstContactConfig(current => ({
@@ -1278,6 +1344,58 @@ export default function SettingsView() {
     setTimeout(() => setCopiedIframe(false), 3000);
   };
 
+  const handleAddAddon = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!newAddonName.trim()) return;
+    const addon: ServiceAddon = {
+      id: `addon_${Date.now()}`,
+      name: newAddonName.trim(),
+      description: newAddonDescription.trim(),
+      price: Math.max(0, newAddonPrice),
+      extraTime: Math.max(0, newAddonExtraTime),
+      serviceIds: newAddonServiceIds,
+    };
+    setServiceAddons(current => [...current, addon]);
+    setServices(current => current.map(service => newAddonServiceIds.includes(service.id)
+      ? { ...service, addonIds: Array.from(new Set([...(service.addonIds || []), addon.id])) }
+      : service));
+    setNewAddonName('');
+    setNewAddonDescription('');
+    setNewAddonPrice(0);
+    setNewAddonExtraTime(0);
+    setNewAddonServiceIds([]);
+    triggerBanner('success', 'Add-on added. Click Save services and add-ons to apply.');
+  };
+
+  const toggleAddonService = (addonId: string, serviceId: string) => {
+    setServiceAddons(current => current.map(addon => {
+      if (addon.id !== addonId) return addon;
+      const serviceIds = addon.serviceIds.includes(serviceId)
+        ? addon.serviceIds.filter(id => id !== serviceId)
+        : [...addon.serviceIds, serviceId];
+      return { ...addon, serviceIds };
+    }));
+    setServices(current => current.map(service => {
+      if (service.id !== serviceId) return service;
+      const addonIds = service.addonIds || [];
+      return {
+        ...service,
+        addonIds: addonIds.includes(addonId) ? addonIds.filter(id => id !== addonId) : [...addonIds, addonId],
+      };
+    }));
+  };
+
+  const handleDeleteAddon = (addonId: string) => {
+    setServiceAddons(current => current.filter(addon => addon.id !== addonId));
+    setServices(current => current.map(service => ({ ...service, addonIds: (service.addonIds || []).filter(id => id !== addonId) })));
+    triggerBanner('success', 'Add-on removed. Click Save services and add-ons to apply.');
+  };
+
+  const bulkSmsRecipientCount = bulkSmsRecipients
+    .split(/[\n,;]+/)
+    .map((value) => value.trim())
+    .filter(Boolean).length;
+
   return (
     <div className="flex-1 overflow-y-auto bg-slate-50 p-1 sm:p-3 md:p-6 font-sans">
       <div className="w-full max-w-none mx-auto flex flex-col gap-2 sm:gap-3 md:gap-6">
@@ -1298,32 +1416,6 @@ export default function SettingsView() {
             <RefreshCw className="w-3.5 h-3.5" />
             Refresh
           </button>
-        </div>
-
-        <nav aria-label="Settings destinations" className="flex flex-wrap gap-2">
-          <a
-            href="#blocked-contacts"
-            className="flex min-h-10 items-center gap-2 rounded-lg border border-rose-200 bg-white px-3 text-xs font-bold text-rose-700 shadow-sm hover:bg-rose-50"
-          >
-            <Ban className="h-4 w-4" />
-            Blocked contacts &amp; numbers
-          </a>
-        </nav>
-
-        {/* Quick Links */}
-        <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-col md:flex-row gap-2 md:gap-4 text-xs shadow-xs">
-          <span className="font-bold text-slate-800 shrink-0">Quick Access Links:</span>
-          <div className="flex flex-col gap-2 flex-wrap min-w-0">
-            <a href="https://carnival-cute-superintendent-act.trycloudflare.com" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:text-indigo-850 hover:underline break-all font-semibold">
-              https://carnival-cute-superintendent-act.trycloudflare.com
-            </a>
-            <a href="https://sequence-converted-causing-mat.trycloudflare.com" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:text-indigo-850 hover:underline break-all font-semibold">
-              https://sequence-converted-causing-mat.trycloudflare.com
-            </a>
-            <a href="https://app.mobilemessage.com.au/" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:text-indigo-850 hover:underline break-all font-semibold">
-              https://app.mobilemessage.com.au/
-            </a>
-          </div>
         </div>
 
         {/* Banner Alert */}
@@ -1370,10 +1462,6 @@ export default function SettingsView() {
           details.settings-section > summary::after { content: '⌄'; margin-left: auto; font-size: 18px; color: #64748b; transition: transform 150ms ease; }
           details.settings-section[open] > summary::after { transform: rotate(180deg); }
         }
-        @media (min-width: 768px) {
-          details.settings-section:not([open]) > :not(summary) { display: block !important; }
-          details.settings-section > summary { cursor: default; list-style: none; }
-          details.settings-section > summary::-webkit-details-marker { display: none; }
         }`}</style>
         <div className="grid grid-cols-1 gap-2 sm:gap-3 md:gap-6">
             <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
@@ -1390,7 +1478,7 @@ export default function SettingsView() {
                 <OperationsAIChat />
               </div>
             </details>
-            <details name="settings-sections" open className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+            <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
               <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-3">
                 <div className="w-9 h-9 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
                   <BellRing className="w-4.5 h-4.5" />
@@ -1652,7 +1740,8 @@ export default function SettingsView() {
                           aria-label="Variable label"
                           value={variable.label}
                           onChange={(event) => updateBusinessVariable(index, 'label', event.target.value)}
-                          className="w-full text-xs border border-slate-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          disabled={variable.readOnly}
+                          className="w-full text-xs border border-slate-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100 disabled:text-slate-500"
                           placeholder="Display label"
                         />
                         <div className="flex items-center rounded-lg border border-slate-300 bg-white focus-within:ring-2 focus-within:ring-indigo-500">
@@ -1661,7 +1750,8 @@ export default function SettingsView() {
                             aria-label="Variable token"
                             value={variable.key}
                             onChange={(event) => updateBusinessVariable(index, 'key', event.target.value)}
-                            className="min-w-0 flex-1 border-0 bg-transparent py-2 text-xs font-mono focus:outline-none"
+                            disabled={variable.readOnly}
+                            className="min-w-0 flex-1 border-0 bg-transparent py-2 text-xs font-mono focus:outline-none disabled:text-slate-500"
                             placeholder="variable_name"
                           />
                           <span className="pr-2 text-xs font-mono text-slate-400">{'}'}</span>
@@ -1670,17 +1760,18 @@ export default function SettingsView() {
                           aria-label="Variable value"
                           value={variable.value}
                           onChange={(event) => updateBusinessVariable(index, 'value', event.target.value)}
-                          className="w-full text-xs border border-slate-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                          placeholder="Business value"
+                          disabled={variable.readOnly}
+                          className="w-full text-xs border border-slate-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100 disabled:text-slate-500"
+                          placeholder={variable.readOnly ? 'Managed from Services add-ons' : 'Business value'}
                         />
-                        <button
+                        {variable.readOnly ? <span className="flex h-8 items-center justify-center text-[9px] font-bold text-slate-400" title="Managed from Services add-ons">Auto</span> : <button
                           type="button"
                           onClick={() => removeBusinessVariable(index)}
                           title={`Remove ${variable.label || variable.key}`}
                           className="h-8 w-8 flex items-center justify-center rounded-lg text-slate-500 hover:text-rose-600 hover:bg-rose-50 cursor-pointer"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        </button>}
                       </div>
                     ))}
                     <div className="pt-2 border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
@@ -1700,7 +1791,7 @@ export default function SettingsView() {
             </details>
 
             {/* Blocked SMS contacts */}
-            <details id="blocked-contacts" open className="settings-section scroll-mt-3 bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+            <details id="blocked-contacts" className="settings-section scroll-mt-3 bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
               <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
                 <Ban className="w-5 h-5 text-rose-600" />
                 <div>
@@ -1713,7 +1804,7 @@ export default function SettingsView() {
                   <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4 text-center">
                     <Ban className="mx-auto mb-2 h-5 w-5 text-slate-400" />
                     <p className="text-xs font-bold text-slate-700">No blocked contacts or numbers</p>
-                    <p className="mt-1 text-[10px] text-slate-500">Contacts blocked from an SMS conversation will appear here, grouped by SMS line.</p>
+                    <p className="mt-1 text-[10px] text-slate-500">Contacts blocked from an SMS conversation will appear here.</p>
                   </div>
                 ) : (
                   <div className="divide-y divide-slate-100 rounded-lg border border-slate-200">
@@ -1722,13 +1813,13 @@ export default function SettingsView() {
                         <Ban className="h-4 w-4 shrink-0 text-rose-600" />
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-xs font-bold text-slate-800">{contact.customerPhone}</p>
-                          <p className="text-[10px] text-slate-500">{contact.smsAccountKey === 'secondary' ? 'SMS Line 2' : 'SMS Line 1'}</p>
+                          <p className="text-[10px] text-slate-500">SMS</p>
                         </div>
                         <button
                           type="button"
                           onClick={() => handleUnblockContact(contact)}
                           disabled={unblockingContactId === contact.id}
-                          aria-label={`Unblock ${contact.customerPhone} on ${contact.smsAccountKey === 'secondary' ? 'SMS Line 2' : 'SMS Line 1'}`}
+                          aria-label={`Unblock ${contact.customerPhone}`}
                           className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-[10px] font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
                         >
                           {unblockingContactId === contact.id ? 'Unblocking...' : 'Unblock'}
@@ -1740,44 +1831,81 @@ export default function SettingsView() {
               </div>
             </details>
 
-            {/* SMS Line Conversation Profiles */}
-            <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+            {/* Bulk SMS */}
+            <details id="bulk-sms" name="settings-sections" className="settings-section scroll-mt-3 bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
               <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
-                <MessageSquare className="w-5 h-5 text-indigo-600" />
+                <Send className="w-5 h-5 text-indigo-600" />
                 <div>
-                  <h2 className="font-bold text-slate-800 text-sm">Line-specific customer conversation</h2>
-                  <p className="text-[10px] text-slate-500">One shared system prompt, with a separate identity and customer prompt for each SMS line.</p>
+                  <h2 className="font-bold text-slate-800 text-sm">Bulk SMS</h2>
+                  <p className="text-[10px] text-slate-500">Send the same generic message to a list of mobile numbers from SMS.</p>
                 </div>
               </summary>
-              <div className="p-3 sm:p-5 flex flex-col gap-5">
-                {(['primary', 'secondary'] as const).map((key, index) => {
-                  const profile = lineProfiles[key];
-                  return (
-                    <section key={key} className="rounded-xl border border-slate-200 p-3 flex flex-col gap-3">
-                      <h3 className="font-bold text-sm text-slate-800">Line {index + 1}</h3>
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                        <label className="flex flex-col gap-1 text-[10px] font-bold text-slate-600">Display name<input value={profile.displayName} onChange={(event) => updateLineProfile(key, 'displayName', event.target.value)} className="rounded border border-slate-300 p-2 text-xs font-normal" /></label>
-                        <label className="flex flex-col gap-1 text-[10px] font-bold text-slate-600">Provider name<input value={profile.providerName} onChange={(event) => updateLineProfile(key, 'providerName', event.target.value)} className="rounded border border-slate-300 p-2 text-xs font-normal" /></label>
-                        <label className="flex flex-col gap-1 text-[10px] font-bold text-slate-600">Information link<input value={profile.informationUrl} onChange={(event) => updateLineProfile(key, 'informationUrl', event.target.value)} placeholder="https://..." className="rounded border border-slate-300 p-2 text-xs font-normal" /></label>
-                      </div>
-                      <label className="flex flex-col gap-1 text-[10px] font-bold text-slate-600">
-                        Customer prompt for this line
-                        <textarea
-                          value={profile.userPrompt}
-                          onFocus={rememberVariableTarget((value) => updateLineProfile(key, 'userPrompt', value))}
-                          onChange={(event) => updateLineProfile(key, 'userPrompt', event.target.value)}
-                          rows={6}
-                          placeholder="Leave blank to use the shared user template prompt."
-                          className="rounded border border-slate-300 bg-slate-50 p-2 text-xs font-mono font-normal"
-                        />
-                      </label>
-                      <p className="text-[10px] text-slate-500">Keep <code>{'{message}'}</code>, <code>{'{knowledge}'}</code>, and <code>{'{slots}'}</code>. You can also use <code>{'{line_provider_name}'}</code> and <code>{'{line_information_url}'}</code>.</p>
-                    </section>
-                  );
-                })}
-                <div className="flex justify-end"><button type="button" onClick={handleSaveLineProfiles} disabled={savingLineProfiles} className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-4 py-2 rounded-lg font-bold disabled:opacity-50">{savingLineProfiles ? 'Saving...' : 'Save line settings'}</button></div>
-              </div>
+              <div className="p-3 sm:p-5 flex flex-col gap-4">
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[10px] leading-relaxed text-amber-800">
+                  Messages are sent from SMS. Only send to people who have consented to receive SMS. Numbers are checked before sending, duplicates are sent once, and each accepted SMS appears in its conversation history.
+                </div>
 
+                <label className="flex flex-col gap-1 text-[10px] font-bold text-slate-600">
+                  Mobile numbers
+                  <textarea
+                    value={bulkSmsRecipients}
+                    onChange={(event) => {
+                      setBulkSmsRecipients(event.target.value);
+                      setBulkSmsRequestId(null);
+                    }}
+                    disabled={sendingBulkSms}
+                    rows={7}
+                    placeholder={'0412 345 678\n0412 345 679\n+61 412 345 680'}
+                    className="rounded border border-slate-300 bg-slate-50 p-2 text-xs font-mono font-normal disabled:opacity-50"
+                  />
+                  <span className={`font-normal ${bulkSmsRecipientCount > 100 ? 'text-rose-600' : 'text-slate-500'}`}>
+                    {bulkSmsRecipientCount} recipient{bulkSmsRecipientCount === 1 ? '' : 's'} detected (up to 100). Use one number per line, or separate numbers with commas.
+                  </span>
+                </label>
+
+                <label className="flex flex-col gap-1 text-[10px] font-bold text-slate-600">
+                  Generic message
+                  <textarea
+                    value={bulkSmsMessage}
+                    onChange={(event) => {
+                      setBulkSmsMessage(event.target.value);
+                      setBulkSmsRequestId(null);
+                    }}
+                    disabled={sendingBulkSms}
+                    maxLength={1600}
+                    rows={5}
+                    placeholder="Write the message every recipient should receive."
+                    className="rounded border border-slate-300 bg-slate-50 p-2 text-xs font-normal disabled:opacity-50"
+                  />
+                  <span className="text-right font-normal text-slate-500">{bulkSmsMessage.length}/1600</span>
+                </label>
+
+                <div className="flex flex-col gap-2 border-t border-slate-100 pt-3 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="text-[10px] text-slate-500">You will be asked to confirm the line, recipient count, and message before delivery.</p>
+                  <button
+                    type="button"
+                    onClick={() => void handleBulkSms()}
+                    disabled={sendingBulkSms || bulkSmsRecipientCount === 0 || bulkSmsRecipientCount > 100 || !bulkSmsMessage.trim()}
+                    className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {sendingBulkSms ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                    {sendingBulkSms ? 'Sending…' : `Send to ${bulkSmsRecipientCount || 0}`}
+                  </button>
+                </div>
+
+                {bulkSmsResult && (
+                  <div className={`rounded-lg border p-3 text-xs ${bulkSmsResult.failed ? 'border-amber-200 bg-amber-50 text-amber-900' : 'border-emerald-200 bg-emerald-50 text-emerald-900'}`}>
+                    <p className="font-bold">{bulkSmsResult.sent} sent{bulkSmsResult.duplicates ? `, ${bulkSmsResult.duplicates} already processed` : ''}{bulkSmsResult.failed ? `, ${bulkSmsResult.failed} failed` : ''}.</p>
+                    {bulkSmsResult.failed > 0 && (
+                      <ul className="mt-2 list-disc space-y-1 pl-4 text-[10px]">
+                        {bulkSmsResult.results.filter((result) => result.status === 'failed').slice(0, 5).map((result) => (
+                          <li key={result.phone}>{result.phone}: {result.error || 'Delivery failed.'}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
             </details>
 
             {/* OpenAI Configuration Section */}
@@ -1848,7 +1976,7 @@ export default function SettingsView() {
             </details>
 
             {/* Local RAG Section */}
-            <details name="settings-sections" className="settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+            <details name="settings-sections" className="hidden settings-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
               <summary className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
                 <FileText className="w-5 h-5 text-indigo-600" />
                 <div>
@@ -1884,12 +2012,7 @@ export default function SettingsView() {
                       />
                     </div>
                     <div className="flex flex-col gap-1.5">
-                      <label htmlFor="learning-scope" className="text-[10px] font-bold uppercase tracking-wider text-slate-600">Who can use this learning?</label>
-                      <select id="learning-scope" value={learningScope} onChange={(event) => setLearningScope(event.target.value as 'shared' | 'primary' | 'secondary')} className="w-full rounded-lg border border-slate-300 bg-white p-2.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500">
-                        <option value="shared">Both lines, generic information only</option>
-                        <option value="primary">Line 1 only</option>
-                        <option value="secondary">Line 2 only</option>
-                      </select>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-slate-600">This learning applies to every customer conversation.</p>
                       <p className="text-[9px] text-slate-500">Service, pricing, identity, page-link, or referral information must be saved to its own line, never shared.</p>
                     </div>
                     <div className="flex flex-col gap-1.5">
@@ -2016,7 +2139,7 @@ export default function SettingsView() {
                           <textarea value={entry.text} onChange={event => setLearnedEntries(current => current.map(item => item.id === entry.id ? { ...item, text: event.target.value } : item))} rows={4} className="w-full rounded border border-slate-300 p-2 text-xs" />
                           <div className="flex items-center justify-between gap-2">
                             <select value={entry.scope} onChange={event => setLearnedEntries(current => current.map(item => item.id === entry.id ? { ...item, scope: event.target.value as LearnedInformationEntry['scope'] } : item))} className="rounded border border-slate-300 p-2 text-xs">
-                              <option value="shared">Shared</option><option value="primary">Line 1</option><option value="secondary">Line 2</option><option value="internal">Internal, not used in replies</option>
+                              <option value="shared">Customer replies</option><option value="internal">Internal, not used in replies</option>
                             </select>
                             <div className="flex gap-2"><button onClick={() => setEditingLearnedId(null)} className="rounded border border-slate-300 px-3 py-1.5 text-xs">Cancel</button><button onClick={() => handleSaveLearnedEntry(entry)} className="rounded bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white">Save</button></div>
                           </div>
@@ -2024,7 +2147,7 @@ export default function SettingsView() {
                           <label className="mt-0.5 flex shrink-0 items-center" title={`Select ${entry.topic || entry.type}`}>
                             <input type="checkbox" checked={selectedLearnedIds.has(entry.id)} onChange={() => toggleLearnedSelection(entry.id)} className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
                           </label>
-                          <div className="min-w-0"><p className="text-xs font-bold text-slate-800">{entry.topic || entry.type}</p><p className="mt-1 whitespace-pre-wrap text-[11px] text-slate-600">{entry.text}</p><p className="mt-1 flex flex-wrap gap-1.5 text-[10px] font-semibold"><span className="text-indigo-700">{entry.scope === 'primary' ? 'Line 1' : entry.scope === 'secondary' ? 'Line 2' : entry.scope === 'shared' ? 'Shared' : 'Internal'}</span><span className={entry.review_status === 'approved' ? 'text-emerald-700' : 'text-amber-700'}>{entry.review_status === 'approved' ? (entry.retrieval_enabled ? 'Approved and active' : 'Approved, not injected') : 'Needs review'}</span>{entry.review_source && <span className="text-slate-500">{entry.review_source === 'ai-redrafted' ? 'AI redrafted' : entry.review_source === 'ai-drafted' ? 'AI drafted' : 'Staff-edited reply'}</span>}</p>{entry.review_note && <p className="mt-1 text-[10px] text-amber-700">{entry.review_note}</p>}</div>
+                          <div className="min-w-0"><p className="text-xs font-bold text-slate-800">{entry.topic || entry.type}</p><p className="mt-1 whitespace-pre-wrap text-[11px] text-slate-600">{entry.text}</p><p className="mt-1 flex flex-wrap gap-1.5 text-[10px] font-semibold"><span className="text-indigo-700">{entry.scope === 'shared' ? 'Customer replies' : 'Internal'}</span><span className={entry.review_status === 'approved' ? 'text-emerald-700' : 'text-amber-700'}>{entry.review_status === 'approved' ? (entry.retrieval_enabled ? 'Approved and active' : 'Approved, not injected') : 'Needs review'}</span>{entry.review_source && <span className="text-slate-500">{entry.review_source === 'ai-redrafted' ? 'AI redrafted' : entry.review_source === 'ai-drafted' ? 'AI drafted' : entry.review_source === 'message-correction' ? 'Message correction' : 'Staff-edited reply'}</span>}</p>{entry.review_note && <p className="mt-1 text-[10px] text-amber-700">{entry.review_note}</p>}</div>
                           <div className="flex shrink-0 gap-1"><button onClick={() => setEditingLearnedId(entry.id)} className="rounded p-1.5 text-indigo-600 hover:bg-indigo-50" title="Edit learned rule"><Edit className="h-3.5 w-3.5" /></button>{entry.review_status !== 'approved' && <><button onClick={() => handleRedraftLearnedEntry(entry.id)} className="rounded border border-indigo-200 px-2 py-1 text-[10px] font-bold text-indigo-700 hover:bg-indigo-50" title="Ask AI to improve this draft">Redraft</button><button onClick={() => handleApproveLearnedEntry(entry.id)} className="rounded border border-emerald-200 px-2 py-1 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50" title="Approve learned rule">Approve</button></>}<button onClick={() => handleDeleteLearnedEntry(entry.id)} className="rounded p-1.5 text-rose-600 hover:bg-rose-50" title="Delete learned rule"><Trash2 className="h-3.5 w-3.5" /></button></div>
                         </div>}
                       </div>
@@ -2040,8 +2163,8 @@ export default function SettingsView() {
                   {smsLearningPreview && <div className="mt-3 space-y-3">
                     <div className="flex items-center justify-between gap-2"><p className="text-[10px] font-semibold text-slate-600">Sampled {smsLearningPreview.sampled}. Kept as possible guidance: {smsLearningPreview.candidates.length}. Rejected: {smsLearningPreview.rejected.length}.</p>{smsLearningPreview.candidates.length > 0 && <button type="button" onClick={handleImportSmsLearningCandidates} disabled={importingSmsLearningCandidates} className="shrink-0 rounded border border-emerald-300 bg-white px-2 py-1.5 text-[10px] font-bold text-emerald-800 hover:bg-emerald-50 disabled:opacity-50">{importingSmsLearningCandidates ? 'Adding…' : 'Add kept templates to review'}</button>}</div>
                     <div className="max-h-[520px] space-y-2 overflow-y-auto">
-                      {smsLearningPreview.candidates.map(item => <div key={item.id} className="rounded border border-emerald-200 bg-white p-2 text-[10px]"><p className="font-bold text-emerald-800">Keep — {item.account_key === 'primary' ? 'Line 1' : 'Line 2'}: {item.topic}</p><p className="mt-1 text-slate-700"><strong>When:</strong> {item.applies_when}</p><p className="mt-1 text-slate-700"><strong>Guidance:</strong> {item.instruction}</p>{item.example_reply && <p className="mt-1 text-slate-700"><strong>Example:</strong> {item.example_reply}</p>}<p className="mt-1 text-slate-500"><strong>Why:</strong> {item.reason}</p><p className="mt-1 text-slate-500"><strong>Source:</strong> {item.customer} → {item.reply}</p></div>)}
-                      {smsLearningPreview.rejected.map(item => <div key={item.id} className="rounded border border-rose-200 bg-white p-2 text-[10px]"><p className="font-bold text-rose-800">Rejected — {item.account_key === 'primary' ? 'Line 1' : 'Line 2'}</p><p className="mt-1 text-slate-600"><strong>Why:</strong> {item.reason}</p><p className="mt-1 text-slate-500"><strong>Source:</strong> {item.customer} → {item.reply}</p></div>)}
+                      {smsLearningPreview.candidates.map(item => <div key={item.id} className="rounded border border-emerald-200 bg-white p-2 text-[10px]"><p className="font-bold text-emerald-800">Keep — {item.topic}</p><p className="mt-1 text-slate-700"><strong>When:</strong> {item.applies_when}</p><p className="mt-1 text-slate-700"><strong>Guidance:</strong> {item.instruction}</p>{item.example_reply && <p className="mt-1 text-slate-700"><strong>Example:</strong> {item.example_reply}</p>}<p className="mt-1 text-slate-500"><strong>Why:</strong> {item.reason}</p><p className="mt-1 text-slate-500"><strong>Source:</strong> {item.customer} → {item.reply}</p></div>)}
+                      {smsLearningPreview.rejected.map(item => <div key={item.id} className="rounded border border-rose-200 bg-white p-2 text-[10px]"><p className="font-bold text-rose-800">Rejected</p><p className="mt-1 text-slate-600"><strong>Why:</strong> {item.reason}</p><p className="mt-1 text-slate-500"><strong>Source:</strong> {item.customer} → {item.reply}</p></div>)}
                     </div>
                   </div>}
                 </div>
@@ -2224,7 +2347,7 @@ export default function SettingsView() {
                 <div className="flex flex-col gap-4">
                   <div>
                     <h3 className="font-bold text-slate-800 text-xs">Manage Service Items</h3>
-                    <p className="text-[10px] text-slate-500 mt-0.5">Assign every service to Line 1 or Line 2. Only that line's AI can use it in a customer reply.</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Every service is available to the SMS assistant.</p>
                   </div>
 
                   {/* List of services */}
@@ -2273,17 +2396,7 @@ export default function SettingsView() {
                                 rows={2}
                                 className="text-xs border border-slate-350 rounded p-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
                               />
-                              <label className="flex items-center gap-2 text-[10px] font-bold text-slate-650">
-                                Service line
-                                <select
-                                  value={editServiceLineKey}
-                                  onChange={(event) => setEditServiceLineKey(event.target.value as 'primary' | 'secondary')}
-                                  className="rounded border border-slate-300 bg-white px-2 py-1.5 text-xs font-normal"
-                                >
-                                  <option value="primary">Line 1</option>
-                                  <option value="secondary">Line 2</option>
-                                </select>
-                              </label>
+                              {serviceAddons.length > 0 && <fieldset className="rounded border border-indigo-100 bg-white p-2"><legend className="px-1 text-[10px] font-bold text-indigo-800">Available add-ons</legend><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1.5">{serviceAddons.map(addon => <label key={addon.id} className="flex items-center gap-1.5 text-[10px] text-slate-700"><input type="checkbox" checked={editServiceAddonIds.includes(addon.id)} onChange={() => setEditServiceAddonIds(current => current.includes(addon.id) ? current.filter(id => id !== addon.id) : [...current, addon.id])} className="h-3.5 w-3.5 accent-indigo-600" />{addon.name}</label>)}</div></fieldset>}
                               <div className="flex items-center justify-between">
                                 <label className="flex items-center gap-2 cursor-pointer select-none">
                                   <button
@@ -2342,11 +2455,14 @@ export default function SettingsView() {
                                       duration hidden
                                     </span>
                                   )}
-                                  <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${srv.lineKey === 'secondary' ? 'bg-violet-100 text-violet-700 border-violet-200' : 'bg-sky-100 text-sky-700 border-sky-200'}`}>
-                                    {srv.lineKey === 'secondary' ? 'Line 2' : 'Line 1'}
-                                  </span>
+                                  {srv.isActive === false && (
+                                    <span className="text-[9px] bg-slate-200 text-slate-600 font-bold px-1.5 py-0.5 rounded border border-slate-300">
+                                      hidden from bookings
+                                    </span>
+                                  )}
                                 </span>
                                 <span className="text-[10px] text-slate-500 line-clamp-2">{srv.description}</span>
+                                {(srv.addonIds || []).length > 0 && <span className="text-[10px] font-semibold text-indigo-700">{(srv.addonIds || []).length} available add-on{(srv.addonIds || []).length === 1 ? '' : 's'}</span>}
                               </div>
                             </div>
                             <div className="flex items-center gap-3 shrink-0">
@@ -2355,6 +2471,15 @@ export default function SettingsView() {
                                 {srv.price}
                               </span>
                               <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleServiceBookingVisibility(srv.id)}
+                                  className={`p-1 rounded transition-colors cursor-pointer ${srv.isActive === false ? 'text-slate-500 hover:bg-slate-200' : 'text-emerald-600 hover:bg-emerald-100'}`}
+                                  title={srv.isActive === false ? 'Show on booking page' : 'Hide from booking page'}
+                                  aria-label={srv.isActive === false ? `Show ${srv.name} on booking page` : `Hide ${srv.name} from booking page`}
+                                >
+                                  {srv.isActive === false ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                                </button>
                                 <button
                                   onClick={() => startEditService(srv)}
                                   className="p-1 hover:bg-indigo-100 rounded text-indigo-600 transition-colors cursor-pointer"
@@ -2418,17 +2543,7 @@ export default function SettingsView() {
                       rows={2}
                       className="text-xs border border-slate-300 rounded p-2 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                     />
-                    <label className="flex items-center gap-2 text-[10px] font-bold text-slate-650">
-                      Service line
-                      <select
-                        value={newServiceLineKey}
-                        onChange={(event) => setNewServiceLineKey(event.target.value as 'primary' | 'secondary')}
-                        className="rounded border border-slate-300 bg-white px-2 py-1.5 text-xs font-normal"
-                      >
-                        <option value="primary">Line 1</option>
-                        <option value="secondary">Line 2</option>
-                      </select>
-                    </label>
+                    {serviceAddons.length > 0 && <fieldset className="rounded border border-slate-200 bg-white p-2.5"><legend className="px-1 text-[10px] font-bold text-slate-700">Available add-ons</legend><p className="mb-2 text-[10px] text-slate-500">Select any add-ons that can be used with this service.</p><div className="flex flex-wrap gap-x-3 gap-y-2">{serviceAddons.map(addon => <label key={addon.id} className="flex items-center gap-1.5 text-[11px] text-slate-700"><input type="checkbox" checked={newServiceAddonIds.includes(addon.id)} onChange={() => setNewServiceAddonIds(current => current.includes(addon.id) ? current.filter(id => id !== addon.id) : [...current, addon.id])} className="h-4 w-4 accent-indigo-600" />{addon.name}</label>)}</div></fieldset>}
                     <div className="flex items-center justify-between">
                       {/* Show/hide duration toggle */}
                       <label className="flex items-center gap-2 cursor-pointer select-none">
@@ -2452,6 +2567,24 @@ export default function SettingsView() {
                     </div>
                   </form>
 
+                  <section className="rounded-lg border border-emerald-200 bg-emerald-50/40 p-3.5" aria-labelledby="add-addon-heading">
+                    <div className="mb-3">
+                      <h4 id="add-addon-heading" className="flex items-center gap-1 text-xs font-bold text-emerald-950"><Plus className="h-3.5 w-3.5" />Add New Add-on</h4>
+                      <p className="mt-1 text-[10px] text-emerald-900">Add an optional extra and choose the shared services it can be used with. Extra time is optional and normally stays at 0.</p>
+                    </div>
+                    <form onSubmit={handleAddAddon} className="flex flex-col gap-2.5">
+                      <input type="text" value={newAddonName} onChange={event => setNewAddonName(event.target.value)} placeholder="Add-on name" required className="w-full rounded border border-emerald-200 bg-white p-2 text-xs focus:outline-none focus:ring-1 focus:ring-emerald-600" />
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="text-[10px] font-bold text-slate-700">Cost ($)<input type="number" min="0" value={newAddonPrice} onChange={event => setNewAddonPrice(Math.max(0, parseInt(event.target.value) || 0))} className="mt-1 w-full rounded border border-emerald-200 bg-white p-2 text-xs font-normal" /></label>
+                        <label className="text-[10px] font-bold text-slate-700">Extra time (mins)<input type="number" min="0" value={newAddonExtraTime} onChange={event => setNewAddonExtraTime(Math.max(0, parseInt(event.target.value) || 0))} className="mt-1 w-full rounded border border-emerald-200 bg-white p-2 text-xs font-normal" /></label>
+                      </div>
+                      <textarea value={newAddonDescription} onChange={event => setNewAddonDescription(event.target.value)} placeholder="Optional add-on description" rows={2} className="w-full rounded border border-emerald-200 bg-white p-2 text-xs focus:outline-none focus:ring-1 focus:ring-emerald-600" />
+                      <fieldset className="rounded border border-emerald-200 bg-white p-2.5"><legend className="px-1 text-[10px] font-bold text-emerald-900">Available with shared services</legend>{services.length ? <div className="mt-1 flex flex-col gap-2">{services.map(service => <label key={service.id} className="flex min-h-7 items-center gap-2 text-[11px] text-slate-700"><input type="checkbox" checked={newAddonServiceIds.includes(service.id)} onChange={() => setNewAddonServiceIds(current => current.includes(service.id) ? current.filter(id => id !== service.id) : [...current, service.id])} className="h-4 w-4 accent-emerald-600" />{service.name}</label>)}</div> : <p className="mt-1 text-[10px] text-slate-500">Create a service first, then choose it here.</p>}</fieldset>
+                      <button type="submit" className="self-end rounded bg-emerald-700 px-3.5 py-2 text-[11px] font-bold text-white hover:bg-emerald-800">Add add-on</button>
+                    </form>
+                    {serviceAddons.length > 0 && <div className="mt-4 border-t border-emerald-200 pt-3"><p className="text-[10px] font-bold uppercase tracking-wide text-emerald-900">Current add-ons</p><div className="mt-2 space-y-2">{serviceAddons.map(addon => <div key={addon.id} className="rounded border border-emerald-100 bg-white p-2.5"><div className="flex items-start justify-between gap-2"><div><p className="text-xs font-bold text-slate-800">{addon.name} <span className="text-emerald-700">${addon.price}</span>{addon.extraTime > 0 && <span className="ml-1 text-[10px] font-semibold text-slate-500">+{addon.extraTime} min</span>}</p>{addon.description && <p className="mt-0.5 text-[10px] text-slate-500">{addon.description}</p>}</div><button type="button" onClick={() => handleDeleteAddon(addon.id)} className="rounded p-1 text-rose-600 hover:bg-rose-50" title="Delete add-on"><Trash2 className="h-3.5 w-3.5" /></button></div><fieldset className="mt-2"><legend className="text-[10px] font-semibold text-slate-600">Available with</legend><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1.5">{services.map(service => <label key={service.id} className="flex items-center gap-1.5 text-[10px] text-slate-700"><input type="checkbox" checked={addon.serviceIds.includes(service.id)} onChange={() => toggleAddonService(addon.id, service.id)} className="h-3.5 w-3.5 accent-emerald-600" />{service.name}</label>)}</div>{services.length === 0 && <p className="mt-1 text-[10px] text-slate-500">No services available yet.</p>}</fieldset></div>)}</div></div>}
+                  </section>
+
                   {/* Save services control */}
                   <div className="flex justify-end pt-2 border-t border-slate-150">
                     <button
@@ -2459,7 +2592,7 @@ export default function SettingsView() {
                       disabled={savingServices}
                       className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs px-4 py-2.5 rounded-lg shadow-sm transition-all cursor-pointer border border-transparent"
                     >
-                      {savingServices ? 'Saving services list...' : 'Save Services List'}
+                      {savingServices ? 'Saving catalogue...' : 'Save Services & Add-ons'}
                     </button>
                   </div>
 
@@ -2793,14 +2926,14 @@ export default function SettingsView() {
             <div className="flex items-center gap-2">
               <MessageSquare className="w-5 h-5 text-emerald-600" />
               <div>
-                <h2 className="font-bold text-slate-800 text-sm">First Contact Auto-Responders</h2>
-                <p className="text-[10px] text-slate-500">Each SMS number sends its own fixed greeting before normal AI replies begin.</p>
+                <h2 className="font-bold text-slate-800 text-sm">First Contact Auto-Responder</h2>
+                <p className="text-[10px] text-slate-500">Send one fixed greeting before normal AI replies begin.</p>
               </div>
             </div>
           </summary>
 
           <div className="p-5 flex flex-col gap-5 font-sans">
-            {(['primary', 'secondary'] as const).map((key) => {
+            {(['primary'] as const).map((key) => {
               const account = firstContactConfig.accounts[key];
               const label = firstContactConfig.labels[key];
               return (
@@ -2808,7 +2941,7 @@ export default function SettingsView() {
                   <div className="mb-4 flex items-center justify-between gap-3">
                     <div>
                       <h3 className="text-sm font-extrabold text-slate-800">{label}</h3>
-                      <p className="text-[10px] text-slate-500">{key === 'primary' ? 'Original SMS account · Line 1' : 'Second SMS account · Line 2'}</p>
+                      <p className="text-[10px] text-slate-500">Single SMS account</p>
                     </div>
                     <button
                       type="button"
@@ -2879,7 +3012,7 @@ export default function SettingsView() {
                 disabled={savingFirstContact}
                 className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-bold text-xs px-4 py-2.5 rounded-lg shadow-sm transition-all cursor-pointer border border-transparent"
               >
-                {savingFirstContact ? 'Saving...' : 'Save Both First Contact Replies'}
+                {savingFirstContact ? 'Saving...' : 'Save First Contact Reply'}
               </button>
             </div>
           </div>

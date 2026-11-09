@@ -4,6 +4,8 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 import main
 from services import business_assistant_service as business
@@ -22,6 +24,7 @@ def test_business_assistant_hard_excludes_coding_and_deployment_tools():
     assert "confirm_business_rule" in names
     assert "list_curator_questions" in names
     assert "create_maintenance_handoff" in names
+    assert "clear_thread_review_tags" in names
 
 
 def test_business_assistant_instructions_define_user_level_boundary():
@@ -31,6 +34,7 @@ def test_business_assistant_instructions_define_user_level_boundary():
     assert "ask one clear question at a time" in text
     assert "explicit confirmation" in text
     assert "create_maintenance_handoff" in text
+    assert "remove the Needs Review tag" in text
 
 
 def test_business_assistant_rejects_hidden_engineering_tool(monkeypatch):
@@ -100,3 +104,37 @@ def test_private_internal_record_does_not_become_owner_question():
     }
     findings = main.inspect_knowledge_integrity([record])
     assert not any(item["finding_type"] == "owner_answer_required" for item in findings)
+
+
+def test_technical_handoff_becomes_ticket_and_queues_safe_coding_work(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    main.Base.metadata.create_all(bind=engine)
+    db = sessionmaker(bind=engine)()
+    calls = []
+    monkeypatch.setattr(business, "_operations_start_coding_task", lambda *args, **kwargs: (
+        calls.append((args, kwargs)) or {"status": "started", "task_id": "coding-task-1"}
+    ))
+
+    result = business.execute_business_assistant_tool(
+        db,
+        "create_maintenance_handoff",
+        {
+            "title": "Booking screen does not save",
+            "category": "bug",
+            "observed_behavior": "The save control returns to the form without confirming the booking.",
+            "affected_area": "Booking form",
+            "user_impact": "Customers cannot complete a booking.",
+            "evidence": "Reproduced in the customer simulator.",
+            "desired_outcome": "A valid booking is saved and a confirmation is shown.",
+        },
+        "The booking form is broken.",
+    )
+
+    assert result["status"] == "ticket_created"
+    assert result["ticket_status"] == "engineering_in_progress"
+    ticket = db.get(main.SupportTicket, result["ticket_id"])
+    assert ticket.coding_task_id == "coding-task-1"
+    assert ticket.category == "bug"
+    assert calls[0][1]["support_ticket_id"] == ticket.id
+    assert calls[0][1]["auto_propose_deployment"] is True
+    db.close()

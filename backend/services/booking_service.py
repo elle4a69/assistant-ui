@@ -48,6 +48,7 @@ try:
         FIRST_CONTACT_ACCOUNT_KEYS,
         PROMPTS_DIR,
         WORKING_HOURS_PATH,
+        AVAILABILITY_CONFIG_PATH,
     )
     from backend.core.clients import (
         GoogleCalendarService,
@@ -78,6 +79,7 @@ except ImportError:
         FIRST_CONTACT_ACCOUNT_KEYS,
         PROMPTS_DIR,
         WORKING_HOURS_PATH,
+        AVAILABILITY_CONFIG_PATH,
     )
     from core.clients import (
         GoogleCalendarService,
@@ -97,7 +99,6 @@ logger = logging.getLogger(__name__)
 
 BOOKING_PROVIDERS = {
     "tori": {"name": "Tori", "sms_account_key": "primary"},
-    "anonymous": {"name": "Anonymous", "sms_account_key": "secondary"},
 }
 
 
@@ -236,6 +237,51 @@ def load_working_hours() -> List[Dict[str, Any]]:
             pass
     return DEFAULT_WORKING_HOURS
 
+def load_availability_config() -> Dict[str, Any]:
+    avail_path = _dyn("AVAILABILITY_CONFIG_PATH", AVAILABILITY_CONFIG_PATH)
+    if os.path.exists(avail_path):
+        try:
+            with open(avail_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and "weeklyHours" in data:
+                    return {
+                        "maxDaysAhead": int(data.get("maxDaysAhead", 14)),
+                        "weeklyHours": data["weeklyHours"],
+                    }
+        except Exception:
+            pass
+    wh_loader = _dyn("load_working_hours", load_working_hours)
+    wh = wh_loader()
+    weekly_hours = []
+    for entry in wh:
+        day = entry.get("day", "")
+        enabled = entry.get("enabled", True)
+        open_time = entry.get("open", "09:00")
+        close_time = entry.get("close", "17:00")
+        slots = []
+        if enabled and open_time and close_time:
+            try:
+                oh, om = map(int, open_time.split(":"))
+                ch, cm = map(int, close_time.split(":"))
+                curr = oh * 60 + om
+                end = ch * 60 + cm
+                while curr + 30 <= end:
+                    slots.append(f"{curr // 60:02d}:{curr % 60:02d}")
+                    curr += 30
+            except Exception:
+                slots = []
+        weekly_hours.append({
+            "day": day,
+            "enabled": enabled,
+            "open": open_time,
+            "close": close_time,
+            "slots": slots,
+        })
+    return {
+        "maxDaysAhead": 14,
+        "weeklyHours": weekly_hours,
+    }
+
 
 def load_booking_services() -> List[Dict[str, Any]]:
     """Load both line catalogues for booking infrastructure, never AI context."""
@@ -249,7 +295,10 @@ def load_booking_services() -> List[Dict[str, Any]]:
             except ImportError:
                 loader = None
     if callable(loader):
-        return loader()
+        return [
+            service for service in loader()
+            if isinstance(service, dict) and service.get("isActive", True) is not False
+        ]
     return []
 
 
@@ -279,7 +328,11 @@ def get_service_for_booking(service_id: str, account_key: Optional[str] = None) 
         services = all_loader() if callable(all_loader) else []
     return next((
         service for service in services
-        if isinstance(service, dict) and service.get("id") == service_id
+        if (
+            isinstance(service, dict)
+            and service.get("isActive", True) is not False
+            and service.get("id") == service_id
+        )
     ), None)
 
 
@@ -314,7 +367,7 @@ def is_explicit_booking_rejection(message: str) -> bool:
     ))
 
 
-def asks_for_secondary_booking_confirmation(message: str) -> bool:
+def asks_for_redundant_booking_confirmation(message: str) -> bool:
     """Reject the artificial extra approval step after booking details are complete."""
     normalized = re.sub(
         r"[^a-z0-9' ]+",
@@ -333,6 +386,9 @@ def asks_for_secondary_booking_confirmation(message: str) -> bool:
     ))
 
 
+# Backward-compatible alias
+asks_for_secondary_booking_confirmation = asks_for_redundant_booking_confirmation
+
 def booking_availability_error(start: datetime, duration: int, account_key: str = "primary") -> Optional[str]:
     """Return a customer-safe reason when an exact proposed slot cannot be booked."""
     now_fn = _dyn("current_business_time", current_business_time)
@@ -348,23 +404,53 @@ def booking_availability_error(start: datetime, duration: int, account_key: str 
         entry["day"]: entry for entry in hours_loader()
         if isinstance(entry, dict) and entry.get("day")
     }
-    day_config = working_hours.get(DAY_NAMES[start.weekday()])
-    if not day_config or not day_config.get("enabled", False):
-        return "The business is closed at that time."
-    try:
-        open_hour, open_minute = map(int, day_config["open"].split(":"))
-        close_hour, close_minute = map(int, day_config["close"].split(":"))
-    except (KeyError, TypeError, ValueError):
-        return "The working hours for that day are not configured correctly."
+    avail_loader = _dyn("load_availability_config", load_availability_config)
+    avail_cfg = avail_loader() if callable(avail_loader) else {}
+    weekly_hours = {
+        entry["day"]: entry for entry in avail_cfg.get("weeklyHours", [])
+        if isinstance(entry, dict) and entry.get("day")
+    }
 
-    start_minutes = start.hour * 60 + start.minute
-    end_minutes = end.hour * 60 + end.minute
-    if (
-        start.date() != end.date()
-        or start_minutes < open_hour * 60 + open_minute
-        or end_minutes > close_hour * 60 + close_minute
-    ):
+    day_name = DAY_NAMES[start.weekday()]
+    wh_day = working_hours.get(day_name)
+    avail_day = weekly_hours.get(day_name)
+    day_config = avail_day or wh_day
+
+    if wh_day and not wh_day.get("enabled", True):
+        return "The business is closed at that time."
+    if not day_config or not day_config.get("enabled", True):
+        return "The business is closed at that time."
+
+    if start.date() != end.date():
         return "The full appointment does not fit within working hours."
+
+    if day_config.get("slots") is not None:
+        slots_list = set(day_config.get("slots") or [])
+        if not slots_list:
+            return "The full appointment does not fit within working hours."
+        start_min = start.hour * 60 + start.minute
+        end_min = end.hour * 60 + end.minute
+        k_min = start_min // 30
+        k_max = (end_min - 1) // 30
+        for k in range(k_min, k_max + 1):
+            chunk_m = k * 30
+            chunk_str = f"{chunk_m // 60:02d}:{chunk_m % 60:02d}"
+            if chunk_str not in slots_list:
+                return "The full appointment does not fit within working hours."
+    else:
+        try:
+            open_hour, open_minute = map(int, str(day_config.get("open", "09:00")).split(":"))
+            close_hour, close_minute = map(int, str(day_config.get("close", "17:00")).split(":"))
+        except (KeyError, TypeError, ValueError):
+            return "The working hours for that day are not configured correctly."
+
+        start_minutes = start.hour * 60 + start.minute
+        end_minutes = end.hour * 60 + end.minute
+        if (
+            start_minutes < open_hour * 60 + open_minute
+            or end_minutes > close_hour * 60 + close_minute
+        ):
+            return "The full appointment does not fit within working hours."
 
     cs = _dyn("calendar_service", calendar_service)
     authoritative_loader = getattr(cs, "get_busy_slots_for_account", None)
@@ -486,7 +572,7 @@ def confirm_conversational_booking(
     normalized_start = _audit_iso(start, audit.get("timezone", "Australia/Hobart"))
     booking_inputs = {
         "service_id": str(proposal.get("service_id") or ""),
-        "provider_binding": "secondary-line-provider" if thread.sms_account_key == "secondary" else "primary-line-provider",
+        "provider_binding": "sms-provider",
         "calendar_binding": "business-calendar",
         "requested_slot": normalized_start,
         "duration_minutes": duration,
@@ -613,7 +699,7 @@ def confirm_conversational_booking(
         return {"status": "rejected", "reason": availability_error}, False
 
     end = start + timedelta(minutes=duration)
-    booking_provider_name = "Anonymous" if thread.sms_account_key == "secondary" else "Tori"
+    booking_provider_name = "Tori"
     booking_summary = (
         f"{proposal['customer_name']} - {proposal['service_name']} "
         f"({booking_provider_name})"
@@ -689,7 +775,7 @@ def confirm_conversational_booking(
                     template = handle.read()
             except OSError:
                 pass
-        provider_name = "Anonymous" if thread.sms_account_key == "secondary" else "Tori"
+        provider_name = "Tori"
 
         render_fn = _dyn("render_template_variables", None)
         if render_fn is None:
@@ -1234,6 +1320,22 @@ def booking_proposal_has_live_evidence(
     return False
 
 
+
+
+def validate_booking_request(start: datetime, duration: int, account_key: str = "primary") -> Optional[str]:
+    """Validate booking request against working hours, custom slots, and calendar availability."""
+    return booking_availability_error(start, duration, account_key)
+
+
+def search_availability(
+    service_id: str,
+    start: datetime,
+    end: datetime,
+    limit: int = 50,
+    account_key: str = "primary",
+) -> List[Dict[str, Any]]:
+    suite = get_booking_tool_suite(account_key)
+    return suite.provider.search_availability(service_id, start, end, limit)
 def get_booking_tool_suite(account_key: str) -> Any:
     """Build discovery tools bound to the resolved provider, never all lines."""
     resolve_provider_context(account_key)
@@ -1278,9 +1380,27 @@ def get_booking_tool_suite(account_key: str) -> Any:
                 except ImportError:
                     line_loader = None
         hours_loader = _dyn("load_working_hours", load_working_hours)
+        avail_loader = _dyn("load_availability_config", load_availability_config)
+        def discovery_hours_loader() -> List[Dict[str, Any]]:
+            wh = hours_loader()
+            cfg = avail_loader() if callable(avail_loader) else {}
+            weekly = cfg.get("weeklyHours") or []
+            weekly_by_day = {item["day"]: item for item in weekly if isinstance(item, dict) and "day" in item}
+            result = []
+            for item in wh:
+                if isinstance(item, dict) and "day" in item:
+                    d = item["day"]
+                    if d in weekly_by_day and "slots" in weekly_by_day[d]:
+                        merged = dict(item)
+                        merged["slots"] = weekly_by_day[d]["slots"]
+                        result.append(merged)
+                    else:
+                        result.append(item)
+            return result
+
         provider = LegacyCalendarDiscoveryProvider(
             services_loader=lambda: line_loader(account_key) if callable(line_loader) else [],
-            working_hours_loader=hours_loader,
+            working_hours_loader=discovery_hours_loader,
             busy_slots_loader=busy_slots_loader,
             timezone_name=timezone_name,
         )
@@ -1308,11 +1428,7 @@ def _booking_reminder_parts(
     summary: str,
     sms_account_key: Optional[str] = None,
 ) -> tuple[str, str, str, str]:
-    if sms_account_key in FIRST_CONTACT_ACCOUNT_KEYS:
-        provider_key = "anonymous" if sms_account_key == "secondary" else "tori"
-    else:
-        provider_key = "anonymous" if re.search(r"\(Anonymous\)\s*$", summary or "", re.IGNORECASE) else "tori"
-    provider = BOOKING_PROVIDERS[provider_key]
+    provider = BOOKING_PROVIDERS["tori"]
     cleaned = re.sub(r"\s*\((?:Tori|Anonymous)\)\s*$", "", summary or "", flags=re.IGNORECASE)
     if " - " in cleaned:
         name, service = cleaned.split(" - ", 1)
@@ -1443,6 +1559,7 @@ __all__ = [
     "get_service_for_booking",
     "is_explicit_booking_confirmation",
     "is_explicit_booking_rejection",
+    "asks_for_redundant_booking_confirmation",
     "asks_for_secondary_booking_confirmation",
     "parse_business_datetime",
     "current_business_time",
@@ -1474,6 +1591,9 @@ __all__ = [
     "_booking_reminder_parts",
     "BOOKING_PROVIDERS",
     "load_working_hours",
+    "load_availability_config",
+    "validate_booking_request",
+    "search_availability",
     "requested_duration_minutes",
     "get_booking_tool_suite",
     "parse_customer_requested_slot",

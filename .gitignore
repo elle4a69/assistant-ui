@@ -60,3 +60,10 @@ backend/refine_training_pairs.py
 # Operating system files
 .DS_Store
 Thumbs.db
+
+# Backups and temporary worktrees
+.backups/
+.codex-fly-deploy/
+worktrees/
+tmp/
+*.bak_test

@@ -25,7 +25,7 @@ function canonicalPhone(phone: string) {
 export default function SmsClientView() {
   const [customerPhone, setCustomerPhone] = useState('+61');
   const [activePhone, setActivePhone] = useState<string | null>(null);
-  const [smsAccountKey, setSmsAccountKey] = useState<'primary' | 'secondary'>('primary');
+  const smsAccountKey: 'primary' = 'primary';
   const [threads, setThreads] = useState<ThreadListItem[]>([]);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -190,24 +190,8 @@ export default function SmsClientView() {
             {/* Phone selection form */}
             <div className="flex flex-col gap-3">
               <div>
-                <label className="block text-xs font-semibold text-slate-500 mb-1" htmlFor="simulator-account">
-                  SMS Line
-                </label>
-                <select
-                  id="simulator-account"
-                  value={smsAccountKey}
-                  onChange={(e) => {
-                    setSmsAccountKey(e.target.value as 'primary' | 'secondary');
-                    setActivePhone(null);
-                    setThreadId(null);
-                    setMessages([]);
-                    setSimulationError(null);
-                  }}
-                  className="w-full text-sm bg-slate-50 border border-slate-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                >
-                  <option value="primary">Tori (primary)</option>
-                  <option value="secondary">Anonymous (secondary)</option>
-                </select>
+                <span className="block text-xs font-semibold text-slate-500 mb-1">SMS</span>
+                <p className="w-full rounded-lg border border-slate-300 bg-slate-50 p-2 text-sm">Tori</p>
               </div>
               <div>
                 <label className="block text-xs font-semibold text-slate-500 mb-1">
@@ -304,7 +288,7 @@ export default function SmsClientView() {
                 <div className="flex flex-col">
                   <span className="text-xs font-bold truncate max-w-[140px]">{activePhone}</span>
                   <span className="text-[9px] text-emerald-400 font-medium">
-                    {smsAccountKey === 'primary' ? 'Tori' : 'Anonymous'} · internal simulation
+                    Tori · internal simulation
                   </span>
                 </div>
               </div>

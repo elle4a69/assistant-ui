@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import asyncio
 import json
 import logging
 import os
@@ -107,7 +108,13 @@ def save_learned_information(
     knowledge_summary: str,
     account_key: str,
 ) -> str:
-    """Atomically upsert one reusable learned-information record and refresh RAG."""
+    """Persist owner-supplied reusable knowledge and refresh RAG.
+
+    This is an explicit owner action in response to a live knowledge request,
+    not an inference from an SMS transcript.  Safe, durable facts should be
+    usable on the very next matching question.  Volatile or uncertain material
+    remains quarantined for the existing review workflow.
+    """
     entry = {
         "id": request_event_id,
         "type": "information_request_resolution",
@@ -126,13 +133,19 @@ def save_learned_information(
         "retrieval_enabled": False,
     }
     classify_fn = _dyn("classify_knowledge_entries", classify_knowledge_entries)
-    entry.update(classify_fn([entry]).get(entry["id"], _quarantined_knowledge_classification()))
+    classification = classify_fn([entry]).get(entry["id"], _quarantined_knowledge_classification())
+    entry.update(classification)
+    # Every message-originated learning item takes the same curator path.
+    # The curator may activate a safe, non-conflicting owner fact immediately,
+    # but the capture flow itself never puts a record into live retrieval.
     entry["review_status"] = "pending"
+    entry["status"] = "quarantined"
     entry["retrieval_enabled"] = False
     entry["scope"] = account_key if account_key in FIRST_CONTACT_ACCOUNT_KEYS else "internal"
     entry["source_account_key"] = account_key
     upsert_fn = _dyn("_upsert_learned_information_entry", _upsert_learned_information_entry)
-    upsert_fn(entry)
+    if not upsert_fn(entry):
+        raise ValueError("The supplied information could not be saved as reusable knowledge.")
     return LEARNED_INFORMATION_FILENAME
 
 
@@ -271,11 +284,108 @@ def approve_learned_information_entry(entry_id: str) -> Dict[str, Any]:
         "category": classification.get("category", "internal_or_uncertain"),
         "classification_version": classification.get("classification_version", KNOWLEDGE_CLASSIFICATION_VERSION),
         "classification_status": classification.get("classification_status", "classified"),
-        "retrieval_enabled": not unsafe and entry.get("scope") in {"shared", "primary", "secondary"},
+        "retrieval_enabled": not unsafe and entry.get("scope") in {"shared", "primary"},
     }
     if unsafe:
         updates["review_note"] = "Approved for audit only; literal time-sensitive, pricing, arrival, customer-specific, or uncertain material is not injected into AI replies."
     return replace_learned_information_entry(entry_id, updates)
+
+
+def curate_message_learning(entry_id: str) -> Dict[str, Any]:
+    """Apply the bounded automatic curator pass for a message-ui learning item.
+
+    The message screen is the sole training surface.  This function is the
+    downstream gate: it only activates a genuinely new, durable, scoped fact.
+    Volatile, private, duplicate, conflicting, or replacement material is
+    retained safely for audit and is never injected into later customer replies.
+    """
+    entries = {entry["id"]: entry for entry in list_learned_information()}
+    entry = entries.get(entry_id)
+    if not entry:
+        return {"status": "not_saved", "retrievalEnabled": False}
+
+    classification = classify_knowledge_entries([entry]).get(
+        entry_id, _quarantined_knowledge_classification()
+    )
+    category = classification.get("category", "internal_or_uncertain")
+    unsafe = (
+        category in {"availability_or_booking_state", "customer_specific", "internal_or_uncertain"}
+        or has_unsafe_literal_learning_detail(str(entry.get("text", "")))
+    )
+    candidate_kind = str(entry.get("candidate_classification") or "uncertain")
+    common_updates = {
+        "category": category,
+        "classification_version": classification.get("classification_version", KNOWLEDGE_CLASSIFICATION_VERSION),
+        "classification_status": classification.get("classification_status", "classified"),
+    }
+
+    if unsafe:
+        updated = replace_learned_information_entry(entry_id, {
+            **common_updates,
+            "review_status": "approved",
+            "status": "quarantined",
+            "retrieval_enabled": False,
+            "review_note": "Curator retained this message learning for audit only because it is time-sensitive, private, uncertain, or otherwise unsafe for future replies.",
+        })
+        return {"status": "kept_out_of_live_replies", "retrievalEnabled": False, "entry": updated}
+
+    if candidate_kind != "genuinely_new":
+        updated = replace_learned_information_entry(entry_id, {
+            **common_updates,
+            "review_status": "approved",
+            "status": "quarantined",
+            "retrieval_enabled": False,
+            "review_note": "Curator retained this message learning for audit only because it may duplicate, add to, or conflict with existing guidance.",
+        })
+        return {"status": "kept_out_of_live_replies", "retrievalEnabled": False, "entry": updated}
+
+    approved = approve_learned_information_entry(entry_id)
+    return {
+        "status": "applied" if approved.get("retrieval_enabled") else "kept_out_of_live_replies",
+        "retrievalEnabled": bool(approved.get("retrieval_enabled")),
+        "entry": approved,
+    }
+
+
+def run_pending_message_learning_curator() -> Dict[str, int]:
+    """Finish outstanding message-derived learning without operator action."""
+    processed = applied = retained = 0
+    for entry in list_learned_information():
+        if entry.get("review_status") != "pending":
+            continue
+        try:
+            outcome = curate_message_learning(entry["id"])
+            processed += 1
+            if outcome.get("status") == "applied":
+                applied += 1
+            else:
+                retained += 1
+        except Exception as exc:
+            # A malformed historical record must not stop ongoing curation.
+            print(f"Message learning curator skipped {entry.get('id')}: {type(exc).__name__}")
+    return {"processed": processed, "applied": applied, "retained": retained}
+
+
+async def autonomous_knowledge_curator_worker() -> None:
+    """Periodically run the autonomous curator as a safety net and health check."""
+    try:
+        interval_seconds = max(300, int(os.getenv("KNOWLEDGE_CURATOR_INTERVAL_SECONDS", "21600")))
+    except ValueError:
+        interval_seconds = 21600
+    # Let the HTTP server complete its startup health checks. Immediate
+    # message-originated curation already happens in the request path.
+    await asyncio.sleep(60)
+    while True:
+        try:
+            def run_maintenance() -> None:
+                run_pending_message_learning_curator()
+                from backend.curator.supersession import run_autonomous_knowledge_maintenance
+                run_autonomous_knowledge_maintenance()
+            await asyncio.to_thread(run_maintenance)
+        except Exception as exc:
+            # Curator maintenance is strictly isolated from SMS delivery.
+            print(f"Autonomous knowledge curator maintenance failed: {type(exc).__name__}")
+        await asyncio.sleep(interval_seconds)
 
 
 def approve_pending_learned_information() -> Dict[str, int]:
@@ -429,7 +539,7 @@ def save_manual_learning(
         "type": "manual_guidance",
         "source_type": "manual_guidance",
         "canonical_key": _canonical_knowledge_key(structured["topic"]),
-        "sms_account_key": scope if scope in {"primary", "secondary"} else "shared",
+        "sms_account_key": scope if scope == "primary" else "shared",
         "topic": structured["topic"],
         "applies_when": structured["applies_when"],
         "instruction": structured["instruction"],
@@ -449,7 +559,7 @@ def save_manual_learning(
     entry.update(classify_knowledge_entries([entry]).get(entry["id"], _quarantined_knowledge_classification()))
     entry["review_status"] = "pending"
     entry["retrieval_enabled"] = False
-    if scope in {"primary", "secondary"}:
+    if scope == "primary":
         entry["scope"] = scope
         entry["source_account_key"] = scope
     _upsert_learned_information_entry(entry)
@@ -507,8 +617,10 @@ def redraft_all_pending_learned_information() -> Dict[str, int]:
     return {"processed": processed, "failed": failed}
 
 
-def save_edited_draft_learning(db: Session, thread: Thread, draft: Message) -> Optional[Dict[str, Any]]:
-    """Turn a staff-edited draft into safely classified reusable guidance.
+def save_edited_draft_learning(
+    db: Session, thread: Thread, draft: Message, *, was_edited: bool = True,
+) -> Optional[Dict[str, Any]]:
+    """Turn a staff-approved draft into safely classified reusable guidance.
 
     The classifier is the gatekeeper: appointment details, current availability,
     names and other customer-specific material are retained only as quarantined
@@ -523,10 +635,10 @@ def save_edited_draft_learning(db: Session, thread: Thread, draft: Message) -> O
         return None
     now = datetime.utcnow().isoformat() + "Z"
     entry = {
-        "id": f"edited-draft-{draft.id}",
-        "type": "staff_edited_draft",
-        "source_type": "staff_edited_draft",
-        "canonical_key": _canonical_knowledge_key("Staff-approved customer response"),
+        "id": f"approved-draft-{draft.id}",
+        "type": "staff_edited_draft" if was_edited else "staff_approved_draft",
+        "source_type": "staff_edited_draft" if was_edited else "staff_approved_draft",
+        "canonical_key": _canonical_knowledge_key(f"Staff-approved reply: {customer_message.text}"),
         "sms_account_key": thread.sms_account_key if thread.sms_account_key in FIRST_CONTACT_ACCOUNT_KEYS else "internal",
         "topic": "Staff-approved customer response",
         "applies_when": customer_message.text.strip()[:1000],
@@ -545,7 +657,7 @@ def save_edited_draft_learning(db: Session, thread: Thread, draft: Message) -> O
         "revision": 1,
         "review_status": "pending",
         "retrieval_enabled": False,
-        "review_source": "staff-edited-reply",
+        "review_source": "staff-edited-reply" if was_edited else "staff-approved-reply",
     }
     entry.update(
         classify_knowledge_entries([entry]).get(
@@ -556,7 +668,78 @@ def save_edited_draft_learning(db: Session, thread: Thread, draft: Message) -> O
     entry["source_account_key"] = thread.sms_account_key
     entry["review_status"] = "pending"
     entry["retrieval_enabled"] = False
-    _upsert_learned_information_entry(entry)
+    if not _upsert_learned_information_entry(entry):
+        return None
+    return entry
+
+
+def save_ai_response_correction_learning(
+    db: Session,
+    thread: Thread,
+    response: Message,
+    correction: str,
+    suggested_reply: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Queue owner feedback about an AI response for curator review.
+
+    A correction is evidence, not an instruction to mutate live knowledge.  It
+    therefore retains the original reply and conversation context in a
+    quarantined learning record for an owner/curator to redraft and approve.
+    """
+    customer_message = db.query(Message).filter(
+        Message.thread_id == thread.id,
+        Message.role == "customer",
+        Message.at <= response.at,
+    ).order_by(Message.at.desc(), Message.id.desc()).first()
+    customer_question = customer_message.text.strip() if customer_message else "A customer conversation in this thread."
+    clean_correction = correction.strip()
+    clean_suggested_reply = (suggested_reply or "").strip()
+    now = datetime.utcnow().isoformat() + "Z"
+    topic = f"Correction to AI reply: {customer_question[:120]}"
+    guidance_parts = [
+        f"Customer context: {customer_question}",
+        f"AI reply to correct: {response.text.strip()}",
+        f"Owner correction: {clean_correction}",
+    ]
+    if clean_suggested_reply:
+        guidance_parts.append(f"Suggested replacement: {clean_suggested_reply}")
+    entry = {
+        "id": f"message-correction-{response.id}-{uuid.uuid4().hex}",
+        "type": "ai_response_correction",
+        "source_type": "ai_response_correction",
+        "canonical_key": _canonical_knowledge_key(topic),
+        "sms_account_key": thread.sms_account_key if thread.sms_account_key in FIRST_CONTACT_ACCOUNT_KEYS else "internal",
+        "topic": topic,
+        "applies_when": customer_question[:1000],
+        "instruction": clean_correction,
+        "example_reply": clean_suggested_reply,
+        "source_message_id": response.id,
+        "owner_guidance": "\n".join(guidance_parts),
+        "text": "\n".join(guidance_parts),
+        "created_at": now,
+        "updated_at": now,
+        "status": "quarantined",
+        "supersedes_id": None,
+        "revision": 1,
+        "review_status": "pending",
+        "retrieval_enabled": False,
+        "review_source": "message-correction",
+    }
+    entry.update(
+        classify_knowledge_entries([entry]).get(
+            entry["id"], _quarantined_knowledge_classification()
+        )
+    )
+    # Classification helps the reviewer understand its scope, but this feedback
+    # must never change a future reply until a person explicitly approves it.
+    entry["scope"] = thread.sms_account_key if thread.sms_account_key in FIRST_CONTACT_ACCOUNT_KEYS else "internal"
+    entry["source_account_key"] = thread.sms_account_key
+    entry["status"] = "quarantined"
+    entry["review_status"] = "pending"
+    entry["retrieval_enabled"] = False
+    if not _upsert_learned_information_entry(entry):
+        entry["review_status"] = "not_saved"
+        entry["retrieval_enabled"] = False
     return entry
 
 
@@ -569,6 +752,9 @@ __all__ = [
     "replace_learned_information_entry",
     "move_all_learned_information_to_review",
     "approve_learned_information_entry",
+    "curate_message_learning",
+    "run_pending_message_learning_curator",
+    "autonomous_knowledge_curator_worker",
     "approve_pending_learned_information",
     "approve_selected_learned_information",
     "delete_learned_information_entry",
@@ -577,4 +763,5 @@ __all__ = [
     "redraft_learned_information_entry",
     "redraft_all_pending_learned_information",
     "save_edited_draft_learning",
+    "save_ai_response_correction_learning",
 ]

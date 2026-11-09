@@ -26,7 +26,7 @@ APPROVED_KNOWLEDGE_TEMPLATE_VARIABLES = frozenset({
 
 
 def _get_account_keys():
-    return get_main_attr("FIRST_CONTACT_ACCOUNT_KEYS", ("primary", "secondary"))
+    return get_main_attr("FIRST_CONTACT_ACCOUNT_KEYS", ("primary",))
 
 
 def _get_line_profile(account_key: str):

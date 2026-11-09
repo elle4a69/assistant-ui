@@ -143,15 +143,44 @@ def generate_information_request_content(
         ),
         store=False,
     )
+    raw_output = (response.output_text or "").strip()
+    result: Dict[str, Any] = {}
     try:
-        result = _parse_json_object(response.output_text or "")
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail="The AI could not format the supplied information. Nothing was sent.") from exc
+        result = _parse_json_object(raw_output)
+    except Exception:
+        # Models occasionally wrap otherwise valid JSON in a short sentence or
+        # markdown fence.  Recover the JSON object before treating the reply as
+        # plain text; a formatting quirk must not discard owner-supplied facts.
+        start, end = raw_output.find("{"), raw_output.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                recovered = json.loads(raw_output[start:end + 1])
+                if isinstance(recovered, dict):
+                    result = recovered
+            except json.JSONDecodeError:
+                pass
 
     customer_reply = sanitize_outgoing_urls(str(result.get("customer_reply", "")).strip())
     knowledge_summary = str(result.get("knowledge_summary", "")).strip()
-    if not customer_reply or not knowledge_summary:
-        raise HTTPException(status_code=502, detail="The AI returned an incomplete answer. Nothing was sent.")
+    if not customer_reply:
+        reply_match = re.search(r'"customer_reply"\s*:\s*"((?:[^"\\]|\\.)*)"', raw_output, re.DOTALL)
+        if reply_match:
+            try:
+                customer_reply = sanitize_outgoing_urls(json.loads(f'"{reply_match.group(1)}"').strip())
+            except (json.JSONDecodeError, AttributeError):
+                pass
+    if not customer_reply and not raw_output.lstrip().startswith("{"):
+        # A model that disregards the JSON shape still usually returns the
+        # customer-ready SMS.  Use it after removing only presentation fences.
+        customer_reply = sanitize_outgoing_urls(
+            re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_output, flags=re.IGNORECASE).strip()
+        )
+    if not knowledge_summary:
+        # The owner is the authority for this interaction.  The curator applies
+        # the normal safety gate before this fallback can affect future replies.
+        knowledge_summary = supplied_information.strip()
+    if not customer_reply:
+        raise HTTPException(status_code=502, detail="The AI could not prepare a customer reply. Nothing was sent.")
     return {"customer_reply": customer_reply, "knowledge_summary": knowledge_summary}
 
 
@@ -185,69 +214,84 @@ def has_active_explicit_takeover(db: Session, thread_id: str) -> bool:
 
 
 def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
-    """Return unanswered conversations inside the configured catch-up window."""
-    ranked_messages = db.query(
+    """Return unanswered conversations inside the configured catch-up window.
+
+    An outstanding conversation is one whose newest customer message has not
+    received a sent agent or AI reply. Drafts and stale workflow labels are not
+    replies and must not hide the conversation from manual Catch-up.
+    """
+    ranked_customer_messages = db.query(
         Message.id.label("message_id"),
         Message.thread_id.label("thread_id"),
         func.row_number().over(
             partition_by=Message.thread_id,
             order_by=(Message.at.desc(), Message.id.desc()),
         ).label("row_number"),
-    ).subquery()
+    ).filter(Message.role == "customer").subquery()
     rows = db.query(Thread, Message).join(
-        ranked_messages,
-        ranked_messages.c.thread_id == Thread.id,
+        ranked_customer_messages,
+        ranked_customer_messages.c.thread_id == Thread.id,
     ).join(
         Message,
-        Message.id == ranked_messages.c.message_id,
+        Message.id == ranked_customer_messages.c.message_id,
     ).filter(
-        ranked_messages.c.row_number == 1,
-        Message.role == "customer",
+        ranked_customer_messages.c.row_number == 1,
         Thread.auto_reply_enabled.is_(True),
-        Thread.state.in_(["auto-reply", "resolved", "taken-over"]),
     ).all()
     if not rows:
         return []
 
     thread_ids = [thread.id for thread, _message in rows]
+    sent_reply_times = {
+        thread_id: sent_at
+        for thread_id, sent_at in db.query(Message.thread_id, func.max(Message.at)).filter(
+            Message.thread_id.in_(thread_ids),
+            Message.role.in_(["agent", "system"]),
+        ).group_by(Message.thread_id).all()
+    }
     events = db.query(ThreadEvent).filter(
         ThreadEvent.thread_id.in_(thread_ids),
         ThreadEvent.type.in_([
             "takeover",
-            "ai-reply-missed",
             *TAKEOVER_RELEASE_EVENT_TYPES,
         ]),
     ).all()
     latest_control_events: Dict[str, ThreadEvent] = {}
-    cleared_events: Dict[str, List[datetime]] = {}
-    explicitly_missed: set[str] = set()
     for event_item in events:
         if event_item.type == "takeover" or event_item.type in TAKEOVER_RELEASE_EVENT_TYPES:
             current = latest_control_events.get(event_item.thread_id)
             if current is None or (event_item.at, event_item.id) > (current.at, current.id):
                 latest_control_events[event_item.thread_id] = event_item
-        if event_item.type == "drafts-cleared":
-            cleared_events.setdefault(event_item.thread_id, []).append(event_item.at)
-        elif event_item.type == "ai-reply-missed":
-            try:
-                missed_meta = json.loads(event_item.meta or "{}")
-            except (TypeError, json.JSONDecodeError):
-                continue
-            message_id = missed_meta.get("message_id")
-            if message_id:
-                explicitly_missed.add(message_id)
 
     settings_fn = _dyn("load_message_ui_settings", load_message_ui_settings)
     catch_up_after = datetime.utcnow() - timedelta(
         days=settings_fn()["catchUpLookbackDays"]
     )
-    settling_cutoff = datetime.utcnow() - timedelta(minutes=3)
     candidates = []
+    account_ai_fn = _dyn(
+        "account_allows_conversational_ai",
+        lambda account_key: account_key == "primary",
+    )
     for thread, latest in rows:
         if is_contact_blocked(db, thread.sms_account_key, thread.customer_phone):
             continue
+        # Do not retry a conversation for which the AI has specifically asked
+        # an operator for information. That is an intentional human hold, not
+        # an unanswered conversation the automatic responder can safely solve.
+        if thread.state == "needs-review" and find_pending_information_request(db, thread.id):
+            continue
+        # The manual catch-up loop must respect the same per-line responder
+        # control as live inbound processing. Otherwise a disabled line is
+        # repeatedly selected, cannot send, and prevents later eligible lines
+        # from being reached.
+        if not account_ai_fn(thread.sms_account_key):
+            continue
         # Do not turn historical inbound messages into fresh catch-up work.
         if latest.at < catch_up_after:
+            continue
+        # A draft is not a sent response. Only a real outbound agent or AI
+        # message closes the customer's latest turn.
+        if sent_reply_times.get(thread.id) and sent_reply_times[thread.id] >= latest.at:
             continue
         # A taken-over state is genuine only when an operator explicitly used
         # Take over. Draft approval/discard/cleanup historically set the same
@@ -255,11 +299,7 @@ def list_catch_up_candidates(db: Session) -> List[tuple[Thread, Message]]:
         latest_control = latest_control_events.get(thread.id)
         if thread.state == "taken-over" and latest_control and latest_control.type == "takeover":
             continue
-        retry_after_clear = any(
-            cleared_at >= latest.at for cleared_at in cleared_events.get(thread.id, [])
-        )
-        if latest.id in explicitly_missed or latest.at <= settling_cutoff or retry_after_clear:
-            candidates.append((thread, latest))
+        candidates.append((thread, latest))
     return sorted(candidates, key=lambda item: (item[1].at, item[1].id))
 
 

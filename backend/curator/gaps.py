@@ -276,7 +276,7 @@ class KnowledgeGapManager:
 
         Args:
             question: Raw customer question text.
-            account_key: Account or line identifier (e.g. 'primary', 'secondary').
+            account_key: SMS account identifier.
             tenant_id: Tenant identifier.
             customer_phone: Sender phone number to track unique customer counts.
             message_id: Inbound message ID for audit reference.
@@ -455,7 +455,7 @@ class KnowledgeGapManager:
 
             # Sanitize owner answer and canonical question template
             sanitized_answer = sanitise_reusable_knowledge_template(clean_answer, gap.account_key)
-            if sanitized_answer is None and gap.account_key not in {"primary", "secondary", "shared"}:
+            if sanitized_answer is None and gap.account_key not in {"primary", "shared"}:
                 sanitized_answer = sanitise_reusable_knowledge_template(clean_answer, "shared")
             if sanitized_answer is None:
                 raise ValueError(
@@ -463,7 +463,7 @@ class KnowledgeGapManager:
                 )
 
             sanitized_question = sanitise_reusable_knowledge_template(gap.canonical_question, gap.account_key)
-            if sanitized_question is None and gap.account_key not in {"primary", "secondary", "shared"}:
+            if sanitized_question is None and gap.account_key not in {"primary", "shared"}:
                 sanitized_question = sanitise_reusable_knowledge_template(gap.canonical_question, "shared")
             if sanitized_question is None:
                 sanitized_question = gap.canonical_question

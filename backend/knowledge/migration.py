@@ -248,7 +248,7 @@ class KnowledgeParityChecker:
                 or jl.get("scope")
                 or "primary"
             ).strip().casefold()
-            if jl_acc not in {"primary", "secondary", "shared"}:
+            if jl_acc not in {"primary", "shared"}:
                 jl_acc = "primary"
             db_acc = str(db_rec.account_key or "primary").strip().casefold()
             if jl_acc != db_acc:

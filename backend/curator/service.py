@@ -31,7 +31,10 @@ from .sanitizer import (
     has_unsafe_literal_learning_detail,
 )
 
-_DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+# Curator receipts are operational audit data.  Keep them on the same mounted
+# volume as learned knowledge in production, rather than inside the deployable
+# application image where a release would erase the history.
+_DEFAULT_DATA_DIR = os.path.join("/data", "data") if os.path.exists("/data") else os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
 KNOWLEDGE_CURATOR_STATE_PATH = os.path.join(_DEFAULT_DATA_DIR, "knowledge_curator_state.json")
 KNOWLEDGE_CURATOR_LOCK = threading.Lock()
@@ -425,7 +428,7 @@ def _curator_invalid_metadata_fields(item: Dict[str, Any]) -> Dict[str, List[str
         missing.append("updated_at")
     if not str(item.get("canonical_key") or "").strip() or not item.get("_canonical_key_explicit", True):
         missing.append("canonical_key")
-    if str(raw.get("scope") or raw.get("sms_account_key") or "") not in {"shared", "primary", "secondary", "internal"}:
+    if str(raw.get("scope") or raw.get("sms_account_key") or "") not in {"shared", "primary", "internal"}:
         invalid.append("scope")
     if str(raw.get("status") or "") not in KNOWLEDGE_RECORD_STATUSES:
         invalid.append("status")
@@ -551,8 +554,8 @@ def inspect_knowledge_integrity(records: Optional[List[Dict[str, Any]]] = None, 
 
         if item.get("scope") == "shared":
             text = str(item.get("text") or "")
-            account_keys = get_main_attr("FIRST_CONTACT_ACCOUNT_KEYS", ("primary", "secondary"))
-            matches = [key for key in account_keys if _learning_other_provider_detail(text, "secondary" if key == "primary" else "primary")]
+            account_keys = get_main_attr("FIRST_CONTACT_ACCOUNT_KEYS", ("primary",))
+            matches = [key for key in account_keys if _learning_other_provider_detail(text, key)]
             if matches:
                 findings.append(_curator_finding(
                     "shared_provider_specific", [item], reason_code="curator_shared_provider_specific",

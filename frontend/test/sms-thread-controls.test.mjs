@@ -71,3 +71,12 @@ test('Settings lists blocked callers by SMS account and can unblock them', () =>
   assert.match(settings, /unblockContact\(contact\.smsAccountKey, contact\.customerPhone\)/);
   assert.match(api, /\/api\/settings\/blocked-contacts\?\$\{query\}/);
 });
+
+test('Settings provides an independent auto-responder switch for each SMS line', () => {
+  assert.match(api, /autoReplyEnabled: boolean/);
+  assert.match(api, /line-profiles\/\$\{accountKey\}\/auto-reply/);
+  assert.match(settings, /autoReplyEnabled: true/);
+  assert.match(settings, /Enable auto-responder for/);
+  assert.match(settings, /Requires the global AI switch at the top of Messages to be on/);
+  assert.match(settings, /saveSmsLineAutoReply\(key, enabled\)/);
+});
