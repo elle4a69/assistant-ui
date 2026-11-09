@@ -8,10 +8,13 @@ Handles:
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import os
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 from typing import Optional
@@ -36,10 +39,48 @@ _wakeup_lock = threading.Lock()
 def _fire_http_ping(url: str) -> None:
     """Non-blocking HTTP request to ping the gateway wakeup URL."""
     try:
+        parsed = urllib.parse.urlsplit(url)
+        username = parsed.username or os.getenv("ANDROID_GATEWAY_WAKEUP_USER")
+        password = parsed.password or os.getenv("ANDROID_GATEWAY_WAKEUP_PASSWORD")
+
+        # Strip credentials from netloc for clean request URL
+        if parsed.username or parsed.password:
+            netloc = parsed.hostname or ""
+            if parsed.port:
+                netloc += f":{parsed.port}"
+            target_url = urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+        else:
+            target_url = url
+
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "AssistantUI-Relay-Doorbell/1.0",
+        }
+
+        if username and password:
+            token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+            headers["Authorization"] = f"Basic {token}"
+        elif username:
+            token = base64.b64encode(f"{username}:".encode("utf-8")).decode("ascii")
+            headers["Authorization"] = f"Basic {token}"
+
+        phone = os.getenv("ANDROID_GATEWAY_WAKEUP_PHONE", "").strip()
+        path = parsed.path.rstrip("/")
+        if phone or path.endswith("/message"):
+            target_phone = phone if phone else "+61432172148"
+            msg = os.getenv("ANDROID_GATEWAY_WAKEUP_MESSAGE", "DOORBELL PING from Android Gateway")
+            payload = {
+                "message": msg,
+                "phoneNumbers": [target_phone],
+            }
+            body = json.dumps(payload).encode("utf-8")
+        else:
+            body = b"{}"
+
         req = urllib.request.Request(
-            url,
-            data=b"{}",
-            headers={"Content-Type": "application/json", "User-Agent": "AssistantUI-Relay-Doorbell/1.0"},
+            target_url,
+            data=body,
+            headers=headers,
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -47,7 +88,10 @@ def _fire_http_ping(url: str) -> None:
     except urllib.error.HTTPError as e:
         if e.code == 405:
             try:
-                get_req = urllib.request.Request(url, headers={"User-Agent": "AssistantUI-Relay-Doorbell/1.0"})
+                get_headers = {"User-Agent": "AssistantUI-Relay-Doorbell/1.0"}
+                if "Authorization" in headers:
+                    get_headers["Authorization"] = headers["Authorization"]
+                get_req = urllib.request.Request(target_url, headers=get_headers)
                 with urllib.request.urlopen(get_req, timeout=5) as resp:
                     logger.info("Gateway wake-up GET fallback response: %s", resp.status)
             except Exception as inner_e:

@@ -412,3 +412,68 @@ def test_relay_sms_mms_image_url_enqueue_and_dequeue(client, test_db):
     assert len(data["messages"]) == 1
     assert data["messages"][0]["id"] == msg_id
     assert data["messages"][0]["image_url"] == "https://your-api.com/pricelist.png"
+
+def test_fire_http_ping_embedded_credentials_and_message_endpoint(monkeypatch):
+    import base64
+    import json
+    import urllib.request
+    from backend.services.relay_service import _fire_http_ping
+
+    captured_requests = []
+
+    class DummyResponse:
+        status = 200
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    def dummy_urlopen(req, timeout=5):
+        captured_requests.append(req)
+        return DummyResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", dummy_urlopen)
+    monkeypatch.delenv("ANDROID_GATEWAY_WAKEUP_USER", raising=False)
+    monkeypatch.delenv("ANDROID_GATEWAY_WAKEUP_PASSWORD", raising=False)
+    monkeypatch.delenv("ANDROID_GATEWAY_WAKEUP_PHONE", raising=False)
+    monkeypatch.delenv("ANDROID_GATEWAY_WAKEUP_MESSAGE", raising=False)
+
+    # Test 1: URL with embedded credentials and /message path
+    _fire_http_ping("https://smsuser:secret99@gateway.local:8080/message")
+    assert len(captured_requests) == 1
+    req1 = captured_requests[0]
+    assert req1.full_url == "https://gateway.local:8080/message"
+    assert req1.get_method() == "POST"
+    expected_token = base64.b64encode(b"smsuser:secret99").decode("ascii")
+    assert req1.headers.get("Authorization") == f"Basic {expected_token}"
+    body1 = json.loads(req1.data.decode("utf-8"))
+    assert body1["message"] == "DOORBELL PING from Android Gateway"
+    assert body1["phoneNumbers"] == ["+61432172148"]
+
+    # Test 2: URL without credentials, env vars supplied, custom phone and message
+    monkeypatch.setenv("ANDROID_GATEWAY_WAKEUP_USER", "envuser")
+    monkeypatch.setenv("ANDROID_GATEWAY_WAKEUP_PASSWORD", "envpass")
+    monkeypatch.setenv("ANDROID_GATEWAY_WAKEUP_PHONE", "+61411222333")
+    monkeypatch.setenv("ANDROID_GATEWAY_WAKEUP_MESSAGE", "Wakeup Test")
+
+    _fire_http_ping("https://ping.local/ping")
+    assert len(captured_requests) == 2
+    req2 = captured_requests[1]
+    assert req2.full_url == "https://ping.local/ping"
+    expected_token2 = base64.b64encode(b"envuser:envpass").decode("ascii")
+    assert req2.headers.get("Authorization") == f"Basic {expected_token2}"
+    body2 = json.loads(req2.data.decode("utf-8"))
+    assert body2["message"] == "Wakeup Test"
+    assert body2["phoneNumbers"] == ["+61411222333"]
+
+    # Test 3: Fallback when not message path and no phone
+    monkeypatch.delenv("ANDROID_GATEWAY_WAKEUP_PHONE", raising=False)
+    monkeypatch.delenv("ANDROID_GATEWAY_WAKEUP_USER", raising=False)
+    monkeypatch.delenv("ANDROID_GATEWAY_WAKEUP_PASSWORD", raising=False)
+    _fire_http_ping("https://ping.local/doorbell")
+    assert len(captured_requests) == 3
+    req3 = captured_requests[2]
+    assert req3.full_url == "https://ping.local/doorbell"
+    assert "Authorization" not in req3.headers
+    assert req3.data == b"{}"
+
