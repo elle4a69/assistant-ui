@@ -261,6 +261,9 @@ def init_db():
                 if outbound_columns and "delivered_at" not in outbound_columns:
                     conn.exec_driver_sql("ALTER TABLE outbound_queue ADD COLUMN delivered_at DATETIME")
                     conn.commit()
+                if outbound_columns and "image_url" not in outbound_columns:
+                    conn.exec_driver_sql("ALTER TABLE outbound_queue ADD COLUMN image_url VARCHAR")
+                    conn.commit()
             except Exception:
                 pass
     except Exception:

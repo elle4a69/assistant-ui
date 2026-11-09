@@ -382,3 +382,33 @@ def test_gateway_wakeup_debouncing_and_stranded_worker(test_db, monkeypatch):
             .count()
         )
         assert count >= 1
+
+
+def test_relay_sms_mms_image_url_enqueue_and_dequeue(client, test_db):
+    payload = {
+        "phone": "+61400111222",
+        "reply": "Here is our price list and availability for this week!",
+        "image_url": "https://your-api.com/pricelist.png",
+    }
+    enqueue_res = client.post("/webhook/outbound", json=payload)
+    assert enqueue_res.status_code == 200
+    msg_id = enqueue_res.json()["id"]
+
+    # Verify DB has image_url stored
+    with test_db() as db:
+        item = db.query(OutboundQueueMessage).filter(OutboundQueueMessage.id == msg_id).first()
+        assert item is not None
+        assert item.phone == "+61400111222"
+        assert item.message == "Here is our price list and availability for this week!"
+        assert item.image_url == "https://your-api.com/pricelist.png"
+
+    # Dequeue via /api/v1/relay/sms/pending
+    pending_res = client.get("/api/v1/relay/sms/pending")
+    assert pending_res.status_code == 200
+    data = pending_res.json()
+    assert data["has_message"] == "yes"
+    assert data["id"] == msg_id
+    assert data["image_url"] == "https://your-api.com/pricelist.png"
+    assert len(data["messages"]) == 1
+    assert data["messages"][0]["id"] == msg_id
+    assert data["messages"][0]["image_url"] == "https://your-api.com/pricelist.png"

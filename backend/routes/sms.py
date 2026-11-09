@@ -167,6 +167,7 @@ async def iphone_shortcuts_webhook(
 
 IPHONE_OUTBOUND_PHONE_FIELDS = ("phone", "to", "recipient", "customer_phone", "sender", "destination")
 IPHONE_OUTBOUND_MESSAGE_FIELDS = ("message", "reply", "body", "text", "msg", "content")
+IPHONE_OUTBOUND_IMAGE_FIELDS = ("image_url", "media_url", "attachment_url", "image")
 
 
 def _dequeue_pending_outbound_messages(db: Session) -> Dict[str, Any]:
@@ -198,13 +199,19 @@ def _dequeue_pending_outbound_messages(db: Session) -> Dict[str, Any]:
     return {
         "has_message": "yes",
         "messages": [
-            {"id": r.id, "phone": r.phone, "reply": r.message}
+            {
+                "id": r.id,
+                "phone": r.phone,
+                "reply": r.message,
+                "image_url": r.image_url,
+            }
             for r in pending_rows
         ],
         "id": first.id,
         "phone": first.phone,
         "reply": first.message,
         "message": first.message,
+        "image_url": first.image_url,
     }
 
 
@@ -261,6 +268,13 @@ async def post_iphone_shortcuts_outbound(
             raw_msg = str(val).strip()
             break
 
+    raw_image: Optional[str] = None
+    for key in IPHONE_OUTBOUND_IMAGE_FIELDS:
+        val = data.get(key)
+        if val is not None and str(val).strip():
+            raw_image = str(val).strip()
+            break
+
     # If payload provided with both phone and message -> Enqueue
     if raw_phone and raw_msg:
         canonical_fn = _dyn("canonical_phone_number", canonical_phone_number)
@@ -270,6 +284,7 @@ async def post_iphone_shortcuts_outbound(
             id=str(uuid.uuid4()),
             phone=phone,
             message=raw_msg,
+            image_url=raw_image,
             status="pending",
             created_at=datetime.utcnow(),
         )

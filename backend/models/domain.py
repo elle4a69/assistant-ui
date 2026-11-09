@@ -300,6 +300,7 @@ class OutboundQueueMessage(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     phone = Column(String, nullable=False, index=True)
     message = Column(Text, nullable=False)
+    image_url = Column(String, nullable=True)
     status = Column(String, default="pending", nullable=False, index=True)  # pending | dispatched
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     dispatched_at = Column(DateTime, nullable=True)
