@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 try:
     from backend.core.config import PROMPTS_DIR
     from backend.core.database import get_db
-    from backend.core.clients import mobilemessage_service
+    from backend.core.clients import mobilemessage_service, canonical_phone_number
     from backend.core.utils import _dyn
     from backend.models.domain import Thread, Message
     from backend.schemas.domain import (
@@ -32,7 +32,7 @@ try:
 except ImportError:
     from core.config import PROMPTS_DIR
     from core.database import get_db
-    from core.clients import mobilemessage_service
+    from core.clients import mobilemessage_service, canonical_phone_number
     from core.utils import _dyn
     from models.domain import Thread, Message
     from schemas.domain import (
@@ -59,6 +59,90 @@ def webhook_sms(payload: WebhookSMSInput, background_tasks: BackgroundTasks, db:
     process_fn = _dyn("process_inbound_sms", process_inbound_sms)
     return process_fn(payload, background_tasks, db, matched_account)
 
+
+
+
+IPHONE_SENDER_FIELDS = ("sender", "from", "phone", "from_phone", "contact", "source")
+IPHONE_BODY_FIELDS = ("message", "body", "text", "msg", "content")
+
+
+@router.post("/weebhook")
+@router.post("/webhook")
+async def iphone_shortcuts_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    content_type = request.headers.get("content-type", "").lower()
+    data: Dict[str, Any] = {}
+    if "application/json" in content_type:
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        try:
+            form = await request.form()
+            data = dict(form)
+        except Exception:
+            data = {}
+    else:
+        try:
+            data = await request.json()
+        except Exception:
+            try:
+                form = await request.form()
+                data = dict(form)
+            except Exception:
+                data = {}
+
+    if not isinstance(data, dict):
+        data = {}
+
+    raw_sender: Optional[str] = None
+    for key in IPHONE_SENDER_FIELDS:
+        val = data.get(key)
+        if val is not None and str(val).strip():
+            raw_sender = str(val).strip()
+            break
+
+    raw_body: Optional[str] = None
+    for key in IPHONE_BODY_FIELDS:
+        val = data.get(key)
+        if val is not None and str(val).strip():
+            raw_body = str(val).strip()
+            break
+
+    if not raw_sender or not raw_body:
+        raise HTTPException(
+            status_code=422,
+            detail="Missing or empty sender phone number or message body.",
+        )
+
+    canonical_fn = _dyn("canonical_phone_number", canonical_phone_number)
+    from_phone = canonical_fn(raw_sender)
+    if not from_phone:
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid sender phone number.",
+        )
+
+    payload = WebhookSMSInput.model_validate({
+        "from": from_phone,
+        "body": raw_body,
+        "to": "primary",
+        "receivedAt": datetime.now(timezone.utc),
+        "webhookType": "iphone_shortcuts",
+    })
+
+    process_fn = _dyn("process_inbound_sms", process_inbound_sms)
+    result = process_fn(payload, background_tasks, db, sms_account_key="primary")
+
+    thread_id = result.get("thread_id") if isinstance(result, dict) else None
+    return {
+        "status": "success",
+        "thread_id": thread_id,
+    }
 
 @router.post("/api/admin/sms-simulator")
 def simulate_inbound_sms(
@@ -134,6 +218,7 @@ def save_sms_confirmation(payload: SmsConfirmationInput):
 __all__ = [
     "router",
     "webhook_sms",
+    "iphone_shortcuts_webhook",
     "simulate_inbound_sms",
     "get_sms_confirmation",
     "save_sms_confirmation",

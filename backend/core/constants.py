@@ -294,6 +294,8 @@ PUBLIC_EXACT_PATHS = {
     "/sw.js",
     "/favicon.ico",
     "/webhooks/sms",
+    "/webhook",
+    "/weebhook",
     "/arrival",
     "/api/auth/status",
     "/api/auth/login",
