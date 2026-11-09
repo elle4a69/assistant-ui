@@ -477,3 +477,34 @@ def test_fire_http_ping_embedded_credentials_and_message_endpoint(monkeypatch):
     assert "Authorization" not in req3.headers
     assert req3.data == b"{}"
 
+def test_android_sms_gateway_webhook(client):
+    # 1. sms:received event with nested payload
+    payload = {
+        "deviceId": "ffffffff-1234-5678-abcd-000000000000",
+        "event": "sms:received",
+        "payload": {
+            "message": "Android gateway test",
+            "sender": "+61499888777",
+            "recipient": "+61400000000",
+            "receivedAt": "2026-11-09T22:20:00Z"
+        }
+    }
+    res = client.post("/webhook/inbound", json=payload)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "success"
+    assert "thread_id" in data
+
+    # 2. Non-message event like sms:sent or sms:delivered
+    res_sent = client.post("/webhook/inbound", json={"event": "sms:sent", "deviceId": "ffffffff..."})
+    assert res_sent.status_code == 200
+    data_sent = res_sent.json()
+    assert data_sent["status"] == "ignored"
+    assert data_sent["event"] == "sms:sent"
+
+    res_deliv = client.post("/weebhook/inbound", json={"event": "sms:delivered", "deviceId": "ffffffff..."})
+    assert res_deliv.status_code == 200
+    data_deliv = res_deliv.json()
+    assert data_deliv["status"] == "ignored"
+    assert data_deliv["event"] == "sms:delivered"
+

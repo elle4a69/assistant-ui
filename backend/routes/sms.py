@@ -120,6 +120,16 @@ async def iphone_shortcuts_webhook(
     if not isinstance(data, dict):
         data = {}
 
+    inner = data.get("payload")
+    if isinstance(inner, dict):
+        merged = dict(data)
+        merged.update(inner)
+        data = merged
+
+    event_val = data.get("event")
+    if event_val and event_val != "sms:received":
+        return {"status": "ignored", "event": event_val}
+
     raw_sender: Optional[str] = None
     for key in IPHONE_SENDER_FIELDS:
         val = data.get(key)
