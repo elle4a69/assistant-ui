@@ -448,7 +448,7 @@ def test_fire_http_ping_embedded_credentials_and_message_endpoint(monkeypatch):
     assert req1.headers.get("Authorization") == f"Basic {expected_token}"
     body1 = json.loads(req1.data.decode("utf-8"))
     assert body1["message"] == "DOORBELL PING from Android Gateway"
-    assert body1["phoneNumbers"] == ["+61432172148"]
+    assert body1["phoneNumbers"] == ["+61436281573"]
 
     # Test 2: URL without credentials, env vars supplied, custom phone and message
     monkeypatch.setenv("ANDROID_GATEWAY_WAKEUP_USER", "envuser")

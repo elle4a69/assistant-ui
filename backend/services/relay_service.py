@@ -67,7 +67,7 @@ def _fire_http_ping(url: str) -> None:
         phone = os.getenv("ANDROID_GATEWAY_WAKEUP_PHONE", "").strip()
         path = parsed.path.rstrip("/")
         if phone or path.endswith("/message"):
-            target_phone = phone if phone else "+61432172148"
+            target_phone = phone if phone else "+61436281573"
             msg = os.getenv("ANDROID_GATEWAY_WAKEUP_MESSAGE", "DOORBELL PING from Android Gateway")
             payload = {
                 "message": msg,
