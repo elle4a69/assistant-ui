@@ -720,6 +720,17 @@
     "response_model": null
   },
   {
+    "path": "/api/v1/relay/sms/ack",
+    "name": "get_delivery_receipt_info",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_delivery_receipt_info",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
     "path": "/api/v1/relay/sms/sent",
     "name": "get_delivery_receipt_info",
     "route_type": "APIRoute",
@@ -757,6 +768,19 @@
     "response_model": null
   },
   {
+    "path": "/api/v1/relay/sms/ack",
+    "name": "post_delivery_receipt",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "post_delivery_receipt",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
     "path": "/api/v1/relay/sms/sent",
     "name": "post_delivery_receipt",
     "route_type": "APIRoute",
@@ -792,6 +816,17 @@
     "response_model": null
   },
   {
+    "path": "/api/v1/relay/log",
+    "name": "get_webhook_log_info",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_webhook_log_info",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
     "path": "/weebhook/log",
     "name": "post_shortcut_telemetry_log",
     "route_type": "APIRoute",
@@ -804,6 +839,17 @@
   },
   {
     "path": "/webhook/log",
+    "name": "post_shortcut_telemetry_log",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "post_shortcut_telemetry_log",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/v1/relay/log",
     "name": "post_shortcut_telemetry_log",
     "route_type": "APIRoute",
     "methods": [
@@ -1886,6 +1932,28 @@
     "dependencies": [
       "get_db"
     ],
+    "response_model": null
+  },
+  {
+    "path": "/static/AI_SMS_Relay_Upgraded.shortcut",
+    "name": "download_ai_sms_relay_shortcut",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "download_ai_sms_relay_shortcut",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/AI_SMS_Relay_Upgraded.shortcut",
+    "name": "download_ai_sms_relay_shortcut",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "download_ai_sms_relay_shortcut",
+    "dependencies": [],
     "response_model": null
   },
   {

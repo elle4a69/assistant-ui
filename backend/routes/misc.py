@@ -813,6 +813,28 @@ def handle_locanto_message(payload: LocantoMessagePayload, db: Session = Depends
 
 frontend_dist = os.path.abspath(os.path.join(BASE_DIR, "..", "frontend", "dist"))
 
+@router.get("/AI_SMS_Relay_Upgraded.shortcut")
+@router.get("/static/AI_SMS_Relay_Upgraded.shortcut")
+def download_ai_sms_relay_shortcut():
+    search_paths = [
+        os.path.join(DATA_DIR, "static", "AI_SMS_Relay_Upgraded.shortcut"),
+        os.path.join(DATA_DIR, "AI_SMS_Relay_Upgraded.shortcut"),
+        os.path.join(BASE_DIR, "static", "AI_SMS_Relay_Upgraded.shortcut"),
+        os.path.join(BASE_DIR, "..", "data", "static", "AI_SMS_Relay_Upgraded.shortcut"),
+        os.path.join(BASE_DIR, "..", "data", "AI_SMS_Relay_Upgraded.shortcut"),
+        os.path.join(frontend_dist, "AI_SMS_Relay_Upgraded.shortcut"),
+    ]
+    for path in search_paths:
+        if os.path.exists(path) and os.path.isfile(path):
+            return FileResponse(
+                path,
+                media_type="application/octet-stream",
+                filename="AI_SMS_Relay_Upgraded.shortcut",
+                headers={"Content-Disposition": 'attachment; filename="AI_SMS_Relay_Upgraded.shortcut"'},
+            )
+    raise HTTPException(status_code=404, detail="AI_SMS_Relay_Upgraded.shortcut not found")
+
+
 @router.get("/{full_path:path}")
 async def serve_spa(full_path: str, request: Request):
     if full_path.startswith("api/") or full_path.startswith("docs") or full_path.startswith("openapi.json"):
@@ -875,5 +897,7 @@ __all__ = [
     "get_services",
     "save_services",
     "handle_locanto_message",
+    "download_ai_sms_relay_shortcut",
     "serve_spa",
 ]
+

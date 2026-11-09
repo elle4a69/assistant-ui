@@ -556,3 +556,57 @@ def test_webhook_log_telemetry(client, capsys):
     assert res3.status_code == 200
     assert res3.json()["status"] == "logged"
 
+def test_relay_route_aliases_and_shortcut_download(client, test_db, tmp_path, monkeypatch):
+    import os
+    import backend.routes.misc as misc
+
+    # 1. /api/v1/relay/log (GET & POST)
+    res_get_log = client.get("/api/v1/relay/log")
+    assert res_get_log.status_code == 200
+    assert res_get_log.json()["status"] == "ok"
+
+    res_post_log = client.post("/api/v1/relay/log", json={"relay": "alias_test"})
+    assert res_post_log.status_code == 200
+    assert res_post_log.json()["status"] == "logged"
+
+    # 2. /api/v1/relay/sms/ack (GET & POST)
+    res_get_ack = client.get("/api/v1/relay/sms/ack")
+    assert res_get_ack.status_code == 200
+    assert res_get_ack.json()["endpoint"] == "delivery_receipt"
+
+    # Enqueue a message to ack
+    enq_res = client.post("/webhook/outbound", json={"phone": "+61412000111", "message": "Ack test"})
+    assert enq_res.status_code == 200
+    msg_id = enq_res.json()["id"]
+
+    # Ack with {"token": "secret_token", "message_id": msg_id}
+    ack_res = client.post("/api/v1/relay/sms/ack", json={"token": "test_tok", "message_id": msg_id})
+    assert ack_res.status_code == 200
+    ack_data = ack_res.json()
+    assert ack_data["status"] == "success"
+    assert msg_id in ack_data["ids"]
+
+    # 3. /AI_SMS_Relay_Upgraded.shortcut (404 when missing, 200 with attachment when present)
+    # When file doesn't exist
+    res_missing = client.get("/AI_SMS_Relay_Upgraded.shortcut")
+    assert res_missing.status_code in (404, 200) # either 404 or served if already placed
+
+    # Create dummy shortcut file in tmp dir and monkeypatch DATA_DIR
+    fake_static = tmp_path / "static"
+    fake_static.mkdir(parents=True, exist_ok=True)
+    fake_file = fake_static / "AI_SMS_Relay_Upgraded.shortcut"
+    fake_file.write_bytes(b"SHORTCUT_BINARY_CONTENT")
+
+    monkeypatch.setattr(misc, "DATA_DIR", str(tmp_path))
+
+    res_download = client.get("/AI_SMS_Relay_Upgraded.shortcut")
+    assert res_download.status_code == 200
+    assert res_download.content == b"SHORTCUT_BINARY_CONTENT"
+    assert "attachment" in res_download.headers.get("content-disposition", "")
+    assert "AI_SMS_Relay_Upgraded.shortcut" in res_download.headers.get("content-disposition", "")
+
+    # Alias /static/AI_SMS_Relay_Upgraded.shortcut
+    res_download_alias = client.get("/static/AI_SMS_Relay_Upgraded.shortcut")
+    assert res_download_alias.status_code == 200
+    assert res_download_alias.content == b"SHORTCUT_BINARY_CONTENT"
+

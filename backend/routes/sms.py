@@ -319,6 +319,7 @@ async def post_iphone_shortcuts_outbound(
 
 
 @router.get("/api/v1/relay/sms/sent")
+@router.get("/api/v1/relay/sms/ack")
 @router.get("/webhook/sent")
 @router.get("/weebhook/sent")
 def get_delivery_receipt_info():
@@ -330,6 +331,7 @@ def get_delivery_receipt_info():
 
 
 @router.post("/api/v1/relay/sms/sent")
+@router.post("/api/v1/relay/sms/ack")
 @router.post("/webhook/sent")
 @router.post("/weebhook/sent")
 async def post_delivery_receipt(
@@ -397,6 +399,7 @@ async def post_delivery_receipt(
     }
 
 
+@router.get("/api/v1/relay/log")
 @router.get("/webhook/log")
 @router.get("/weebhook/log")
 def get_webhook_log_info():
@@ -407,6 +410,7 @@ def get_webhook_log_info():
     }
 
 
+@router.post("/api/v1/relay/log")
 @router.post("/webhook/log")
 @router.post("/weebhook/log")
 async def post_shortcut_telemetry_log(request: Request):
