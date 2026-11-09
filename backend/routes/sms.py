@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
@@ -20,7 +21,7 @@ try:
     from backend.core.database import get_db
     from backend.core.clients import mobilemessage_service, canonical_phone_number
     from backend.core.utils import _dyn
-    from backend.models.domain import Thread, Message
+    from backend.models.domain import Thread, Message, OutboundQueueMessage
     from backend.schemas.domain import (
         WebhookSMSInput, AdminSmsSimulationInput, SmsConfirmationInput,
     )
@@ -34,7 +35,7 @@ except ImportError:
     from core.database import get_db
     from core.clients import mobilemessage_service, canonical_phone_number
     from core.utils import _dyn
-    from models.domain import Thread, Message
+    from models.domain import Thread, Message, OutboundQueueMessage
     from schemas.domain import (
         WebhookSMSInput, AdminSmsSimulationInput, SmsConfirmationInput,
     )
@@ -66,6 +67,8 @@ IPHONE_SENDER_FIELDS = ("sender", "from", "phone", "from_phone", "contact", "sou
 IPHONE_BODY_FIELDS = ("message", "body", "text", "msg", "content")
 
 
+@router.post("/webhook/inbound")
+@router.post("/weebhook/inbound")
 @router.post("/weebhook")
 @router.post("/webhook")
 async def iphone_shortcuts_webhook(
@@ -144,6 +147,108 @@ async def iphone_shortcuts_webhook(
         "thread_id": thread_id,
     }
 
+IPHONE_OUTBOUND_PHONE_FIELDS = ("phone", "to", "recipient", "customer_phone", "sender", "destination")
+IPHONE_OUTBOUND_MESSAGE_FIELDS = ("message", "reply", "body", "text", "msg", "content")
+
+
+def _dequeue_oldest_outbound_message(db: Session) -> Dict[str, Any]:
+    outbound_cls = _dyn("OutboundQueueMessage", OutboundQueueMessage)
+    oldest = (
+        db.query(outbound_cls)
+        .filter(outbound_cls.status == "pending")
+        .order_by(outbound_cls.created_at.asc())
+        .first()
+    )
+    if not oldest:
+        return {"has_message": "no"}
+
+    oldest.status = "dispatched"
+    oldest.dispatched_at = datetime.utcnow()
+    db.commit()
+    return {
+        "has_message": "yes",
+        "phone": oldest.phone,
+        "reply": oldest.message,
+        "message": oldest.message,
+    }
+
+
+@router.get("/webhook/outbound")
+@router.get("/weebhook/outbound")
+def get_iphone_shortcuts_outbound(db: Session = Depends(get_db)):
+    return _dequeue_oldest_outbound_message(db)
+
+
+@router.post("/webhook/outbound")
+@router.post("/weebhook/outbound")
+async def post_iphone_shortcuts_outbound(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    content_type = request.headers.get("content-type", "").lower()
+    data: Dict[str, Any] = {}
+    if "application/json" in content_type:
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        try:
+            form = await request.form()
+            data = dict(form)
+        except Exception:
+            data = {}
+    else:
+        try:
+            data = await request.json()
+        except Exception:
+            try:
+                form = await request.form()
+                data = dict(form)
+            except Exception:
+                data = {}
+
+    if not isinstance(data, dict):
+        data = {}
+
+    raw_phone: Optional[str] = None
+    for key in IPHONE_OUTBOUND_PHONE_FIELDS:
+        val = data.get(key)
+        if val is not None and str(val).strip():
+            raw_phone = str(val).strip()
+            break
+
+    raw_msg: Optional[str] = None
+    for key in IPHONE_OUTBOUND_MESSAGE_FIELDS:
+        val = data.get(key)
+        if val is not None and str(val).strip():
+            raw_msg = str(val).strip()
+            break
+
+    # If payload provided with both phone and message -> Enqueue
+    if raw_phone and raw_msg:
+        canonical_fn = _dyn("canonical_phone_number", canonical_phone_number)
+        phone = canonical_fn(raw_phone) or raw_phone
+        outbound_cls = _dyn("OutboundQueueMessage", OutboundQueueMessage)
+        new_msg = outbound_cls(
+            id=str(uuid.uuid4()),
+            phone=phone,
+            message=raw_msg,
+            status="pending",
+            created_at=datetime.utcnow(),
+        )
+        db.add(new_msg)
+        db.commit()
+        db.refresh(new_msg)
+        return {
+            "status": "queued",
+            "id": new_msg.id,
+        }
+
+    # Otherwise called without payload (polling for pending messages) -> Dequeue
+    return _dequeue_oldest_outbound_message(db)
+
+
 @router.post("/api/admin/sms-simulator")
 def simulate_inbound_sms(
     simulation: AdminSmsSimulationInput,
@@ -219,6 +324,8 @@ __all__ = [
     "router",
     "webhook_sms",
     "iphone_shortcuts_webhook",
+    "get_iphone_shortcuts_outbound",
+    "post_iphone_shortcuts_outbound",
     "simulate_inbound_sms",
     "get_sms_confirmation",
     "save_sms_confirmation",

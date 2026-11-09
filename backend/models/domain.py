@@ -293,6 +293,18 @@ class OperationsAgentEvent(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
+class OutboundQueueMessage(Base):
+    """Outbound SMS message queue for relay shortcuts and provider dispatch."""
+    __tablename__ = "outbound_queue"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    phone = Column(String, nullable=False, index=True)
+    message = Column(Text, nullable=False)
+    status = Column(String, default="pending", nullable=False, index=True)  # pending | dispatched
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    dispatched_at = Column(DateTime, nullable=True)
+
+
 __all__ = [
     "Thread",
     "BlockedContact",
@@ -311,4 +323,5 @@ __all__ = [
     "OperationsMemory",
     "OperationsAgentRun",
     "OperationsAgentEvent",
+    "OutboundQueueMessage",
 ]

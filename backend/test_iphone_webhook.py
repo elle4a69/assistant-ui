@@ -11,7 +11,7 @@ import backend.main
 import backend.services.sms_service
 from backend.core.database import Base, get_db
 from backend.main import app
-from backend.models.domain import Message, Thread
+from backend.models.domain import Message, Thread, OutboundQueueMessage
 
 
 @pytest.fixture
@@ -133,6 +133,32 @@ def test_iphone_webhook_alternative_field_names(client, test_db):
     assert res3.json()["status"] == "success"
 
 
+def test_iphone_webhook_inbound_endpoint(client, test_db):
+    payload = {
+        "sender": "+61412345678",
+        "message": "Testing webhook inbound endpoint",
+    }
+    response = client.post("/webhook/inbound", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "success"
+    assert data["thread_id"] is not None
+
+    with test_db() as db:
+        thread = db.query(Thread).filter(Thread.id == data["thread_id"]).first()
+        assert thread is not None
+        assert thread.customer_phone == "+61412345678"
+
+        msg = db.query(Message).filter(Message.thread_id == thread.id).first()
+        assert msg is not None
+        assert msg.text == "Testing webhook inbound endpoint"
+
+    # Also test /weebhook/inbound alias
+    res_alias = client.post("/weebhook/inbound", json={"from": "0412345678", "text": "Alias inbound test"})
+    assert res_alias.status_code == 200
+    assert res_alias.json()["status"] == "success"
+
+
 def test_iphone_webhook_missing_fields(client):
     # Missing sender
     res1 = client.post("/weebhook", json={"message": "No sender"})
@@ -149,3 +175,73 @@ def test_iphone_webhook_missing_fields(client):
     # Empty body
     res4 = client.post("/webhook", json={"sender": "+61412345678", "message": "   "})
     assert res4.status_code == 422
+
+
+def test_iphone_webhook_outbound_empty(client):
+    # GET /webhook/outbound with no pending messages
+    res_get = client.get("/webhook/outbound")
+    assert res_get.status_code == 200
+    assert res_get.json() == {"has_message": "no"}
+
+    # POST /webhook/outbound with no payload (polling for messages)
+    res_post = client.post("/webhook/outbound", json={})
+    assert res_post.status_code == 200
+    assert res_post.json() == {"has_message": "no"}
+
+
+def test_iphone_webhook_outbound_enqueue_and_dequeue(client, test_db):
+    # Enqueue a message
+    enqueue_res = client.post(
+        "/webhook/outbound",
+        json={"phone": "+61412345678", "message": "Your booking is confirmed!"},
+    )
+    assert enqueue_res.status_code == 200
+    enqueue_data = enqueue_res.json()
+    assert enqueue_data["status"] == "queued"
+    assert enqueue_data["id"] is not None
+
+    with test_db() as db:
+        item = db.query(OutboundQueueMessage).filter(OutboundQueueMessage.id == enqueue_data["id"]).first()
+        assert item is not None
+        assert item.phone == "+61412345678"
+        assert item.message == "Your booking is confirmed!"
+        assert item.status == "pending"
+
+    # Poll via GET to dequeue
+    dequeue_res = client.get("/webhook/outbound")
+    assert dequeue_res.status_code == 200
+    dequeue_data = dequeue_res.json()
+    assert dequeue_data["has_message"] == "yes"
+    assert dequeue_data["phone"] == "+61412345678"
+    assert dequeue_data["reply"] == "Your booking is confirmed!"
+    assert dequeue_data["message"] == "Your booking is confirmed!"
+
+    with test_db() as db:
+        item = db.query(OutboundQueueMessage).filter(OutboundQueueMessage.id == enqueue_data["id"]).first()
+        assert item.status == "dispatched"
+        assert item.dispatched_at is not None
+
+    # Next check has no messages
+    next_check = client.get("/webhook/outbound")
+    assert next_check.status_code == 200
+    assert next_check.json() == {"has_message": "no"}
+
+
+def test_iphone_webhook_outbound_weebhook_alias(client):
+    # Enqueue via alias
+    enqueue_res = client.post(
+        "/weebhook/outbound",
+        json={"to": "0412345678", "body": "Alias queue test"},
+    )
+    assert enqueue_res.status_code == 200
+    assert enqueue_res.json()["status"] == "queued"
+
+    # Dequeue via alias POST without body
+    dequeue_res = client.post("/weebhook/outbound")
+    assert dequeue_res.status_code == 200
+    data = dequeue_res.json()
+    assert data["has_message"] == "yes"
+    # Canonicalized
+    assert data["phone"] == "+61412345678"
+    assert data["reply"] == "Alias queue test"
+

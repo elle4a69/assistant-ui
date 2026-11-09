@@ -563,6 +563,84 @@
     "response_model": null
   },
   {
+    "path": "/weebhook/inbound",
+    "name": "iphone_shortcuts_webhook",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "iphone_shortcuts_webhook",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/webhook/inbound",
+    "name": "iphone_shortcuts_webhook",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "iphone_shortcuts_webhook",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/weebhook/outbound",
+    "name": "get_iphone_shortcuts_outbound",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_iphone_shortcuts_outbound",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/webhook/outbound",
+    "name": "get_iphone_shortcuts_outbound",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_iphone_shortcuts_outbound",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/weebhook/outbound",
+    "name": "post_iphone_shortcuts_outbound",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "post_iphone_shortcuts_outbound",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/webhook/outbound",
+    "name": "post_iphone_shortcuts_outbound",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "post_iphone_shortcuts_outbound",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
     "path": "/api/admin/sms-simulator",
     "name": "simulate_inbound_sms",
     "route_type": "APIRoute",

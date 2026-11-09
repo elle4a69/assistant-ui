@@ -17,6 +17,7 @@ try:
         NotificationDelivery,
         OperationsAction,
         OperationsAgentEvent,
+        OutboundQueueMessage,
         OperationsAgentRun,
         OperationsChatMessage,
         OperationsMemory,
@@ -37,6 +38,7 @@ except ImportError:
         NotificationDelivery,
         OperationsAction,
         OperationsAgentEvent,
+        OutboundQueueMessage,
         OperationsAgentRun,
         OperationsChatMessage,
         OperationsMemory,
@@ -64,4 +66,5 @@ __all__ = [
     "SupportTicket",
     "OperationsAgentRun",
     "OperationsAgentEvent",
+    "OutboundQueueMessage",
 ]
