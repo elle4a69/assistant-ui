@@ -253,6 +253,16 @@ def init_db():
                     conn.commit()
             except Exception:
                 pass
+
+            try:
+                outbound_columns = {
+                    row[1] for row in conn.exec_driver_sql("PRAGMA table_info(outbound_queue)").fetchall()
+                }
+                if outbound_columns and "delivered_at" not in outbound_columns:
+                    conn.exec_driver_sql("ALTER TABLE outbound_queue ADD COLUMN delivered_at DATETIME")
+                    conn.commit()
+            except Exception:
+                pass
     except Exception:
         pass
 
