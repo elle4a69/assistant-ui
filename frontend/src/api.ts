@@ -454,10 +454,10 @@ export async function respondToBootcampInformationRequest(
 
 export interface InformationRequestResult {
   status: string;
-  message: Message | null;
+  message: Message;
   knowledgeSource: string;
   knowledgeSummary: string;
-  replySent: boolean;
+  knowledgeCuration: 'applied' | 'kept_out_of_live_replies' | 'queued' | 'not_saved';
 }
 
 export async function respondToInformationRequest(
@@ -809,171 +809,7 @@ export interface ManualLearningEntry {
   text: string;
   created_at: string;
   updated_at: string;
-  scope?: 'shared' | 'primary' | 'secondary';
-}
-
-export async function setThreadPinned(threadId: string, pinned: boolean): Promise<{ status: string; pinned: boolean }> {
-  const response = await apiFetch(`${API_BASE}/api/threads/${threadId}/pin`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pinned }),
-  });
-  if (!response.ok) throw new Error(`Failed to update pin: ${response.statusText}`);
-  return response.json();
-}
-
-export async function setThreadBlocked(threadId: string, blocked: boolean): Promise<{ status: string; blocked: boolean }> {
-  const response = await apiFetch(`${API_BASE}/api/threads/${threadId}/block`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ blocked }),
-  });
-  if (!response.ok) throw new Error(`Failed to update blocked contact: ${response.statusText}`);
-  return response.json();
-}
-
-export interface BlockedContact {
-  id: string;
-  smsAccountKey: 'primary' | 'secondary';
-  customerPhone: string;
-  blockedAt: string;
-}
-
-export async function listBlockedContacts(): Promise<BlockedContact[]> {
-  const response = await apiFetch(`${API_BASE}/api/settings/blocked-contacts`, { cache: 'no-store' });
-  if (!response.ok) throw new Error(`Failed to list blocked contacts: ${response.statusText}`);
-  return response.json();
-}
-
-export async function unblockContact(smsAccountKey: 'primary' | 'secondary', customerPhone: string): Promise<void> {
-  const query = new URLSearchParams({ smsAccountKey, customerPhone });
-  const response = await apiFetch(`${API_BASE}/api/settings/blocked-contacts?${query}`, { method: 'DELETE' });
-  if (!response.ok) throw new Error(`Failed to unblock contact: ${response.statusText}`);
-}
-
-export interface SmsLineProfile {
-  displayName: string;
-  providerName: string;
-  informationUrl: string;
-  userPrompt: string;
-  timezone?: string;
-}
-
-export async function getSmsLineProfiles(): Promise<Record<'primary' | 'secondary', SmsLineProfile>> {
-  const response = await apiFetch(`${API_BASE}/api/settings/line-profiles`, { cache: 'no-store' });
-  if (!response.ok) throw new Error(`Failed to load line settings: ${response.statusText}`);
-  return (await response.json()).profiles;
-}
-
-export async function saveSmsLineProfiles(profiles: Record<'primary' | 'secondary', SmsLineProfile>): Promise<void> {
-  const response = await apiFetch(`${API_BASE}/api/settings/line-profiles`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(profiles),
-  });
-  if (!response.ok) {
-    const error = await response.json().catch(() => null);
-    throw new Error(error?.detail || `Failed to save line settings: ${response.statusText}`);
-  }
-}
-
-export interface LearnedInformationEntry extends Omit<ManualLearningEntry, 'scope'> {
-  scope: 'shared' | 'primary' | 'secondary' | 'internal';
-  review_status?: 'pending' | 'approved';
-  retrieval_enabled?: boolean;
-  category?: string;
-  review_note?: string;
-  review_source?: 'ai-drafted' | 'ai-redrafted' | 'staff-edited-reply' | 'sms-pair-template';
-}
-
-export interface KnowledgeCuratorRecordRef {
-  id: string;
-  revision: number;
-}
-
-export interface KnowledgeCuratorRecordPreview extends KnowledgeCuratorRecordRef {
-  reference_status: 'current' | 'stale' | 'missing' | 'malformed';
-  expected_revision?: number | null;
-  current_revision?: number | null;
-  position?: number | null;
-  reason_code?: string;
-  scope?: string;
-  sms_line?: string;
-  source_type?: string;
-  topic?: string;
-  canonical_key?: string;
-  customer_message?: string;
-  applies_when?: string;
-  approved_reply?: string;
-  instruction?: string;
-  example_reply?: string;
-  knowledge_text?: string;
-  status?: string;
-  review_status?: string;
-  retrieval_enabled?: boolean;
-  created_at?: string;
-  updated_at?: string;
-  metadata_issues?: { missing_fields: string[]; invalid_fields: string[] };
-}
-
-export type KnowledgeCuratorResolution =
-  | 'keep_all_examples' | 'select_current_rule' | 'create_merged_draft' | 'needs_manual_investigation'
-  | 'keep_both_distinct' | 'create_consolidation_draft' | 'create_metadata_repair_draft'
-  | 'add_safe_replacement_draft' | 'approve_pending_record' | 'not_an_issue' | 'dismiss_for_now';
-
-export interface KnowledgeCuratorProposal {
-  id: string;
-  fingerprint: string;
-  canonical_key: string;
-  scope: 'shared' | 'primary' | 'secondary' | 'internal';
-  finding_type: string;
-  records: KnowledgeCuratorRecordRef[];
-  reason_codes: string[];
-  evidence: { reason_codes: string[]; record_count: number; missing_fields?: string[]; invalid_fields?: string[]; dynamic_type?: string; same_applicability?: boolean; applicability_status?: string; source_role?: string; trigger_excerpt?: string };
-  proposed_action: 'no_action' | 'ask_owner' | 'draft_replacement' | 'draft_supersession' | 'quarantine_for_review' | 'merge_duplicate';
-  confidence: string;
-  owner_questions: string[];
-  status: 'proposed' | 'accepted' | 'rejected' | 'dismissed' | 'applied' | 'resolved' | 'resolved_not_an_issue' | 'resolved_no_longer_detected';
-  created_at: string;
-  updated_at: string;
-  draft_entry_id?: string | null;
-  resolution?: KnowledgeCuratorResolution;
-  selected_record_ids?: string[];
-  record_previews?: KnowledgeCuratorRecordPreview[];
-  actionable?: boolean;
-}
-
-export interface KnowledgeCuratorRun {
-  id: string;
-  status: 'completed' | 'completed_with_warning';
-  error_code?: string | null;
-  message: string;
-  started_at: string;
-  completed_at: string;
-  finding_counts: Record<string, number>;
-  finding_count: number;
-  created_proposals: number;
-  safe_repairs_completed?: number;
-  ai_helper_status?: string | null;
-}
-
-export interface KnowledgeCuratorState {
-  runs: KnowledgeCuratorRun[];
-  proposals: KnowledgeCuratorProposal[];
-}
-
-export interface SmsLearningPreviewItem {
-  id: string;
-  account_key: 'primary' | 'secondary';
-  customer: string;
-  reply: string;
-  reason: string;
-  topic?: string;
-  applies_when?: string;
-  instruction?: string;
-  example_reply?: string;
-}
-
-export interface SmsLearningPreview {
-  sampled: number;
-  candidates: SmsLearningPreviewItem[];
-  rejected: SmsLearningPreviewItem[];
+  scope?: 'shared';
 }
 
 export async function setThreadPinned(threadId: string, pinned: boolean): Promise<{ status: string; pinned: boolean }> {
@@ -1500,19 +1336,20 @@ export interface Service {
   price: number;
   duration: number;
   showDuration?: boolean;
-  /** The SMS line whose AI may use this service. */
-  lineKey?: 'primary' | 'secondary';
+  /** Hidden services remain saved but are unavailable for new bookings. */
+  isActive?: boolean;
+  addonIds?: string[];
 }
 
-export interface ServiceAddOn {
+export interface ServiceAddon {
   id: string;
   name: string;
   description: string;
-  /** Extra amount charged on top of the base service. */
   price: number;
-  /** Extra appointment time in minutes, if any. */
-  duration: number;
+  extraTime: number;
+  serviceIds: string[];
 }
+
 
 export interface BookingPayload {
   serviceId: string;
@@ -1540,26 +1377,6 @@ export async function saveServices(services: Service[]): Promise<{ status: strin
   });
   if (!response.ok) {
     throw new Error(`Failed to save services: ${response.statusText}`);
-  }
-  return response.json();
-}
-
-export async function getServiceAddOns(): Promise<ServiceAddOn[]> {
-  const response = await apiFetch(`${API_BASE}/api/service-addons`);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch service add-ons: ${response.statusText}`);
-  }
-  return response.json();
-}
-
-export async function saveServiceAddOns(addons: ServiceAddOn[]): Promise<{ status: string }> {
-  const response = await apiFetch(`${API_BASE}/api/service-addons`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ addons }),
-  });
-  if (!response.ok) {
-    throw new Error(`Failed to save service add-ons: ${response.statusText}`);
   }
   return response.json();
 }
@@ -1876,40 +1693,6 @@ export interface OperationsChatCapabilities {
   persistentMemory: boolean;
   controlledActions: boolean;
   requiresConfirmation: boolean;
-}
-
-export interface SupportTicket {
-  id: string;
-  category: 'bug' | 'feature_request' | 'upgrade' | 'access' | 'security';
-  title: string;
-  affectedArea: string;
-  status: string;
-  resolutionSummary: string | null;
-  codingTaskId: string | null;
-  deploymentActionId: string | null;
-  deploymentState: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export async function getSupportTickets(): Promise<{ tickets: SupportTicket[] }> {
-  const response = await apiFetch(`${API_BASE}/api/settings/support-tickets`, { cache: 'no-store' });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    throw new Error(payload?.detail || `Failed to load support tickets: ${response.statusText}`);
-  }
-  return response.json();
-}
-
-export async function approveSupportTicketDeployment(ticketId: string): Promise<{ status: string }> {
-  const response = await apiFetch(`${API_BASE}/api/settings/support-tickets/${encodeURIComponent(ticketId)}/deploy`, {
-    method: 'POST',
-  });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    throw new Error(payload?.detail || `Deployment approval failed: ${response.statusText}`);
-  }
-  return response.json();
 }
 
 export interface SupportTicket {

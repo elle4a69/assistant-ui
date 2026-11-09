@@ -490,6 +490,10 @@ class ServiceAddOnsInput(BaseModel):
     addons: List[ServiceAddOnItem]
 
 
+ServiceAddonItem = ServiceAddOnItem
+ServiceAddonsInput = ServiceAddOnsInput
+
+
 class WorkingHourEntry(BaseModel):
     day: str
     enabled: bool
@@ -608,6 +612,8 @@ __all__ = [
     "ServicesListInput",
     "ServiceAddOnItem",
     "ServiceAddOnsInput",
+    "ServiceAddonItem",
+    "ServiceAddonsInput",
     "WorkingHourEntry",
     "WorkingHoursInput",
     "AvailabilitySlotDay",

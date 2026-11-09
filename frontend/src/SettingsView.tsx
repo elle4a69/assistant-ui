@@ -39,15 +39,15 @@ import {
   SearchResultItem,
   getServices,
   saveServices,
-  getServiceAddOns,
-  saveServiceAddOns,
+  getServiceAddons,
+  saveServiceAddons,
+  ServiceAddon,
   getSmsTemplate,
   saveSmsTemplate,
   getBookingReminderConfig,
   saveBookingReminderConfig,
   BookingReminderConfig,
   Service,
-  ServiceAddOn,
   getWorkingHours,
   saveWorkingHours,
   WorkingHourEntry,
@@ -207,7 +207,7 @@ export default function SettingsView() {
 
   // Services & SMS Template states
   const [services, setServices] = useState<Service[]>([]);
-  const [serviceAddOns, setServiceAddOns] = useState<ServiceAddOn[]>([]);
+  const [serviceAddons, setServiceAddons] = useState<ServiceAddon[]>([]);
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
   const [smsTemplate, setSmsTemplate] = useState('');
   const [bookingReminder, setBookingReminder] = useState<BookingReminderConfig>({
@@ -217,7 +217,6 @@ export default function SettingsView() {
   });
   const [savingBookingReminder, setSavingBookingReminder] = useState(false);
   const [savingServices, setSavingServices] = useState(false);
-  const [savingServiceAddOns, setSavingServiceAddOns] = useState(false);
   const [savingSmsTemplate, setSavingSmsTemplate] = useState(false);
 
 
@@ -227,18 +226,14 @@ export default function SettingsView() {
   const [newServicePrice, setNewServicePrice] = useState(100);
   const [newServiceDuration, setNewServiceDuration] = useState(60);
   const [newServiceShowDuration, setNewServiceShowDuration] = useState(true);
-  const [newServiceLineKey, setNewServiceLineKey] = useState<'primary' | 'secondary'>('primary');
+  const [newServiceAddonIds, setNewServiceAddonIds] = useState<string[]>([]);
 
-  // Shared service add-ons apply to both SMS lines.
-  const [newServiceAddOnName, setNewServiceAddOnName] = useState('');
-  const [newServiceAddOnDesc, setNewServiceAddOnDesc] = useState('');
-  const [newServiceAddOnPrice, setNewServiceAddOnPrice] = useState(0);
-  const [newServiceAddOnDuration, setNewServiceAddOnDuration] = useState(0);
-  const [editingServiceAddOnId, setEditingServiceAddOnId] = useState<string | null>(null);
-  const [editServiceAddOnName, setEditServiceAddOnName] = useState('');
-  const [editServiceAddOnDesc, setEditServiceAddOnDesc] = useState('');
-  const [editServiceAddOnPrice, setEditServiceAddOnPrice] = useState(0);
-  const [editServiceAddOnDuration, setEditServiceAddOnDuration] = useState(0);
+  // New add-on form state. Extra time is optional and defaults to zero.
+  const [newAddonName, setNewAddonName] = useState('');
+  const [newAddonDescription, setNewAddonDescription] = useState('');
+  const [newAddonPrice, setNewAddonPrice] = useState(0);
+  const [newAddonExtraTime, setNewAddonExtraTime] = useState(0);
+  const [newAddonServiceIds, setNewAddonServiceIds] = useState<string[]>([]);
 
   // Edit service form state
   const [editingServiceId, setEditingServiceId] = useState<string | null>(null);
@@ -315,7 +310,7 @@ export default function SettingsView() {
       setLoadingSettings(false);
     }
     try { setServices(await retryOnce(getServices)); } catch (e) { console.error('services fetch failed:', e); }
-    try { setServiceAddOns(await retryOnce(getServiceAddOns)); } catch (e) { console.error('service add-ons fetch failed:', e); }
+    try { setServiceAddons(await retryOnce(getServiceAddons)); } catch (e) { console.error('service add-ons fetch failed:', e); }
     try { setBusinessVariables(await retryOnce(getBusinessVariables)); } catch (e) { console.error('business variables fetch failed:', e); }
     try { setSmsTemplate((await retryOnce(getSmsTemplate)).template); } catch (e) { console.error('sms template fetch failed:', e); }
     try { setBookingReminder(await retryOnce(getBookingReminderConfig)); } catch (e) { console.error('booking reminder settings fetch failed:', e); }
@@ -817,7 +812,7 @@ export default function SettingsView() {
   };
 
   const handleRunKnowledgeAudit = async () => {
-    if (!window.confirm('Run a manual audit of durable knowledge records? It may use AI credits and creates proposals; knowledge changes still require your explicit approval.')) return;
+    if (!window.confirm('Run a manual audit of durable knowledge records? It may use AI credits, creates proposals only, and cannot activate or delete knowledge.')) return;
     setRunningKnowledgeAudit(true);
     try {
       const result = await runKnowledgeCurator();
@@ -838,10 +833,7 @@ export default function SettingsView() {
     setUpdatingCuratorProposalId(proposal.id);
     try {
       await resolveKnowledgeCuratorProposal(proposal.id, resolution, []);
-      if (resolution === 'approve_pending_record') {
-        setLearnedEntries(await listLearnedInformation());
-        triggerBanner('success', 'Approval recorded through the normal safety check. Unsafe or time-sensitive material remains out of replies.');
-      } else if (['create_merged_draft', 'create_consolidation_draft', 'create_metadata_repair_draft', 'add_safe_replacement_draft'].includes(resolution)) {
+      if (['create_merged_draft', 'create_consolidation_draft', 'create_metadata_repair_draft', 'add_safe_replacement_draft'].includes(resolution)) {
         setLearnedEntries(await listLearnedInformation());
         triggerBanner('success', 'A quarantined draft was added to the review queue. It is not active knowledge.');
       } else {
@@ -1196,69 +1188,13 @@ export default function SettingsView() {
     setSavingServices(true);
     try {
       await saveServices(services);
-      triggerBanner('success', 'Services configured successfully on backend.');
+      await saveServiceAddons(serviceAddons);
+      triggerBanner('success', 'Services and add-ons configured successfully.');
     } catch (err) {
       console.error(err);
       triggerBanner('error', 'Failed to save services configuration.');
     } finally {
       setSavingServices(false);
-    }
-  };
-
-  const handleAddServiceAddOn = (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!newServiceAddOnName.trim()) return;
-    setServiceAddOns(current => [...current, {
-      id: `addon_${Date.now()}`,
-      name: newServiceAddOnName.trim(),
-      description: newServiceAddOnDesc.trim(),
-      price: Math.max(0, newServiceAddOnPrice),
-      duration: Math.max(0, newServiceAddOnDuration),
-    }]);
-    setNewServiceAddOnName('');
-    setNewServiceAddOnDesc('');
-    setNewServiceAddOnPrice(0);
-    setNewServiceAddOnDuration(0);
-    triggerBanner('success', 'Add-on added. Click Save Add-ons to apply.');
-  };
-
-  const startEditServiceAddOn = (addOn: ServiceAddOn) => {
-    setEditingServiceAddOnId(addOn.id);
-    setEditServiceAddOnName(addOn.name);
-    setEditServiceAddOnDesc(addOn.description);
-    setEditServiceAddOnPrice(addOn.price);
-    setEditServiceAddOnDuration(addOn.duration);
-  };
-
-  const handleUpdateServiceAddOn = (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!editingServiceAddOnId || !editServiceAddOnName.trim()) return;
-    setServiceAddOns(current => current.map(addOn => addOn.id === editingServiceAddOnId ? {
-      ...addOn,
-      name: editServiceAddOnName.trim(),
-      description: editServiceAddOnDesc.trim(),
-      price: Math.max(0, editServiceAddOnPrice),
-      duration: Math.max(0, editServiceAddOnDuration),
-    } : addOn));
-    setEditingServiceAddOnId(null);
-    triggerBanner('success', 'Add-on updated. Click Save Add-ons to apply.');
-  };
-
-  const handleDeleteServiceAddOn = (id: string) => {
-    setServiceAddOns(current => current.filter(addOn => addOn.id !== id));
-    triggerBanner('success', 'Add-on removed. Click Save Add-ons to apply.');
-  };
-
-  const handleSaveServiceAddOns = async () => {
-    setSavingServiceAddOns(true);
-    try {
-      await saveServiceAddOns(serviceAddOns);
-      triggerBanner('success', 'Shared add-ons saved for both lines.');
-    } catch (error) {
-      console.error(error);
-      triggerBanner('error', 'Failed to save shared add-ons.');
-    } finally {
-      setSavingServiceAddOns(false);
     }
   };
 
@@ -2125,19 +2061,19 @@ export default function SettingsView() {
                   {(() => {
                     const latest = knowledgeCurator.runs[0];
                     const unresolved = knowledgeCurator.proposals.filter(item => item.status === 'proposed' || item.status === 'accepted');
-                    const decisions = unresolved.filter(item => ['owner_answer_required', 'incompatible_active_records', 'apparently_superseded', 'branched_supersession', 'pending_legacy_approval'].includes(item.finding_type));
+                    const decisions = unresolved.filter(item => ['owner_answer_required', 'incompatible_active_records', 'apparently_superseded', 'branched_supersession'].includes(item.finding_type));
                     const decision = decisions.find(item => item.status === 'proposed');
                     const dynamicClaims = unresolved.filter(item => item.finding_type === 'literal_dynamic_authority');
                     const duplicates = unresolved.filter(item => item.finding_type === 'exact_duplicate');
                     const privateItems = unresolved.filter(item => item.finding_type === 'owner_answer_required');
-                    const manualItems = unresolved.filter(item => !['owner_answer_required', 'incompatible_active_records', 'apparently_superseded', 'branched_supersession', 'pending_legacy_approval', 'literal_dynamic_authority', 'exact_duplicate', 'invalid_metadata'].includes(item.finding_type));
+                    const manualItems = unresolved.filter(item => !['owner_answer_required', 'incompatible_active_records', 'apparently_superseded', 'branched_supersession', 'literal_dynamic_authority', 'exact_duplicate', 'invalid_metadata'].includes(item.finding_type));
                     const needsAttention = unresolved.length > 0;
                     const busy = decision && updatingCuratorProposalId === decision.id;
                     return <>
                       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                         <div>
                           <h3 id="knowledge-curator-heading" className="text-sm font-bold text-violet-950">Knowledge health: {needsAttention ? 'Needs attention' : 'Good'}</h3>
-                          <p className="mt-1 max-w-2xl text-[11px] leading-relaxed text-violet-800">Check and organise knowledge keeps customer replies safe. It can tidy proven technical labels and route older review items to you; customer guidance changes still require your explicit approval.</p>
+                          <p className="mt-1 max-w-2xl text-[11px] leading-relaxed text-violet-800">Check and organise knowledge keeps customer replies safe. It can tidy proven technical labels, but it never turns on, replaces, or removes an answer.</p>
                         </div>
                         <button type="button" onClick={handleRunKnowledgeAudit} disabled={runningKnowledgeAudit} className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-violet-700 px-3 py-2 text-[11px] font-bold text-white hover:bg-violet-800 disabled:opacity-50">
                           <RefreshCw className={`h-3.5 w-3.5 ${runningKnowledgeAudit ? 'animate-spin' : ''}`} />
@@ -2157,13 +2093,12 @@ export default function SettingsView() {
                       {decision ? <article className="mt-3 rounded-lg border border-violet-200 bg-white p-3 text-[11px]">
                         <p className="font-bold text-violet-950">Business decision {decisions.indexOf(decision) + 1} of {decisions.length}</p>
                         <p className="mt-2 font-semibold text-slate-800">{decision.owner_questions[0] || 'We need a business decision before changing any customer guidance.'}</p>
-                        <p className="mt-2 text-slate-650">{decision.finding_type === 'owner_answer_required' ? 'This information is private today. Clarification is needed because only you can decide whether customers should receive it.' : decision.finding_type === 'pending_legacy_approval' ? 'This item was kept by the earlier 50-pair review and is now routed through the curator for your decision.' : 'The customer could receive different answers. Clarification is needed because the system cannot safely choose a business rule.'}</p>
-                        <p className="mt-2 text-slate-650">This affects the relevant customer service line only. Approval always passes through the normal safety check before the item can be used.</p>
+                        <p className="mt-2 text-slate-650">{decision.finding_type === 'owner_answer_required' ? 'This information is private today. Clarification is needed because only you can decide whether customers should receive it.' : 'The customer could receive different answers. Clarification is needed because the system cannot safely choose a business rule.'}</p>
+                        <p className="mt-2 text-slate-650">This affects the relevant customer service line only. Any answer you choose becomes a pending review suggestion, never a live change.</p>
                         <div className="mt-3 flex flex-wrap gap-2">
                           {decision.finding_type === 'incompatible_active_records' && <button type="button" onClick={() => handleCuratorProposal(decision, 'create_merged_draft')} disabled={busy || decision.actionable === false} className="rounded border border-violet-300 bg-violet-50 px-2 py-1 font-bold text-violet-900 disabled:opacity-50">Use this answer</button>}
                           {decision.finding_type === 'incompatible_active_records' && <button type="button" onClick={() => handleCuratorProposal(decision, 'keep_all_examples')} disabled={busy || decision.actionable === false} className="rounded border border-slate-300 px-2 py-1 font-bold text-slate-700 disabled:opacity-50">Keep both because they apply differently</button>}
                           {decision.finding_type === 'owner_answer_required' && <button type="button" onClick={() => handleCuratorProposal(decision, 'needs_manual_investigation')} disabled={busy || decision.actionable === false} className="rounded border border-slate-300 px-2 py-1 font-bold text-slate-700 disabled:opacity-50">Keep private</button>}
-                          {decision.finding_type === 'pending_legacy_approval' && <button type="button" onClick={() => handleCuratorProposal(decision, 'approve_pending_record')} disabled={busy || decision.actionable === false} className="rounded border border-emerald-300 bg-emerald-50 px-2 py-1 font-bold text-emerald-900 disabled:opacity-50">Approve through safety check</button>}
                           <button type="button" onClick={() => handleCuratorProposal(decision, 'needs_manual_investigation')} disabled={busy || decision.actionable === false} className="rounded border border-amber-300 px-2 py-1 font-bold text-amber-800 disabled:opacity-50">Edit the answer</button>
                           <button type="button" onClick={() => handleCuratorProposal(decision, 'dismiss_for_now')} disabled={busy || decision.actionable === false} className="rounded border border-slate-300 px-2 py-1 font-bold text-slate-700 disabled:opacity-50">Ask me later</button>
                         </div>
@@ -2632,6 +2567,24 @@ export default function SettingsView() {
                     </div>
                   </form>
 
+                  <section className="rounded-lg border border-emerald-200 bg-emerald-50/40 p-3.5" aria-labelledby="add-addon-heading">
+                    <div className="mb-3">
+                      <h4 id="add-addon-heading" className="flex items-center gap-1 text-xs font-bold text-emerald-950"><Plus className="h-3.5 w-3.5" />Add New Add-on</h4>
+                      <p className="mt-1 text-[10px] text-emerald-900">Add an optional extra and choose the shared services it can be used with. Extra time is optional and normally stays at 0.</p>
+                    </div>
+                    <form onSubmit={handleAddAddon} className="flex flex-col gap-2.5">
+                      <input type="text" value={newAddonName} onChange={event => setNewAddonName(event.target.value)} placeholder="Add-on name" required className="w-full rounded border border-emerald-200 bg-white p-2 text-xs focus:outline-none focus:ring-1 focus:ring-emerald-600" />
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="text-[10px] font-bold text-slate-700">Cost ($)<input type="number" min="0" value={newAddonPrice} onChange={event => setNewAddonPrice(Math.max(0, parseInt(event.target.value) || 0))} className="mt-1 w-full rounded border border-emerald-200 bg-white p-2 text-xs font-normal" /></label>
+                        <label className="text-[10px] font-bold text-slate-700">Extra time (mins)<input type="number" min="0" value={newAddonExtraTime} onChange={event => setNewAddonExtraTime(Math.max(0, parseInt(event.target.value) || 0))} className="mt-1 w-full rounded border border-emerald-200 bg-white p-2 text-xs font-normal" /></label>
+                      </div>
+                      <textarea value={newAddonDescription} onChange={event => setNewAddonDescription(event.target.value)} placeholder="Optional add-on description" rows={2} className="w-full rounded border border-emerald-200 bg-white p-2 text-xs focus:outline-none focus:ring-1 focus:ring-emerald-600" />
+                      <fieldset className="rounded border border-emerald-200 bg-white p-2.5"><legend className="px-1 text-[10px] font-bold text-emerald-900">Available with shared services</legend>{services.length ? <div className="mt-1 flex flex-col gap-2">{services.map(service => <label key={service.id} className="flex min-h-7 items-center gap-2 text-[11px] text-slate-700"><input type="checkbox" checked={newAddonServiceIds.includes(service.id)} onChange={() => setNewAddonServiceIds(current => current.includes(service.id) ? current.filter(id => id !== service.id) : [...current, service.id])} className="h-4 w-4 accent-emerald-600" />{service.name}</label>)}</div> : <p className="mt-1 text-[10px] text-slate-500">Create a service first, then choose it here.</p>}</fieldset>
+                      <button type="submit" className="self-end rounded bg-emerald-700 px-3.5 py-2 text-[11px] font-bold text-white hover:bg-emerald-800">Add add-on</button>
+                    </form>
+                    {serviceAddons.length > 0 && <div className="mt-4 border-t border-emerald-200 pt-3"><p className="text-[10px] font-bold uppercase tracking-wide text-emerald-900">Current add-ons</p><div className="mt-2 space-y-2">{serviceAddons.map(addon => <div key={addon.id} className="rounded border border-emerald-100 bg-white p-2.5"><div className="flex items-start justify-between gap-2"><div><p className="text-xs font-bold text-slate-800">{addon.name} <span className="text-emerald-700">${addon.price}</span>{addon.extraTime > 0 && <span className="ml-1 text-[10px] font-semibold text-slate-500">+{addon.extraTime} min</span>}</p>{addon.description && <p className="mt-0.5 text-[10px] text-slate-500">{addon.description}</p>}</div><button type="button" onClick={() => handleDeleteAddon(addon.id)} className="rounded p-1 text-rose-600 hover:bg-rose-50" title="Delete add-on"><Trash2 className="h-3.5 w-3.5" /></button></div><fieldset className="mt-2"><legend className="text-[10px] font-semibold text-slate-600">Available with</legend><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1.5">{services.map(service => <label key={service.id} className="flex items-center gap-1.5 text-[10px] text-slate-700"><input type="checkbox" checked={addon.serviceIds.includes(service.id)} onChange={() => toggleAddonService(addon.id, service.id)} className="h-3.5 w-3.5 accent-emerald-600" />{service.name}</label>)}</div>{services.length === 0 && <p className="mt-1 text-[10px] text-slate-500">No services available yet.</p>}</fieldset></div>)}</div></div>}
+                  </section>
+
                   {/* Save services control */}
                   <div className="flex justify-end pt-2 border-t border-slate-150">
                     <button
@@ -2639,101 +2592,8 @@ export default function SettingsView() {
                       disabled={savingServices}
                       className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs px-4 py-2.5 rounded-lg shadow-sm transition-all cursor-pointer border border-transparent"
                     >
-                      {savingServices ? 'Saving services list...' : 'Save Services List'}
+                      {savingServices ? 'Saving catalogue...' : 'Save Services & Add-ons'}
                     </button>
-                  </div>
-
-                  {/* Shared service add-ons */}
-                  <div className="flex flex-col gap-4 pt-5 border-t border-slate-150">
-                    <div>
-                      <h3 className="font-bold text-slate-800 text-xs">Shared Service Add-ons & Extras</h3>
-                      <p className="text-[10px] text-slate-500 mt-0.5">Optional extras that apply to both Line 1 and Line 2. They are available for the AI to discuss, but are not standalone booking services.</p>
-                    </div>
-
-                    <div className="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 divide-y divide-slate-200">
-                      {serviceAddOns.length === 0 ? (
-                        <div className="py-6 text-center text-xs text-slate-400">No shared add-ons configured yet.</div>
-                      ) : (
-                        serviceAddOns.map(addOn => editingServiceAddOnId === addOn.id ? (
-                          <form key={addOn.id} onSubmit={handleUpdateServiceAddOn} className="p-3 bg-indigo-50/50 flex flex-col gap-2.5">
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                              <input
-                                value={editServiceAddOnName}
-                                onChange={event => setEditServiceAddOnName(event.target.value)}
-                                placeholder="Add-on name"
-                                className="text-xs border border-slate-300 rounded p-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
-                                required
-                              />
-                              <input
-                                type="number"
-                                min="0"
-                                value={editServiceAddOnPrice}
-                                onChange={event => setEditServiceAddOnPrice(Number(event.target.value) || 0)}
-                                placeholder="Extra price ($)"
-                                className="text-xs border border-slate-300 rounded p-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
-                              />
-                              <input
-                                type="number"
-                                min="0"
-                                value={editServiceAddOnDuration}
-                                onChange={event => setEditServiceAddOnDuration(Number(event.target.value) || 0)}
-                                placeholder="Extra time (mins)"
-                                className="text-xs border border-slate-300 rounded p-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
-                              />
-                            </div>
-                            <textarea
-                              value={editServiceAddOnDesc}
-                              onChange={event => setEditServiceAddOnDesc(event.target.value)}
-                              placeholder="What is included?"
-                              rows={2}
-                              className="text-xs border border-slate-300 rounded p-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
-                            />
-                            <div className="flex justify-end gap-2">
-                              <button type="button" onClick={() => setEditingServiceAddOnId(null)} className="px-2.5 py-1 text-[10px] font-bold border border-slate-300 rounded text-slate-600 hover:bg-slate-100 bg-white">Cancel</button>
-                              <button type="submit" className="px-2.5 py-1 text-[10px] font-bold bg-indigo-650 hover:bg-indigo-700 text-white rounded">Update</button>
-                            </div>
-                          </form>
-                        ) : (
-                          <div key={addOn.id} className="p-3 flex justify-between items-start gap-4">
-                            <div className="flex flex-col gap-1">
-                              <span className="font-bold text-slate-800 text-xs flex flex-wrap items-center gap-1.5">
-                                {addOn.name}
-                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded border bg-emerald-100 text-emerald-700 border-emerald-200">Both lines</span>
-                                {addOn.duration > 0 && <span className="text-[9px] bg-slate-200 text-slate-650 font-bold px-1.5 py-0.5 rounded">+{addOn.duration} mins</span>}
-                              </span>
-                              {addOn.description && <span className="text-[10px] text-slate-500 line-clamp-2">{addOn.description}</span>}
-                            </div>
-                            <div className="flex items-center gap-3 shrink-0">
-                              <span className="font-bold text-slate-800 text-xs flex items-center"><DollarSign className="w-3.5 h-3.5 text-slate-400 stroke-[2.5]" />+{addOn.price}</span>
-                              <div className="flex items-center gap-1.5">
-                                <button onClick={() => startEditServiceAddOn(addOn)} className="p-1 hover:bg-indigo-100 rounded text-indigo-600" title="Edit add-on"><Edit className="w-3.5 h-3.5" /></button>
-                                <button onClick={() => handleDeleteServiceAddOn(addOn.id)} className="p-1 hover:bg-rose-100 rounded text-rose-600" title="Delete add-on"><Trash2 className="w-3.5 h-3.5" /></button>
-                              </div>
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-
-                    <form onSubmit={handleAddServiceAddOn} className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg flex flex-col gap-3">
-                      <h4 className="font-bold text-slate-700 text-xs flex items-center gap-1"><Plus className="w-3.5 h-3.5 text-slate-400" /> Add Shared Add-on</h4>
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                        <input value={newServiceAddOnName} onChange={event => setNewServiceAddOnName(event.target.value)} placeholder="Add-on name (e.g. Hot stones)" className="text-xs border border-slate-300 rounded p-2 focus:outline-none focus:ring-1 focus:ring-indigo-500" required />
-                        <input type="number" min="0" value={newServiceAddOnPrice} onChange={event => setNewServiceAddOnPrice(Number(event.target.value) || 0)} placeholder="Extra price ($)" className="text-xs border border-slate-300 rounded p-2 focus:outline-none focus:ring-1 focus:ring-indigo-500" />
-                        <input type="number" min="0" value={newServiceAddOnDuration} onChange={event => setNewServiceAddOnDuration(Number(event.target.value) || 0)} placeholder="Extra time (mins)" className="text-xs border border-slate-300 rounded p-2 focus:outline-none focus:ring-1 focus:ring-indigo-500" />
-                      </div>
-                      <textarea value={newServiceAddOnDesc} onChange={event => setNewServiceAddOnDesc(event.target.value)} placeholder="What is included?" rows={2} className="text-xs border border-slate-300 rounded p-2 focus:outline-none focus:ring-1 focus:ring-indigo-500" />
-                      <div className="flex items-center justify-between">
-                        <span className="text-[10px] font-semibold text-slate-500">Applies to both SMS lines</span>
-                        <button type="submit" className="bg-slate-800 hover:bg-slate-700 text-white font-bold text-[11px] px-3.5 py-1.5 rounded shadow-sm">Add to list</button>
-                      </div>
-                    </form>
-
-                    <div className="flex justify-end pt-2 border-t border-slate-150">
-                      <button onClick={handleSaveServiceAddOns} disabled={savingServiceAddOns} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs px-4 py-2.5 rounded-lg shadow-sm disabled:opacity-50">
-                        {savingServiceAddOns ? 'Saving add-ons...' : 'Save Add-ons'}
-                      </button>
-                    </div>
                   </div>
 
                   {/* Standalone Booking Form Embedding Snippet */}

@@ -3,7 +3,9 @@ import {
   ArrowLeft,
   Check,
   CheckCheck,
+  ChevronDown,
   DoorOpen,
+  Flag,
   MessageCircle,
   Ban,
   Pin,
@@ -27,6 +29,8 @@ import {
   approveDraft,
   discardDraft,
   updateDraft,
+  createMessageCorrection,
+  dismissInformationRequest,
   respondToInformationRequest,
   acknowledgeThreadArrival,
   Message,
@@ -99,7 +103,6 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const [savingCorrection, setSavingCorrection] = useState(false)
   const [error, setError] = useState('')
   const touchStartX = useRef<number | null>(null)
-  const touchStartY = useRef<number | null>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const sendingRef = useRef(false)
   const reviewingDraftRef = useRef<string | null>(null)
@@ -325,6 +328,11 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     ) ?? null
   }, [thread?.state, thread?.events])
 
+  useEffect(() => {
+    setInformationRequestOpen(false)
+    setRequestedInformation('')
+  }, [pendingInformationRequest?.id])
+
   const toggleAi = async () => {
     const nextValue = !aiEnabled
     setAiEnabled(nextValue)
@@ -361,12 +369,13 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     let sent = 0
     let informationRequests = 0
     try {
-      // Keep memory bounded by processing one model request at a time, while
-      // continuing through the full queue instead of silently stopping at ten.
-      const safetyLimit = 50
+      // Process one model request at a time and cap each run at ten
+      // conversations so Catch-up does not flood the SMS gateway. The next
+      // tap continues with the remaining eligible conversations.
+      const batchLimit = 10
       let remaining = 0
-      let reachedSafetyLimit = false
-      for (let processed = 0; processed < safetyLimit; processed += 1) {
+      let reachedBatchLimit = false
+      for (let processed = 0; processed < batchLimit; processed += 1) {
         const result = await catchUpMissedMessage()
         remaining = result.remaining
         if (!result.processed) break
@@ -375,11 +384,11 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
         setNotice(`Catch-up: ${sent} sent, ${informationRequests} information request${informationRequests === 1 ? '' : 's'}, ${remaining} remaining`)
         if ((processed + 1) % 5 === 0) await loadThreads()
         await new Promise(resolve => window.setTimeout(resolve, 750))
-        reachedSafetyLimit = processed === safetyLimit - 1 && remaining > 0
+        reachedBatchLimit = processed === batchLimit - 1 && remaining > 0
       }
       setNotice(
-        reachedSafetyLimit
-          ? `Catch-up paused after ${safetyLimit} conversations for safety. Click refresh again to continue.`
+        reachedBatchLimit
+          ? `Catch-up paused after ${batchLimit} conversations. ${remaining} remaining — tap refresh again to continue.`
           : `Catch-up complete: ${sent} sent, ${informationRequests} information request${informationRequests === 1 ? '' : 's'}`,
       )
       await loadThreads()
@@ -396,7 +405,14 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     setReviewingDraftId(messageId)
     setError('')
     try {
-      if (action === 'approve') await approveDraft(messageId)
+      if (action === 'approve') {
+        const result = await approveDraft(messageId)
+        if (result.learningSaved) {
+          setNotice(result.learningCuration === 'applied'
+            ? 'Reply sent. The curator added the approved guidance for future replies.'
+            : 'Reply sent. The curator safely retained the training signal without adding it to future replies.')
+        }
+      }
       else await discardDraft(messageId)
       await Promise.all([loadThread(), loadThreads()])
     } catch (err) {
@@ -422,6 +438,49 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     } finally {
       setSavingDraft(false)
     }
+  }
+
+  const openCorrection = (message: Message) => {
+    setCorrectionMessage(message)
+    setCorrectionNote('')
+    setSuggestedReply('')
+    setError('')
+  }
+
+  const queueCorrection = async () => {
+    if (!correctionMessage || !correctionNote.trim() || savingCorrection) return
+    setSavingCorrection(true)
+    setError('')
+    try {
+      const result = await createMessageCorrection(
+        correctionMessage.id,
+        correctionNote.trim(),
+        suggestedReply.trim() || undefined,
+      )
+      setCorrectionMessage(null)
+      setCorrectionNote('')
+      setSuggestedReply('')
+      setNotice(result.reviewStatus === 'applied'
+        ? 'Correction draft ready below. The curator has also applied the safe learning for future replies.'
+        : 'Correction draft ready below. The curator retained the learning safely without changing future replies.')
+      await loadThread()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not queue the correction')
+    } finally {
+      setSavingCorrection(false)
+    }
+  }
+
+  const handleResponseTap = (message: Message, event: TouchEvent<HTMLDivElement>) => {
+    if (event.target instanceof HTMLElement && event.target.closest('button, textarea, input')) return
+    const now = Date.now()
+    const previous = lastResponseTapRef.current
+    if (previous?.messageId === message.id && now - previous.at < 360) {
+      lastResponseTapRef.current = null
+      openCorrection(message)
+      return
+    }
+    lastResponseTapRef.current = { messageId: message.id, at: now }
   }
 
   const sendMessage = async (event: FormEvent) => {
@@ -500,7 +559,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     if (!thread) return
     const params = new URLSearchParams({
       phone: thread.customerPhone,
-      provider: thread.smsAccountKey === 'secondary' ? 'anonymous' : 'tori',
+      provider: 'tori',
     })
     window.location.assign(`/booking?${params.toString()}`)
   }
@@ -539,9 +598,9 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
         information,
       )
       setRequestedInformation('')
-      setNotice(result.replySent
-        ? `Knowledge saved to ${result.knowledgeSource}. Reply sent.`
-        : `Knowledge saved to ${result.knowledgeSource}. AI reply was unavailable, so no message was sent; reply manually when ready.`)
+      setNotice(result.knowledgeCuration === 'applied'
+        ? 'Reply sent. The curator added the safe business guidance for future replies.'
+        : 'Reply sent. The curator retained the information safely without changing future replies.')
       await Promise.all([loadThread(), loadThreads()])
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The information could not be used. No reply was sent.')
@@ -550,24 +609,32 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
     }
   }
 
+  const dismissInformationRequestPanel = async () => {
+    if (!selectedId || !pendingInformationRequest || dismissingInformationRequest) return
+    setDismissingInformationRequest(true)
+    setError('')
+    try {
+      await dismissInformationRequest(selectedId, pendingInformationRequest.id)
+      setRequestedInformation('')
+      setInformationRequestOpen(false)
+      setNotice('Information request removed. No reply was sent.')
+      await Promise.all([loadThread(), loadThreads()])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The information request could not be removed.')
+    } finally {
+      setDismissingInformationRequest(false)
+    }
+  }
+
   const onTouchStart = (event: TouchEvent) => {
-    const touch = event.changedTouches[0]
-    touchStartX.current = touch?.clientX ?? null
-    touchStartY.current = touch?.clientY ?? null
+    touchStartX.current = event.changedTouches[0]?.clientX ?? null
   }
 
   const onTouchEnd = (event: TouchEvent) => {
-    if (touchStartX.current === null || touchStartY.current === null) return
-    const touch = event.changedTouches[0]
-    const distanceX = (touch?.clientX ?? 0) - touchStartX.current
-    const distanceY = (touch?.clientY ?? 0) - touchStartY.current
+    if (touchStartX.current === null) return
+    const distance = (event.changedTouches[0]?.clientX ?? 0) - touchStartX.current
     touchStartX.current = null
-    touchStartY.current = null
-    // Vertical scrolling can have horizontal drift on touch devices. Only
-    // treat the gesture as Back when it is clearly a horizontal swipe.
-    if (distanceX > 80 && Math.abs(distanceX) > Math.abs(distanceY) * 1.5) {
-      setSelectedId(null)
-    }
+    if (distance > 80) setSelectedId(null)
   }
 
   return (
@@ -596,7 +663,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                   {contactLabel(thread.customerPhone)}
                 </h1>
                 <p className="text-[9px] font-bold text-indigo-600 tracking-wider uppercase">
-                  {thread.smsAccountKey === 'secondary' ? 'SMS line 2' : 'SMS line 1'} · Active Chat
+                  SMS · Active Chat
                 </p>
               </>
             ) : (
@@ -703,7 +770,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                         <p className="truncate text-[15px] font-semibold">{contactLabel(item.customerPhone)}</p>
                         {item.pinned && <Pin className="h-3.5 w-3.5 shrink-0 fill-indigo-600 text-indigo-600" aria-label="Pinned" />}
                         <span className="shrink-0 rounded-full border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wide text-indigo-700">
-                          {item.smsAccountKey === 'secondary' ? 'Line 2' : 'Line 1'}
+                          SMS
                         </span>
                         {item.pendingArrivalSessionId && (
                           <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-600 px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-white shadow-sm">
@@ -781,18 +848,27 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                   const message = item.message
                   const incoming = message.role === 'customer'
                   const isDraft = message.role === 'draft'
+                  const isAiMessage = message.role === 'system' || isDraft
+                  const canCorrect = isAiMessage
                   return (
                     <div
                       key={message.id}
-                      className={`max-w-[82%] rounded-2xl px-3.5 py-2.5 shadow-sm ${
+                      onDoubleClick={() => canCorrect && openCorrection(message)}
+                      onTouchEnd={event => canCorrect && handleResponseTap(message, event)}
+                      title={canCorrect ? 'Double-click or double-tap to report a correction' : undefined}
+                      className={`relative max-w-[82%] rounded-2xl px-3.5 py-2.5 pr-10 shadow-sm ${
                         incoming
                           ? 'self-start rounded-bl-md bg-white text-slate-900'
-                          : isDraft
-                            ? 'self-end rounded-br-md border border-amber-300 bg-amber-50 text-slate-900'
-                          : 'self-end rounded-br-md bg-emerald-600 text-white'
+                          : isAiMessage
+                            ? isDraft
+                              ? 'self-end rounded-br-md border border-blue-300 bg-blue-50 text-slate-900'
+                              : 'self-end rounded-br-md bg-blue-600 text-white'
+                            : 'self-end rounded-br-md bg-slate-700 text-white'
                       }`}
                     >
-                      {isDraft && <p className="mb-1 text-[9px] font-black uppercase tracking-widest text-amber-700">Draft—not sent</p>}
+                      {canCorrect && <button type="button" onClick={() => openCorrection(message)} className={`absolute right-1.5 top-1.5 inline-flex h-7 w-7 items-center justify-center rounded-full ${isDraft ? 'bg-blue-100 text-blue-700 hover:bg-blue-200' : 'bg-blue-500 text-white hover:bg-blue-400'}`} title="Report a correction" aria-label="Report a correction"><Flag className="h-3.5 w-3.5" /></button>}
+                      {isDraft && <p className="mb-1 text-[9px] font-black uppercase tracking-widest text-blue-700">AI draft—not sent</p>}
+                      {message.role === 'system' && <p className="mb-1 text-[9px] font-black uppercase tracking-widest text-blue-100">AI</p>}
                       {isDraft && editingDraftId === message.id ? (
                         <textarea
                           value={editingDraftText}
@@ -804,7 +880,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                         <p className="whitespace-pre-wrap break-words text-[15px] leading-snug">{message.text}</p>
                       )}
                       <div className={`mt-1 flex items-center justify-end gap-1 text-[9px] ${
-                        incoming ? 'text-slate-400' : isDraft ? 'text-amber-700' : 'text-emerald-100'
+                        incoming ? 'text-slate-400' : isDraft ? 'text-blue-700' : isAiMessage ? 'text-blue-100' : 'text-slate-200'
                       }`}>
                         <time dateTime={message.at}>{formatMessageTimestamp(message.at)}</time>
                         {!incoming && !isDraft && <CheckCheck className="h-3 w-3" />}
@@ -865,31 +941,50 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
             </div>
 
             {pendingInformationRequest && (
-              <div className="shrink-0 border-t border-amber-200 bg-amber-50 px-3 py-3">
-                <div className="mx-auto max-w-xl rounded-2xl border border-amber-300 bg-white p-3 shadow-sm">
-                  <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">Information request</p>
-                  <p className="mt-1 text-sm font-semibold text-slate-800">
-                    Tori needs: {String(pendingInformationRequest.meta?.reason || 'More business information to answer this message safely.')}
-                  </p>
-                  <p className="mt-1 text-[11px] text-slate-500">Nothing has been sent to the customer. Give Tori the missing facts below.</p>
-                  <textarea
-                    value={requestedInformation}
-                    onChange={event => setRequestedInformation(event.target.value)}
-                    rows={3}
-                    maxLength={6000}
-                    placeholder="Type the information Tori needs..."
-                    className="mt-2 w-full resize-none rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-amber-500 focus:bg-white"
-                  />
-                  <button
-                    type="button"
-                    onClick={answerInformationRequest}
-                    disabled={!requestedInformation.trim() || submittingInformation}
-                    className="mt-2 min-h-11 w-full rounded-xl bg-amber-600 px-4 text-sm font-bold text-white disabled:bg-slate-300"
-                  >
-                    {submittingInformation ? 'Tori is preparing the reply...' : 'Save knowledge and send reply'}
-                  </button>
-                </div>
-              </div>
+              <section className="shrink-0 border-t border-red-800 bg-white">
+                <button
+                  type="button"
+                  onClick={() => setInformationRequestOpen(open => !open)}
+                  aria-expanded={informationRequestOpen}
+                  aria-controls="mobile-information-request"
+                  className="relative flex min-h-12 w-full items-center justify-center bg-red-700 px-12 py-3 text-center text-sm font-black uppercase tracking-wide text-white transition-colors hover:bg-red-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-300 focus-visible:ring-inset"
+                >
+                  <span>Information Request</span>
+                  <ChevronDown className={`absolute right-4 h-5 w-5 transition-transform ${informationRequestOpen ? 'rotate-180' : ''}`} aria-hidden="true" />
+                </button>
+                {informationRequestOpen && (
+                  <div id="mobile-information-request" className="border-t border-red-200 px-3 py-3">
+                    <p className="text-sm font-semibold text-slate-800">
+                      Information needed: {String(pendingInformationRequest.meta?.reason || 'More business information is needed to answer this message safely.')}
+                    </p>
+                    <p className="mt-1 text-[11px] text-slate-500">Nothing has been sent to the customer. Add the missing facts below; the curator will safely maintain the learning.</p>
+                    <textarea
+                      value={requestedInformation}
+                      onChange={event => setRequestedInformation(event.target.value)}
+                      rows={3}
+                      maxLength={6000}
+                      placeholder="Type the information Tori needs..."
+                      className="mt-2 w-full resize-none rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-red-600 focus:bg-white"
+                    />
+                    <button
+                      type="button"
+                      onClick={answerInformationRequest}
+                      disabled={!requestedInformation.trim() || submittingInformation || dismissingInformationRequest}
+                      className="mt-2 min-h-11 w-full rounded-xl bg-red-700 px-4 text-sm font-bold text-white hover:bg-red-800 disabled:bg-slate-300"
+                    >
+                      {submittingInformation ? 'Preparing reply...' : 'Send reply and save learning'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={dismissInformationRequestPanel}
+                      disabled={submittingInformation || dismissingInformationRequest}
+                      className="mt-2 min-h-10 w-full rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                    >
+                      {dismissingInformationRequest ? 'Removing request…' : 'Remove request'}
+                    </button>
+                  </div>
+                )}
+              </section>
             )}
 
             <form onSubmit={sendMessage} className="shrink-0 border-t border-slate-200 bg-white px-3 pt-1 pb-0">
@@ -961,6 +1056,29 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                 </button>
               </div>
             </form>
+
+            {correctionMessage && (
+              <div className="fixed inset-0 z-50 flex items-end bg-slate-950/45 p-3 sm:items-center sm:justify-center" role="dialog" aria-modal="true" aria-labelledby="message-correction-title">
+                <div className="w-full max-w-md rounded-2xl bg-white p-4 shadow-2xl">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h2 id="message-correction-title" className="text-base font-bold text-slate-900">Correct this AI reply</h2>
+                      <p className="mt-1 text-xs text-slate-600">The curator will safely process this feedback. It only affects future replies when it is safe and non-conflicting.</p>
+                    </div>
+                    <button type="button" onClick={() => setCorrectionMessage(null)} disabled={savingCorrection} className="rounded-full p-1 text-slate-500 hover:bg-slate-100" aria-label="Close correction form"><X className="h-5 w-5" /></button>
+                  </div>
+                  <p className="mt-3 max-h-28 overflow-y-auto rounded-lg bg-slate-50 p-3 text-sm text-slate-700 whitespace-pre-wrap">{correctionMessage.text}</p>
+                  <label className="mt-3 block text-xs font-bold text-slate-700" htmlFor="correction-note">What should change?</label>
+                  <textarea id="correction-note" value={correctionNote} onChange={event => setCorrectionNote(event.target.value)} rows={4} maxLength={6000} autoFocus placeholder="e.g. We don't need to mention the service page. Say the service is available, then ask what they need." className="mt-1 w-full resize-none rounded-xl border border-slate-300 p-3 text-sm outline-none focus:border-indigo-500" />
+                  <label className="mt-3 block text-xs font-bold text-slate-700" htmlFor="correction-reply">Suggested wording <span className="font-normal text-slate-500">(optional)</span></label>
+                  <textarea id="correction-reply" value={suggestedReply} onChange={event => setSuggestedReply(event.target.value)} rows={3} maxLength={1600} placeholder="Optional replacement the AI can learn from" className="mt-1 w-full resize-none rounded-xl border border-slate-300 p-3 text-sm outline-none focus:border-indigo-500" />
+                  <div className="mt-4 flex gap-2">
+                    <button type="button" onClick={() => setCorrectionMessage(null)} disabled={savingCorrection} className="min-h-11 flex-1 rounded-xl border border-slate-300 text-sm font-bold text-slate-700 disabled:opacity-50">Cancel</button>
+                    <button type="button" onClick={queueCorrection} disabled={savingCorrection || !correctionNote.trim()} className="min-h-11 flex-1 rounded-xl bg-indigo-600 text-sm font-bold text-white disabled:opacity-50">{savingCorrection ? 'Saving…' : 'Create correction'}</button>
+                  </div>
+                </div>
+              </div>
+            )}
           </section>
         )}
         {thread && (
