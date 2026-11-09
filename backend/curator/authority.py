@@ -101,7 +101,7 @@ def normalize_knowledge_record(
     scope = str(raw.get("sms_account_key") or raw.get("source_account_key") or raw.get("scope") or (
         "internal" if legacy_upload else "shared"
     )).strip().casefold()
-    if scope not in {"primary", "secondary", "shared"}:
+    if scope not in {"primary", "shared"}:
         scope = "internal"
     status = str(raw.get("status") or ("quarantined" if legacy_upload else "active")).strip().casefold()
     if status not in KNOWLEDGE_RECORD_STATUSES:

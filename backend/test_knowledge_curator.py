@@ -675,6 +675,57 @@ def test_failed_metadata_bulk_repair_rolls_back_the_original_file(tmp_path, monk
     assert list((knowledge / f"{main.LEARNED_INFORMATION_FILENAME}.curator-backups").glob("*.jsonl"))
 
 
+def test_autonomous_maintenance_retires_only_safe_duplicate_and_unsafe_records(tmp_path, monkeypatch):
+    duplicate_current = record("duplicate-current", text="Use the approved wording.", created_at="2030-01-01T00:00:00Z")
+    duplicate_extra = record("duplicate-extra", text="Use the approved wording.", created_at="2030-01-02T00:00:00Z")
+    unsafe_price = record("unsafe-price", key="pricing", text="This service costs $100.")
+    knowledge, data = curator_paths(tmp_path, monkeypatch, [duplicate_current, duplicate_extra, unsafe_price])
+
+    audit = main.run_autonomous_knowledge_maintenance()
+    saved = {
+        item["id"]: item
+        for item in map(json.loads, (knowledge / main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8").splitlines())
+    }
+    assert audit["result"] == "completed"
+    assert saved["duplicate-current"]["status"] == "active"
+    assert saved["duplicate-extra"]["status"] == "superseded"
+    assert saved["duplicate-extra"]["retrieval_enabled"] is False
+    assert saved["unsafe-price"]["status"] == "quarantined"
+    assert saved["unsafe-price"]["retrieval_enabled"] is False
+    assert list((knowledge / f"{main.LEARNED_INFORMATION_FILENAME}.curator-backups").glob("*.jsonl"))
+    state = json.loads((data / "curator.json").read_text(encoding="utf-8"))
+    assert state["maintenance_history"][-1]["result"] == "completed"
+    assert "This service costs" not in json.dumps(state)
+
+
+def test_autonomous_maintenance_quarantines_unresolved_conflicting_authority(tmp_path, monkeypatch):
+    first = record("one", text="First policy answer.")
+    second = record("two", text="Second policy answer.")
+    knowledge, _ = curator_paths(tmp_path, monkeypatch, [first, second])
+
+    main.run_autonomous_knowledge_maintenance()
+    saved = {
+        item["id"]: item
+        for item in map(json.loads, (knowledge / main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8").splitlines())
+    }
+    assert {saved["one"]["status"], saved["two"]["status"]} == {"quarantined"}
+    assert not saved["one"]["retrieval_enabled"] and not saved["two"]["retrieval_enabled"]
+
+
+def test_autonomous_maintenance_rolls_back_on_reload_failure(tmp_path, monkeypatch):
+    knowledge, _ = curator_paths(tmp_path, monkeypatch, [record("unsafe", text="This service costs $100.")])
+    filepath = knowledge / main.LEARNED_INFORMATION_FILENAME
+    before = filepath.read_text(encoding="utf-8")
+
+    def fail_reload():
+        raise RuntimeError("simulated reload failure")
+
+    monkeypatch.setattr(main, "load_knowledge_base", fail_reload)
+    audit = main.run_autonomous_knowledge_maintenance()
+    assert audit["result"] == "rolled_back"
+    assert filepath.read_text(encoding="utf-8") == before
+
+
 @pytest.mark.parametrize(
     ("code", "expected"),
     [

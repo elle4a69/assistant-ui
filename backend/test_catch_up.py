@@ -1,6 +1,8 @@
 import json
 from datetime import datetime, timedelta
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -98,7 +100,7 @@ def test_catch_up_recovers_old_automatically_stranded_taken_over_thread():
     db.close()
 
 
-def test_catch_up_returns_none_when_only_drafts_or_disabled_threads_remain():
+def test_catch_up_includes_a_drafted_conversation_when_no_reply_was_sent():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     db = sessionmaker(bind=engine)()
@@ -112,7 +114,50 @@ def test_catch_up_returns_none_when_only_drafts_or_disabled_threads_remain():
     add_message(db, "disabled-customer", "disabled", "customer", now)
     db.commit()
 
-    assert find_oldest_catch_up_candidate(db) is None
+    thread, message = find_oldest_catch_up_candidate(db)
+
+    assert thread.id == "drafted"
+    assert message.id == "customer"
+    db.close()
+
+
+def test_catch_up_includes_unanswered_review_only_thread_without_a_pending_hold():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.utcnow()
+
+    make_thread(db, "review-only", "+2005", state="needs-review")
+    add_message(db, "review-only-customer", "review-only", "customer", now - timedelta(minutes=5))
+    db.commit()
+
+    thread, message = find_oldest_catch_up_candidate(db)
+
+    assert thread.id == "review-only"
+    assert message.id == "review-only-customer"
+    db.close()
+
+
+def test_catch_up_skips_a_line_whose_auto_responder_is_disabled(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.utcnow() - timedelta(minutes=5)
+
+    make_thread(db, "disabled-line", "+2003")
+    disabled_thread = db.get(Thread, "disabled-line")
+    disabled_thread.sms_account_key = "secondary"
+    add_message(db, "disabled-line-customer", "disabled-line", "customer", now)
+    make_thread(db, "enabled-line", "+2004")
+    add_message(db, "enabled-line-customer", "enabled-line", "customer", now + timedelta(minutes=1))
+    db.commit()
+    monkeypatch.setattr(main, "account_allows_conversational_ai", lambda key: key != "secondary")
+
+    thread, message = find_oldest_catch_up_candidate(db)
+
+    assert thread.id == "enabled-line"
+    assert message.id == "enabled-line-customer"
+    db.close()
 
 
 def test_catch_up_skips_messages_older_than_configured_lookback(monkeypatch):
@@ -176,6 +221,21 @@ def test_new_inbound_restores_only_automatic_taken_over_state(monkeypatch):
     assert db.get(Thread, "automatic").state == "auto-reply"
     assert db.get(Thread, "explicit").state == "taken-over"
     assert db.get(Thread, "automatic").auto_reply_enabled is False
+    db.close()
+
+
+def test_catch_up_requires_training_mode_to_be_off(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    monkeypatch.setattr(main, "AUTO_REPLY_GLOBAL_ENABLED", True)
+    monkeypatch.setattr(main, "TRAINING_MODE_ENABLED", True)
+
+    with pytest.raises(HTTPException) as error:
+        catch_up_missed_messages(db)
+
+    assert error.value.status_code == 409
+    assert "Training Mode" in error.value.detail
     db.close()
 
 

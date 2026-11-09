@@ -72,7 +72,7 @@ HOUSEKEEPING_ACTIONS: Set[str] = {
 }
 
 AUTHORIZED_ROLES: Set[str] = {"owner", "admin"}
-VALID_SCOPES: Set[str] = {"primary", "secondary", "shared"}
+VALID_SCOPES: Set[str] = {"primary", "shared"}
 MIN_AUTONOMOUS_CONFIDENCE: float = 0.80
 
 
@@ -129,7 +129,7 @@ class CuratorAutonomyPolicyEngine:
             actor_role: Role of the actor proposing the action ('owner', 'admin', 'customer', etc.).
             content: Candidate knowledge content or answer text.
             canonical_key: Canonical key/topic of the knowledge record.
-            account_key: Scope/account ('primary', 'secondary', 'shared').
+            account_key: Scope/account ('primary' or 'shared').
             repository: Optional KnowledgeRepository to inspect active records.
             existing_records: Optional pre-fetched records to check for collisions/conflicts.
             replaces_existing: True if the action replaces or modifies an active rule.

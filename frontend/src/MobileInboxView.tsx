@@ -90,7 +90,13 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const [savingDraft, setSavingDraft] = useState(false)
   const [requestedInformation, setRequestedInformation] = useState('')
   const [submittingInformation, setSubmittingInformation] = useState(false)
+  const [dismissingInformationRequest, setDismissingInformationRequest] = useState(false)
+  const [informationRequestOpen, setInformationRequestOpen] = useState(false)
   const [quickToolsOpen, setQuickToolsOpen] = useState(false)
+  const [correctionMessage, setCorrectionMessage] = useState<Message | null>(null)
+  const [correctionNote, setCorrectionNote] = useState('')
+  const [suggestedReply, setSuggestedReply] = useState('')
+  const [savingCorrection, setSavingCorrection] = useState(false)
   const [error, setError] = useState('')
   const touchStartX = useRef<number | null>(null)
   const touchStartY = useRef<number | null>(null)
@@ -104,6 +110,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const initiallyScrolledThreadRef = useRef<string | null>(null)
   const acknowledgedArrivalsRef = useRef(new Set<string>())
   const arrivalOpenIntentRef = useRef<{ threadId: string; sessionId: string } | null>(null)
+  const lastResponseTapRef = useRef<{ messageId: string; at: number } | null>(null)
   selectedIdRef.current = selectedId
 
   useLayoutEffect(() => {
@@ -474,7 +481,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
   const toggleBlocked = async () => {
     if (!thread || changingBlocked) return
     const blocked = !thread.blocked
-    if (blocked && !window.confirm(`Block ${contactLabel(thread.customerPhone)} on ${thread.smsAccountKey === 'secondary' ? 'SMS line 2' : 'SMS line 1'}? Automated replies will stop for this contact.`)) return
+    if (blocked && !window.confirm(`Block ${contactLabel(thread.customerPhone)}? Automated replies will stop for this contact.`)) return
     setChangingBlocked(true)
     try {
       const result = await setThreadBlocked(thread.id, blocked)
@@ -790,7 +797,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                         <textarea
                           value={editingDraftText}
                           onChange={event => setEditingDraftText(event.target.value)}
-                          className="min-h-24 w-full rounded-lg border border-amber-300 bg-white p-2 text-[15px] leading-snug text-slate-900"
+                          className="min-h-24 w-full rounded-lg border border-blue-300 bg-white p-2 text-[15px] leading-snug text-slate-900"
                           aria-label="Edit draft reply"
                         />
                       ) : (
@@ -803,7 +810,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                         {!incoming && !isDraft && <CheckCheck className="h-3 w-3" />}
                       </div>
                       {isDraft && (
-                        <div className="mt-2 flex gap-2 border-t border-amber-200 pt-2">
+                        <div className="mt-2 flex gap-2 border-t border-blue-200 pt-2">
                           {editingDraftId === message.id ? (
                             <>
                               <button
@@ -818,7 +825,7 @@ export default function MobileInboxView({ selectedId, setSelectedId }: MobileInb
                                 type="button"
                                 onClick={() => saveDraftEdit(message.id)}
                                 disabled={savingDraft || !editingDraftText.trim()}
-                                className="flex min-h-9 flex-1 items-center justify-center rounded-lg bg-amber-600 text-xs font-bold text-white disabled:opacity-50"
+                                className="flex min-h-9 flex-1 items-center justify-center rounded-lg bg-blue-600 text-xs font-bold text-white disabled:opacity-50"
                               >
                                 Save edit
                               </button>

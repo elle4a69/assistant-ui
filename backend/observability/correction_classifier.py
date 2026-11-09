@@ -253,19 +253,7 @@ def classify_human_correction(
     added_substantive = tokens_edited - tokens_draft
     removed_substantive = tokens_draft - tokens_edited
 
-    # 6. Check for wrong account/scope if trace is present
-    if trace and trace.account_key:
-        other_line = "secondary" if trace.account_key == "primary" else "primary"
-        if other_line.lower() in edited.lower() and other_line.lower() not in draft.lower():
-            return EditClassificationResult(
-                classification=EditClassification.WRONG_SCOPE,
-                confidence=0.88,
-                is_knowledge_candidate=False,
-                reason="Staff corrected provider/business scope in response",
-                diff_summary={"added": added_lines, "removed": removed_lines},
-            )
-
-    # 7. Check if trace has relevant knowledge context
+    # 6. Check if trace has relevant knowledge context
     if trace:
         winning_record = trace.winning_record_id
         had_conflict = trace.had_conflict

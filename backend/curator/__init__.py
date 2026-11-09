@@ -111,6 +111,7 @@ from .supersession import (
     _curator_metadata_repair_candidate,
     _find_curator_supersession_target,
     _repair_legacy_knowledge_metadata,
+    run_autonomous_knowledge_maintenance,
 )
 from .compat import (
     export_to_main,
@@ -166,6 +167,7 @@ __all__ = [
     "_curator_backup_directory",
     "_curator_bound_backups",
     "_repair_legacy_knowledge_metadata",
+    "run_autonomous_knowledge_maintenance",
     "_find_curator_supersession_target",
     "_approve_curator_supersession_entry",
     # service

@@ -37,7 +37,7 @@ def _knowledge_meaning_signature(text: str) -> str:
 def classify_knowledge_candidate(entry: Dict[str, Any]) -> str:
     """Classify a sanitised candidate before it can become a draft or record."""
     account_key = str(entry.get("scope") or entry.get("sms_account_key") or "")
-    account_keys = get_main_attr("FIRST_CONTACT_ACCOUNT_KEYS", ("primary", "secondary"))
+    account_keys = get_main_attr("FIRST_CONTACT_ACCOUNT_KEYS", ("primary",))
     if account_key not in {*account_keys, "shared"}:
         return "uncertain"
     candidate_text = str(entry.get("text") or entry.get("instruction") or "")
@@ -104,7 +104,7 @@ def prepare_learning_candidate(entry: Dict[str, Any]) -> Optional[Dict[str, Any]
 
 
 KNOWLEDGE_CLASSIFICATION_VERSION = 1
-KNOWLEDGE_SCOPES = {"shared", "primary", "secondary", "internal"}
+KNOWLEDGE_SCOPES = {"shared", "primary", "internal"}
 KNOWLEDGE_CATEGORIES = {
     "generic",
     "service_specific",
@@ -145,9 +145,9 @@ def classify_knowledge_entries(entries: List[Dict[str, Any]]) -> Dict[str, Dict[
     instructions = (
         "Classify durable customer-service knowledge records. Return only JSON with a "
         "classifications array. Each item must contain id, scope, category and retrieval_enabled. "
-        "scope is one of shared, primary, secondary, internal. category is one of generic, "
+        "scope is one of shared, primary, internal. category is one of generic, "
         "service_specific, availability_or_booking_state, customer_specific, internal_or_uncertain. "
-        "Use shared only for durable facts safe for either SMS line. Use primary or secondary only "
+        "Use shared for durable customer-facing facts. Use primary only for legacy records awaiting consolidation, "
         "when the record explicitly identifies that line. Mark availability, times, appointment "
         "options, booking states, one-off customer facts, personal information, and uncertainty as "
         "retrieval_enabled false. Durable service-specific information is valuable and may be "

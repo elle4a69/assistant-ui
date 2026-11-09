@@ -90,7 +90,7 @@ class KnowledgeRepository:
         """List all active, retrieval-enabled KnowledgeRecords for an account key.
 
         Args:
-            account_key: The SMS line or account key (e.g. 'primary', 'secondary').
+            account_key: The SMS account key.
             include_shared: If True, include records with account_key == 'shared'.
         """
         session = self._get_session()
@@ -408,7 +408,7 @@ class KnowledgeRepository:
                         or raw.get("scope")
                         or "primary"
                     ).strip().casefold()
-                    if account_key not in {"primary", "secondary", "shared"}:
+                    if account_key not in {"primary", "shared"}:
                         account_key = "primary"
 
                     knowledge_type = str(

@@ -12,11 +12,10 @@ import { Sparkles, ChevronLeft, ChevronRight, Info, X } from 'lucide-react';
 
 // Steps: 1=Service, 2=DateTime, 3=ClientDetails, 4=Success
 type Step = 1 | 2 | 3 | 4;
-type ProviderKey = 'tori' | 'anonymous';
+type ProviderKey = 'tori';
 
 const PROVIDER_NAMES: Record<ProviderKey, string> = {
   tori: 'Tori',
-  anonymous: 'Anonymous',
 };
 
 // ─── Timezone Helpers ─────────────────────────────────────────────────────────
@@ -180,7 +179,6 @@ function StepPane({ children }: { children: React.ReactNode }) {
 export default function CustomerBookingView({ embedded = false }: { embedded?: boolean }) {
   const bookingParams = new URLSearchParams(window.location.search);
   const prefilledPhone = bookingParams.get('phone')?.trim() || '+61';
-  const prefilledProvider: ProviderKey = bookingParams.get('provider') === 'anonymous' ? 'anonymous' : 'tori';
   const [step, setStep] = useState<Step>(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -198,7 +196,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
   const [name, setName] = useState('');
   const [phone, setPhone] = useState(prefilledPhone);
   const [notes, setNotes] = useState('');
-  const [providerKey, setProviderKey] = useState<ProviderKey>(prefilledProvider);
+  const [providerKey] = useState<ProviderKey>('tori');
   const [nameError, setNameError] = useState('');
   const [phoneError, setPhoneError] = useState('');
   const [touched, setTouched] = useState({ name: false, phone: false });
@@ -291,7 +289,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
 
   // Load services on mount
   useEffect(() => {
-    getServices()
+    getServices({ activeOnly: true })
       .then(setServices)
       .catch(() => setError('Failed to load services. Please check backend connection.'));
   }, []);
@@ -379,7 +377,6 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
     setName('');
     setPhone(prefilledPhone);
     setNotes('');
-    setProviderKey(prefilledProvider);
     setNameError('');
     setPhoneError('');
     setTouched({ name: false, phone: false });
@@ -391,14 +388,14 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
   };
 
   const handleInputFocus = () => {
-    setTimeout(() => {
+    requestAnimationFrame(() => {
       if (scrollRef.current) {
         scrollRef.current.scrollTo({
           top: scrollRef.current.scrollHeight,
           behavior: 'smooth'
         });
       }
-    }, 150);
+    });
   };
 
   const handleSubmit = async () => {
@@ -472,24 +469,7 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
 
         {/* ── Header ──────────────────────────────────────────────────────── */}
         {!embedded && <div className="bg-white border-b border-slate-100 px-4 py-3 flex items-center justify-between shrink-0 z-10">
-          <fieldset className="flex items-center gap-3 border-0 p-0 m-0" aria-label="Booking provider">
-              {([
-                ['tori', 'Tori'],
-                ['anonymous', 'Anonymous'],
-              ] as const).map(([key, label]) => (
-                <label key={key} className="flex items-center gap-1.5 text-sm font-extrabold text-[#7a0b2e] cursor-pointer">
-                  <input
-                    type="radio"
-                    name="booking-provider"
-                    value={key}
-                    checked={providerKey === key}
-                    onChange={() => setProviderKey(key)}
-                    className="size-3.5 accent-[#7a0b2e] cursor-pointer"
-                  />
-                  {label}
-                </label>
-              ))}
-          </fieldset>
+          <span className="text-sm font-extrabold text-[#7a0b2e]">Tori</span>
 
           <div className="flex items-center gap-2">
             {/* Online badge */}
@@ -930,17 +910,11 @@ export default function CustomerBookingView({ embedded = false }: { embedded?: b
                   <div className="absolute inset-0 rounded-full bg-[#7a0b2e]/10 animate-ping" style={{ animationDuration: '3s' }}></div>
                   {/* Avatar image container */}
                   <div className="booking-crimson-outline relative size-20 overflow-hidden rounded-full shadow-md">
-                    {providerKey === 'tori' ? (
-                      <img
-                        src="/tori_avatar.jpg"
-                        alt="Tori"
-                        className="size-full object-cover"
-                      />
-                    ) : (
-                      <div className="flex size-full items-center justify-center bg-[#7a0b2e] text-3xl font-black text-white" aria-label="Anonymous">
-                        A
-                      </div>
-                    )}
+                    <img
+                      src="/tori_avatar.jpg"
+                      alt="Tori"
+                      className="size-full object-cover"
+                    />
                   </div>
                   
                   {/* Online/Verified badge */}

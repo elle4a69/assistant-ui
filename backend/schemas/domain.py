@@ -17,7 +17,7 @@ except ImportError:
     try:
         from core.config import FIRST_CONTACT_ACCOUNT_KEYS
     except ImportError:
-        FIRST_CONTACT_ACCOUNT_KEYS = ("primary", "secondary")
+        FIRST_CONTACT_ACCOUNT_KEYS = ("primary",)
 
 try:
     from backend.bootcamp import DEFAULT_STYLE_PROFILE
@@ -77,7 +77,29 @@ class WebhookSMSInput(BaseModel):
 class AdminSmsSimulationInput(BaseModel):
     customer_phone: str
     body: str
-    sms_account_key: Literal["primary", "secondary"]
+    sms_account_key: Literal["primary"] = "primary"
+
+
+class BulkSmsSendInput(BaseModel):
+    """A single, owner-confirmed generic SMS delivered to several mobile numbers."""
+
+    recipients: List[str] = Field(min_length=1, max_length=100)
+    message: str = Field(min_length=1, max_length=1600)
+    smsAccountKey: Literal["primary"] = "primary"
+    clientRequestId: str = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def clean_bulk_sms(self):
+        self.recipients = [recipient.strip() for recipient in self.recipients if recipient.strip()]
+        self.message = self.message.strip()
+        self.clientRequestId = self.clientRequestId.strip()
+        if not self.recipients:
+            raise ValueError("Add at least one mobile number.")
+        if not self.message:
+            raise ValueError("Message is required.")
+        if not self.clientRequestId:
+            raise ValueError("A send request ID is required.")
+        return self
 
 
 # --- Thread Operational Schemas ---
@@ -108,6 +130,21 @@ class DraftUpdateInput(BaseModel):
         self.text = self.text.strip()
         if not self.text:
             raise ValueError("Draft text is required.")
+        return self
+
+
+class MessageCorrectionInput(BaseModel):
+    """Owner feedback on a particular AI response, kept out of live knowledge."""
+
+    correction: str = Field(min_length=1, max_length=6000)
+    suggested_reply: Optional[str] = Field(default=None, max_length=1600)
+
+    @model_validator(mode="after")
+    def clean_correction(self):
+        self.correction = self.correction.strip()
+        self.suggested_reply = (self.suggested_reply or "").strip() or None
+        if not self.correction:
+            raise ValueError("Tell us what should change.")
         return self
 
 
@@ -185,7 +222,7 @@ class FirstContactAutoresponderAccountsInput(BaseModel):
 class ManualLearningInput(BaseModel):
     topic: str = Field(min_length=1, max_length=500)
     guidance: str = Field(min_length=1, max_length=6000)
-    scope: Literal["shared", "primary", "secondary"] = "shared"
+    scope: Literal["shared"] = "shared"
 
     @model_validator(mode="after")
     def clean_learning(self):
@@ -199,7 +236,7 @@ class ManualLearningInput(BaseModel):
 class LearnedInformationUpdateInput(BaseModel):
     topic: str = Field(default="", max_length=500)
     text: str = Field(min_length=1, max_length=6000)
-    scope: Literal["shared", "primary", "secondary", "internal"]
+    scope: Literal["shared", "internal"]
 
     @model_validator(mode="after")
     def clean_entry(self):
@@ -227,7 +264,7 @@ class SmsLearningPreviewInput(BaseModel):
 
 class SmsLearningCandidateInput(BaseModel):
     id: str = Field(min_length=1, max_length=200)
-    account_key: Literal["primary", "secondary"]
+    account_key: Literal["primary"] = "primary"
     topic: str = Field(min_length=1, max_length=1200)
     applies_when: str = Field(min_length=1, max_length=1200)
     instruction: str = Field(min_length=1, max_length=1200)
@@ -249,7 +286,7 @@ class SmsLearningImportInput(BaseModel):
 class ArrivalInviteInput(BaseModel):
     summary: str = Field(min_length=1, max_length=300)
     customerPhone: Optional[str] = Field(default=None, max_length=50)
-    smsAccountKey: Optional[Literal["primary", "secondary"]] = None
+    smsAccountKey: Optional[Literal["primary"]] = "primary"
     threadId: Optional[str] = Field(default=None, max_length=100)
     startTime: datetime
     endTime: datetime
@@ -314,7 +351,7 @@ class ManualBookingInput(BaseModel):
     phone: str
     startTime: str
     notes: Optional[str] = None
-    providerKey: Literal["tori", "anonymous"] = "tori"
+    providerKey: Literal["tori"] = "tori"
 
 
 class BookingReminderInput(BaseModel):
@@ -345,13 +382,16 @@ class LineProfileInput(BaseModel):
     displayName: str = Field(default="", max_length=100)
     providerName: str = Field(default="", max_length=100)
     informationUrl: str = Field(default="", max_length=2000)
-    userPrompt: str = Field(default="", max_length=12000)
+    autoReplyEnabled: bool = True
     timezone: Optional[str] = Field(default="Australia/Hobart", max_length=100)
 
 
 class LineProfilesInput(BaseModel):
     primary: LineProfileInput
-    secondary: LineProfileInput
+
+
+class LineAutoReplyInput(BaseModel):
+    enabled: bool
 
 
 class SettingsUpdateInput(BaseModel):
@@ -423,7 +463,13 @@ class ServiceItem(BaseModel):
     price: int
     duration: int
     showDuration: Optional[bool] = True
-    lineKey: Literal["primary", "secondary"] = "primary"
+    isActive: Optional[bool] = True
+    addonIds: List[str] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def normalize_addon_ids(self):
+        self.addonIds = list(dict.fromkeys(value.strip() for value in self.addonIds if value.strip()))
+        return self
 
 
 class ServicesListInput(BaseModel):
@@ -453,6 +499,17 @@ class WorkingHourEntry(BaseModel):
 
 class WorkingHoursInput(BaseModel):
     hours: List[WorkingHourEntry]
+
+class AvailabilitySlotDay(BaseModel):
+    day: str
+    enabled: bool = True
+    open: Optional[str] = "09:00"
+    close: Optional[str] = "17:00"
+    slots: List[str] = Field(default_factory=list)
+
+class AvailabilityConfigInput(BaseModel):
+    maxDaysAhead: int = Field(default=14, ge=1, le=365)
+    weeklyHours: List[AvailabilitySlotDay]
 
 
 class MobileMessageConfigInput(BaseModel):
@@ -506,6 +563,7 @@ __all__ = [
     "TakeoverInput",
     "ReplyInput",
     "DraftUpdateInput",
+    "MessageCorrectionInput",
     "NoteInput",
     "EscalateInput",
     "ResolveInput",
@@ -535,6 +593,7 @@ __all__ = [
     "BusinessVariablesInput",
     "LineProfileInput",
     "LineProfilesInput",
+    "LineAutoReplyInput",
     "SettingsUpdateInput",
     "QuickReplyInput",
     "OperationsChatInput",
@@ -551,6 +610,8 @@ __all__ = [
     "ServiceAddOnsInput",
     "WorkingHourEntry",
     "WorkingHoursInput",
+    "AvailabilitySlotDay",
+    "AvailabilityConfigInput",
     "MobileMessageConfigInput",
     "LocantoMessagePayload",
     "BootcampRunInput",

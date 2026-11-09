@@ -101,7 +101,7 @@ BUSINESS_ASSISTANT_TOOL_SCHEMAS = [
             "properties": {
                 "topic": {"type": "string", "minLength": 2, "maxLength": 500},
                 "guidance": {"type": "string", "minLength": 2, "maxLength": 4000},
-                "scope": {"type": "string", "enum": ["shared", "primary", "secondary"]},
+                "scope": {"type": "string", "enum": ["shared", "primary"]},
             },
             "required": ["topic", "guidance", "scope"],
             "additionalProperties": False,
@@ -209,7 +209,7 @@ def business_assistant_instructions(snapshot: str, memory: str = "[]", conversat
         "to create a concise support ticket for the separate maintenance agent. A ticket may be implemented and independently "
         "checked on a private review branch, but it can never deploy without the owner's later approval. Do not design code changes yourself. "
         "Dynamic facts such as current prices, durations, availability and booking times must come from their live "
-        "authoritative settings/calendar rather than being memorised as literal rules. Keep primary, secondary and shared "
+        "authoritative settings/calendar rather than being memorised as literal rules. Keep shared rules "
         "business knowledge separated correctly. Be warm, concise and practical, use Australian English and avoid "
         "unnecessary questions. "
         f"Current bounded system snapshot: {snapshot}\n"

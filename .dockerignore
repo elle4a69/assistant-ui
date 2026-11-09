@@ -2,6 +2,11 @@
 .pip-cache
 .npm-tmp
 .remote-code-express
+.git
+.ops-worktrees
+.backups
+.codex-fly-deploy
+tmp
 .edge-mobile-preview*
 node_modules
 **/node_modules
@@ -29,5 +34,3 @@ docs/training-rag-replacement/
 *.jsonl
 !backend/data/approved_intent_examples.jsonl
 !backend/data/approved_knowledge_cards.jsonl
-
-

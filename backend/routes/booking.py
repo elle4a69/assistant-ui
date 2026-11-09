@@ -24,6 +24,7 @@ try:
     from backend.services.booking_service import (
         BOOKING_PROVIDERS,
         load_working_hours,
+        load_availability_config,
         _booking_reminder_parts,
         parse_business_datetime,
         booking_availability_error,
@@ -52,6 +53,7 @@ except ImportError:
     from services.booking_service import (
         BOOKING_PROVIDERS,
         load_working_hours,
+        load_availability_config,
         _booking_reminder_parts,
         parse_business_datetime,
         booking_availability_error,
@@ -354,8 +356,22 @@ def delete_booking_endpoint(
 
 @router.get("/api/calendar/freebusy")
 def get_free_slots_endpoint(duration: int = Query(30), db: Session = Depends(get_db)):
-    working_hours = load_working_hours()
-    wh_by_day = {entry["day"]: entry for entry in working_hours}
+    avail_loader = _dyn("load_availability_config", load_availability_config)
+    avail_config = avail_loader() if callable(avail_loader) else {}
+    max_days_ahead = int(avail_config.get("maxDaysAhead", 14))
+
+    weekly_hours = avail_config.get("weeklyHours") or []
+    wh_by_day = {
+        entry["day"]: entry for entry in weekly_hours
+        if isinstance(entry, dict) and entry.get("day")
+    }
+    for entry in load_working_hours():
+        if isinstance(entry, dict) and entry.get("day"):
+            d = entry["day"]
+            if d not in wh_by_day:
+                wh_by_day[d] = entry
+            elif "slots" not in wh_by_day[d] and "slots" in entry:
+                wh_by_day[d]["slots"] = entry["slots"]
 
     from zoneinfo import ZoneInfo
     tz_hobart = ZoneInfo("Australia/Hobart")
@@ -366,35 +382,66 @@ def get_free_slots_endpoint(duration: int = Query(30), db: Session = Depends(get
     minutes = 15 * ((dt.minute + 14) // 15)
     dt = dt.replace(minute=0, second=0, microsecond=0) + timedelta(minutes=minutes)
 
-    busy_slots = calendar_service.get_busy_slots(dt, dt + timedelta(days=14))
+    limit_dt = dt + timedelta(days=max_days_ahead)
+    busy_slots = calendar_service.get_busy_slots(dt, limit_dt)
     free_slots = []
-    limit_dt = dt + timedelta(days=14)
 
     while dt < limit_dt and len(free_slots) < 500:
         day_name = DAY_NAMES[dt.weekday()]
         day_cfg = wh_by_day.get(day_name)
 
-        if day_cfg and day_cfg.get("enabled", False):
-            open_h, open_m = map(int, day_cfg["open"].split(":"))
-            close_h, close_m = map(int, day_cfg["close"].split(":"))
-            open_mins = open_h * 60 + open_m
-            close_mins = close_h * 60 + close_m
-            dt_mins = dt.hour * 60 + dt.minute
+        if not day_cfg or not day_cfg.get("enabled", True):
+            dt += timedelta(minutes=15)
+            continue
 
-            slot_end = dt + timedelta(minutes=duration)
-            slot_end_mins = slot_end.hour * 60 + slot_end.minute
+        slot_start = dt
+        slot_end = dt + timedelta(minutes=duration)
 
-            if dt_mins >= open_mins and slot_end_mins <= close_mins:
-                overlap = False
-                for busy in busy_slots:
-                    if dt < busy["end"] and slot_end > busy["start"]:
-                        overlap = True
+        if slot_start.date() != slot_end.date():
+            dt += timedelta(minutes=15)
+            continue
+
+        slot_available = True
+        if day_cfg.get("slots") is not None:
+            slots_list = set(day_cfg.get("slots") or [])
+            if not slots_list:
+                slot_available = False
+            else:
+                start_min = slot_start.hour * 60 + slot_start.minute
+                end_min = slot_end.hour * 60 + slot_end.minute
+                k_min = start_min // 30
+                k_max = (end_min - 1) // 30
+                for k in range(k_min, k_max + 1):
+                    chunk_m = k * 30
+                    chunk_str = f"{chunk_m // 60:02d}:{chunk_m % 60:02d}"
+                    if chunk_str not in slots_list:
+                        slot_available = False
                         break
-                if not overlap:
-                    free_slots.append({
-                        "startTime": format_dt(dt),
-                        "endTime": format_dt(slot_end),
-                    })
+        else:
+            try:
+                open_h, open_m = map(int, str(day_cfg.get("open", "09:00")).split(":"))
+                close_h, close_m = map(int, str(day_cfg.get("close", "17:00")).split(":"))
+                open_mins = open_h * 60 + open_m
+                close_mins = close_h * 60 + close_m
+                dt_mins = slot_start.hour * 60 + slot_start.minute
+                slot_end_mins = slot_end.hour * 60 + slot_end.minute
+                if not (open_mins <= dt_mins and slot_end_mins <= close_mins):
+                    slot_available = False
+            except Exception:
+                slot_available = False
+
+        if slot_available:
+            overlap = False
+            for busy in busy_slots:
+                if slot_start < busy["end"] and slot_end > busy["start"]:
+                    overlap = True
+                    break
+            if not overlap:
+                free_slots.append({
+                    "startTime": format_dt(slot_start),
+                    "endTime": format_dt(slot_end),
+                })
+
         dt += timedelta(minutes=15)
 
     return free_slots
@@ -443,7 +490,10 @@ def create_manual_booking(
             if s.get("id") == payload.serviceId:
                 service = s
                 break
-                
+
+        if service and service.get("isActive", True) is False:
+            raise HTTPException(status_code=422, detail="That service is not currently available for booking.")
+
         if not service:
             service = {
                 "name": "Custom Appointment",

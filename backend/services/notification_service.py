@@ -127,7 +127,7 @@ def send_thread_attention_notification(
     source_key: str,
 ) -> bool:
     """Send one owner alert when a conversation newly needs human attention."""
-    line_label = "Line 2" if sms_account_key == "secondary" else "Line 1"
+    line_label = "SMS"
     return send_notification(
         notification_type="sms_needs_review",
         title="SMS Needs Review",

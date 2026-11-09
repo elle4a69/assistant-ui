@@ -40,6 +40,7 @@ try:
     )
     from backend.core.database import Base, SessionLocal
     from backend.core.utils import _dyn
+    from backend.core.service_addons import service_addons_variable_value
 except ImportError:
     from core.config import (
         BASE_DIR,
@@ -52,6 +53,7 @@ except ImportError:
     )
     from core.database import Base, SessionLocal
     from core.utils import _dyn
+    from core.service_addons import service_addons_variable_value
 
 # Defensive imports for Google Calendar API
 try:
@@ -118,12 +120,20 @@ def canonical_phone_number(phone: str) -> str:
     return phone.strip()
 
 
-def _normalize_line_profile(account_key: str, value: Any) -> Dict[str, str]:
+def _normalize_line_profile(account_key: str, value: Any) -> Dict[str, Any]:
     profile = dict(LINE_PROFILE_DEFAULTS[account_key])
     if isinstance(value, dict):
         for key in profile:
             if value.get(key) is not None:
-                profile[key] = str(value[key]).strip()
+                if key == "autoReplyEnabled":
+                    raw_enabled = value[key]
+                    profile[key] = (
+                        raw_enabled.strip().lower() in {"1", "true", "yes", "on"}
+                        if isinstance(raw_enabled, str)
+                        else bool(raw_enabled)
+                    )
+                else:
+                    profile[key] = str(value[key]).strip()
     return profile
 
 
@@ -143,7 +153,7 @@ def _resolve_line_profiles_path() -> str:
     return LINE_PROFILES_PATH
 
 
-def load_line_profiles() -> Dict[str, Dict[str, str]]:
+def load_line_profiles() -> Dict[str, Dict[str, Any]]:
     path = _resolve_line_profiles_path()
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -156,7 +166,7 @@ def load_line_profiles() -> Dict[str, Dict[str, str]]:
     }
 
 
-def save_line_profiles(profiles: Dict[str, Dict[str, str]]) -> None:
+def save_line_profiles(profiles: Dict[str, Dict[str, Any]]) -> None:
     path = _resolve_line_profiles_path()
     normalized = {key: _normalize_line_profile(key, profiles.get(key)) for key in FIRST_CONTACT_ACCOUNT_KEYS}
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -166,7 +176,7 @@ def save_line_profiles(profiles: Dict[str, Dict[str, str]]) -> None:
     os.replace(temporary_path, path)
 
 
-def get_line_profile(account_key: str) -> Dict[str, str]:
+def get_line_profile(account_key: str) -> Dict[str, Any]:
     """Return the saved customer-conversation profile for one SMS line."""
     if account_key not in FIRST_CONTACT_ACCOUNT_KEYS:
         account_key = "primary"
@@ -224,6 +234,9 @@ def load_business_variables() -> List[Dict[str, Any]]:
             print(f"Failed to load business variables: {exc}")
             raw_items = [dict(item) for item in BUSINESS_VARIABLE_DEFAULTS]
 
+    if not any(str(item.get("key") or "").strip().lower() == "service_addons" for item in raw_items if isinstance(item, dict)):
+        raw_items.append(next(dict(item) for item in BUSINESS_VARIABLE_DEFAULTS if item["key"] == "service_addons"))
+
     variables = []
     seen = set()
     for item in raw_items:
@@ -237,6 +250,8 @@ def load_business_variables() -> List[Dict[str, Any]]:
         meta = default_meta.get(key, {})
         label = str(item.get("label") or meta.get("label") or key.replace("_", " ").title()).strip()
         value = str(item.get("value", "")).strip()
+        if key == "service_addons":
+            value = service_addons_variable_value(DATA_DIR)
         description = str(item.get("description") or meta.get("description") or f"Business detail for {label}").strip()
         is_required = bool(item.get("required") if "required" in item else meta.get("required", False))
 
@@ -248,6 +263,7 @@ def load_business_variables() -> List[Dict[str, Any]]:
             "description": description,
             "required": is_required,
             "required_status": "required" if is_required else "optional",
+            "readOnly": key == "service_addons",
         })
     return variables
 
@@ -279,26 +295,20 @@ def get_business_variable_values() -> Dict[str, str]:
 
 
 def get_line_business_variable_values(account_key: str) -> Dict[str, str]:
-    """Add the selected line's identity fields without changing shared values."""
+    """Add the single SMS identity to the shared business variables."""
     resolve_ctx = _dyn("resolve_provider_context", resolve_provider_context)
     context = resolve_ctx(account_key)
-    # The legacy global Settings file belongs to the original primary line.
-    # It is never a secondary provider source; secondary values must be added
-    # explicitly to that line profile/catalogue.
     get_biz_vars = _dyn("get_business_variable_values", get_business_variable_values)
-    values = get_biz_vars() if account_key == "primary" else {}
+    values = get_biz_vars()
     get_profile = _dyn("get_line_profile", get_line_profile)
     profile = get_profile(account_key)
     information_url = profile["informationUrl"].strip()
     if information_url:
-        # Historical approved examples use {website}. For an SMS conversation,
-        # that token must resolve to the receiving line's saved information link,
-        # never a shared or other-line URL.
+        # Historical approved examples use {website}; prefer the configured
+        # customer-facing information link when one is set.
         values["website"] = information_url
         values["booking_url"] = information_url
     values.update({
-        # The global Settings value may describe the other line. Identity is
-        # always overwritten from the account resolved for this conversation.
         "provider_name": context["provider_name"],
         "line_key": account_key,
         "line_display_name": profile["displayName"],
@@ -309,10 +319,8 @@ def get_line_business_variable_values(account_key: str) -> Dict[str, str]:
 
 
 def effective_line_user_prompt(account_key: str, shared_prompt: str) -> str:
-    """Use an explicitly saved line prompt, falling back to the shared template."""
-    get_profile = _dyn("get_line_profile", get_line_profile)
-    line_prompt = get_profile(account_key)["userPrompt"].strip()
-    return line_prompt or shared_prompt
+    """The application has one shared customer prompt."""
+    return shared_prompt
 
 
 # ===========================================================================

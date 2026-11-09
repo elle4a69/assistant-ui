@@ -578,7 +578,7 @@ def send_arrival_push_notifications(session_id: str, clear: bool = False) -> Non
             if callable(notify_fn):
                 booking = _arrival_booking(db, session.booking_id)
                 label = (booking.summary if booking else "Customer")[:160]
-                line_label = "Line 2" if session.sms_account_key == "secondary" else "Line 1"
+                line_label = "SMS"
                 click_url = (
                     build_notification_url("/chat", thread=session.thread_id)
                     if callable(build_notification_url) and session.thread_id

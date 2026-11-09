@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from booking_tools import BookingToolSuite, LegacyCalendarDiscoveryProvider
+from booking_tools import BookingToolError, BookingToolSuite, LegacyCalendarDiscoveryProvider
 
 
 TIMEZONE = "Australia/Hobart"
@@ -155,6 +155,28 @@ def test_legacy_adapter_allows_back_to_back_bookings_but_not_overlaps():
     assert "2026-08-12T10:30:00+10:00" in starts  # starts exactly when the existing booking ends
     assert "2026-08-12T09:45:00+10:00" not in starts
     assert "2026-08-12T10:15:00+10:00" not in starts
+
+
+def test_legacy_adapter_excludes_hidden_services_from_new_bookings():
+    provider = LegacyCalendarDiscoveryProvider(
+        services_loader=lambda: [
+            {"id": "visible", "name": "Visible", "duration": 30},
+            {"id": "hidden", "name": "Hidden", "duration": 30, "isActive": False},
+        ],
+        working_hours_loader=lambda: [{"day": "Wednesday", "enabled": True, "open": "09:00", "close": "12:00"}],
+        busy_slots_loader=lambda start, end: [],
+        timezone_name=TIMEZONE,
+    )
+
+    assert [service["id"] for service in provider.list_services()] == ["visible"]
+    try:
+        provider.search_availability(
+            "hidden", datetime(2026, 8, 12, 9, 0, tzinfo=TZ), datetime(2026, 8, 12, 10, 0, tzinfo=TZ), 1,
+        )
+    except BookingToolError as exc:
+        assert str(exc) == "That service is not available."
+    else:
+        raise AssertionError("Hidden service unexpectedly accepted a new booking")
 
 
 def test_execute_returns_safe_error_for_unknown_service():

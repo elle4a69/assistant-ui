@@ -51,7 +51,7 @@ def _curator_effective_record_snapshot(record: Dict[str, Any], *, source_index: 
 def _curator_authority_snapshot(records: List[Dict[str, Any]]) -> Dict[str, List[tuple[str, int, str]]]:
     """Compare authority results for every customer-facing line before writing."""
     snapshot: Dict[str, List[tuple[str, int, str]]] = {}
-    for account_key in ("primary", "secondary"):
+    for account_key in ("primary",):
         resolved = resolve_knowledge_authority(records, account_key=account_key)
         snapshot[account_key] = [
             (str(item.get("id") or ""), int(item.get("revision") or 1), str(item.get("canonical_key") or ""))
@@ -214,6 +214,203 @@ def _repair_legacy_knowledge_metadata() -> Dict[str, Any]:
     return audit
 
 
+_AUTONOMOUS_QUARANTINE_FINDINGS = {
+    "invalid_metadata",
+    "expired_record",
+    "literal_dynamic_authority",
+    "shared_provider_specific",
+    "dangling_supersession",
+    "cyclic_supersession",
+    "cross_topic_supersession",
+    "cross_scope_supersession",
+    "branched_supersession",
+    "incompatible_active_records",
+    "apparently_superseded",
+}
+
+
+def _autonomous_maintenance_action(
+    record: Dict[str, Any], *, action: str, finding_type: str,
+) -> Optional[Dict[str, Any]]:
+    """Return a retrieval-reducing change, never a new business instruction."""
+    # A record which is already out of live retrieval needs no write.  This
+    # makes repeated background passes idempotent and avoids needless backups.
+    normalized = normalize_knowledge_record(record, source=LEARNED_INFORMATION_FILENAME, source_index=0, learned=True)
+    if (
+        normalized.get("status") != "active"
+        and not normalized.get("retrieval_enabled")
+    ):
+        return None
+    candidate = dict(record)
+    if action == "deduplicate":
+        candidate["status"] = "superseded"
+    else:
+        candidate["status"] = "quarantined"
+    candidate["review_status"] = "approved"
+    candidate["retrieval_enabled"] = False
+    # This is deliberately a compact reason code, rather than source content
+    # or a generated explanation.  It keeps the file useful for audit without
+    # storing any extra customer or business data.
+    candidate["review_note"] = f"autonomous_curator:{finding_type}"[:160]
+    return candidate
+
+
+def _record_autonomous_maintenance(audit: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist a content-free maintenance receipt without affecting SMS work."""
+    try:
+        curator_lock = get_main_attr("KNOWLEDGE_CURATOR_LOCK", KNOWLEDGE_CURATOR_LOCK)
+        with curator_lock:
+            state = _load_curator_state()
+            state.setdefault("maintenance_history", []).append(audit)
+            _save_curator_state(state)
+    except Exception as exc:
+        # The knowledge file is already protected by its own backup/rollback;
+        # an unavailable audit file must not undo a safe maintenance result.
+        print(f"Autonomous knowledge maintenance audit failed: {type(exc).__name__}")
+    return audit
+
+
+def run_autonomous_knowledge_maintenance() -> Dict[str, Any]:
+    """Safely maintain legacy learned knowledge without an operator workflow.
+
+    The background curator may only repair neutral metadata or *remove* a
+    record from customer retrieval.  It never chooses between business facts,
+    writes a replacement, or promotes knowledge.  Every mutation has an
+    on-volume backup and is rolled back if reload or validation fails.
+    """
+    timestamp = datetime.utcnow().isoformat() + "Z"
+    audit: Dict[str, Any] = {
+        "id": f"kcm-{uuid.uuid4()}",
+        "timestamp": timestamp,
+        "result": "no_changes",
+        "repaired_count": 0,
+        "repairs": [],
+    }
+    # These repairs only materialise defaults the authority resolver already
+    # uses.  They have their own atomic backup/rollback path.
+    metadata_audit = _repair_legacy_knowledge_metadata()
+    audit["repairs"].extend(metadata_audit.get("repairs", []))
+
+    knowledge_dir = get_main_attr("KNOWLEDGE_DIR", _DEFAULT_KNOWLEDGE_DIR)
+    filepath = os.path.join(knowledge_dir, LEARNED_INFORMATION_FILENAME)
+    if not os.path.exists(filepath):
+        audit["result"] = metadata_audit.get("result", "no_changes")
+        audit["repaired_count"] = len(audit["repairs"])
+        return _record_autonomous_maintenance(audit)
+
+    lock = get_main_attr("LEARNED_INFORMATION_LOCK", DEFAULT_LEARNED_INFORMATION_LOCK)
+    with lock:
+        original = Path(filepath).read_text(encoding="utf-8")
+        lines = original.splitlines()
+        records: List[Dict[str, Any]] = []
+        positions: List[int] = []
+        for position, line in enumerate(lines):
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                records.append(value)
+                positions.append(position)
+
+        ids = [str(item.get("id") or "").strip() for item in records]
+        if not records or not all(ids) or len(set(ids)) != len(ids):
+            audit["result"] = "skipped_ambiguous" if records else metadata_audit.get("result", "no_changes")
+            audit["repaired_count"] = len(audit["repairs"])
+            return _record_autonomous_maintenance(audit)
+
+        # Import locally: service imports this module for manual supersession,
+        # so a top-level import would create a module-initialisation cycle.
+        from .service import inspect_knowledge_integrity
+
+        findings = inspect_knowledge_integrity(records=records)
+        by_id = {record_id: index for index, record_id in enumerate(ids)}
+        actions: Dict[str, tuple[str, str]] = {}
+        for finding in findings:
+            finding_type = str(finding.get("finding_type") or "")
+            references = finding.get("records")
+            finding_ids = [str(ref.get("id") or "").strip() for ref in references if isinstance(ref, dict)] if isinstance(references, list) else []
+            if not finding_ids or any(record_id not in by_id for record_id in finding_ids):
+                continue
+            if finding_type == "exact_duplicate":
+                # Identical text, scope and canonical key: retaining the
+                # oldest record is deterministic and does not select a fact.
+                keep_id = min(finding_ids, key=lambda record_id: (str(records[by_id[record_id]].get("created_at") or ""), record_id))
+                for record_id in finding_ids:
+                    if record_id != keep_id:
+                        actions[record_id] = ("deduplicate", finding_type)
+            elif finding_type in _AUTONOMOUS_QUARANTINE_FINDINGS:
+                for record_id in finding_ids:
+                    # Quarantine wins over deduplication if a record appears
+                    # in overlapping integrity findings.
+                    actions[record_id] = ("quarantine", finding_type)
+
+        replacements: Dict[int, Dict[str, Any]] = {}
+        for record_id, (action, finding_type) in actions.items():
+            index = by_id[record_id]
+            candidate = _autonomous_maintenance_action(records[index], action=action, finding_type=finding_type)
+            if not candidate:
+                continue
+            replacements[index] = candidate
+            audit["repairs"].append({"record_id": record_id[:160], "fields": [action, finding_type]})
+
+        if not replacements:
+            audit["result"] = "completed" if audit["repairs"] else metadata_audit.get("result", "no_changes")
+            audit["repaired_count"] = len(audit["repairs"])
+            return _record_autonomous_maintenance(audit)
+
+        proposed_records = list(records)
+        for index, candidate in replacements.items():
+            proposed_records[index] = candidate
+        # A maintenance pass must strictly reduce authority; it must never make
+        # any record available that was not already available before the run.
+        before = _curator_authority_snapshot(records)
+        after = _curator_authority_snapshot(proposed_records)
+        if any(set(after.get(key, [])) - set(before.get(key, [])) for key in after):
+            audit["result"] = "validation_failed"
+            audit["repairs"] = audit["repairs"][:len(metadata_audit.get("repairs", []))]
+            audit["repaired_count"] = len(audit["repairs"])
+            return _record_autonomous_maintenance(audit)
+
+        updated_lines = list(lines)
+        for index, candidate in replacements.items():
+            updated_lines[positions[index]] = json.dumps(candidate, ensure_ascii=False, sort_keys=True)
+        backup_directory = _curator_backup_directory(filepath)
+        os.makedirs(backup_directory, exist_ok=True)
+        backup_path = os.path.join(backup_directory, f"{datetime.utcnow().strftime('%Y%m%dT%H%M%S%f')}-{uuid.uuid4().hex}.jsonl")
+        shutil.copy2(filepath, backup_path)
+        temporary = f"{filepath}.{uuid.uuid4().hex}.tmp"
+        try:
+            with open(temporary, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(updated_lines) + ("\n" if original.endswith("\n") else ""))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, filepath)
+            reload_fn = get_main_attr("load_knowledge_base")
+            if callable(reload_fn):
+                reload_fn()
+            _curator_bound_backups(backup_directory)
+        except Exception:
+            try:
+                rollback_temp = f"{filepath}.{uuid.uuid4().hex}.rollback.tmp"
+                shutil.copy2(backup_path, rollback_temp)
+                os.replace(rollback_temp, filepath)
+                with contextlib.suppress(Exception):
+                    reload_fn = get_main_attr("load_knowledge_base")
+                    if callable(reload_fn):
+                        reload_fn()
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+            audit["result"] = "rolled_back"
+            audit["repairs"] = audit["repairs"][:len(metadata_audit.get("repairs", []))]
+            audit["repaired_count"] = len(audit["repairs"])
+            return _record_autonomous_maintenance(audit)
+
+    audit["result"] = "completed"
+    audit["repaired_count"] = len(audit["repairs"])
+    return _record_autonomous_maintenance(audit)
+
+
 def _find_curator_supersession_target(
     entry: Dict[str, Any],
     records: Optional[List[Dict[str, Any]]] = None,
@@ -244,7 +441,7 @@ def _approve_curator_supersession_entry(entry: Dict[str, Any]) -> Dict[str, Any]
         raise ValueError("The curator proposal is not an accepted current draft.")
     if proposal_copy.get("proposed_action") not in {"draft_replacement", "draft_supersession"} or not _curator_proposal_is_current(proposal_copy):
         raise ValueError("The curator proposal is stale or is not a supersession.")
-    if entry.get("scope") not in {"shared", "primary", "secondary"} or _curator_dynamic_claim_kind(str(entry.get("text") or "")):
+    if entry.get("scope") not in {"shared", "primary"} or _curator_dynamic_claim_kind(str(entry.get("text") or "")):
         raise ValueError("The curator draft is not safe to activate.")
 
     knowledge_dir = get_main_attr("KNOWLEDGE_DIR", _DEFAULT_KNOWLEDGE_DIR)

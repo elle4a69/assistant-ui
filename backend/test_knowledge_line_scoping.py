@@ -15,11 +15,28 @@ def test_line_scoped_learning_is_never_retrieved_by_the_other_line(monkeypatch):
 
 def test_information_request_learning_is_forced_to_its_active_line(monkeypatch):
     captured = {}
-    monkeypatch.setattr(main, "classify_knowledge_entries", lambda entries: {entries[0]["id"]: {"scope": "shared", "retrieval_enabled": True}})
-    monkeypatch.setattr(main, "_upsert_learned_information_entry", lambda entry: captured.update(entry))
+    monkeypatch.setattr(main, "classify_knowledge_entries", lambda entries: {entries[0]["id"]: {
+        "scope": "shared", "category": "service_specific", "retrieval_enabled": True,
+    }})
+    monkeypatch.setattr(main, "_upsert_learned_information_entry", lambda entry: captured.update(entry) or True)
     main.save_learned_information("request-1", "Question", "Owner answer", "Durable fact", "secondary")
     assert captured["scope"] == "secondary"
     assert captured["source_account_key"] == "secondary"
+    assert captured["status"] == "active"
+    assert captured["review_status"] == "approved"
+    assert captured["retrieval_enabled"] is True
+
+
+def test_information_request_keeps_volatile_owner_answers_out_of_retrieval(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(main, "classify_knowledge_entries", lambda entries: {entries[0]["id"]: {
+        "scope": "primary", "category": "availability_or_booking_state", "retrieval_enabled": False,
+    }})
+    monkeypatch.setattr(main, "_upsert_learned_information_entry", lambda entry: captured.update(entry) or True)
+    main.save_learned_information("request-2", "When are you free?", "3pm today", "Free at 3pm today.", "primary")
+    assert captured["status"] == "quarantined"
+    assert captured["review_status"] == "pending"
+    assert captured["retrieval_enabled"] is False
 
 
 def test_style_examples_are_limited_to_the_active_line(tmp_path):

@@ -71,7 +71,7 @@ export interface ThreadSLA {
 export interface ThreadListItem {
   id: string;
   customerPhone: string;
-  smsAccountKey: 'primary' | 'secondary';
+  smsAccountKey: 'primary';
   lastMessageAt: string;
   lastMessageText: string;
   lastMessageRole: Message['role'] | null;
@@ -117,7 +117,7 @@ export interface ThreadEvent {
 export interface ThreadDetail {
   id: string;
   customerPhone: string;
-  smsAccountKey: 'primary' | 'secondary';
+  smsAccountKey: 'primary';
   state: string;
   assignedAgent: { id: string; name: string } | null;
   sla: {
@@ -140,7 +140,7 @@ export interface CalendarBooking {
   id: string;
   customerPhone: string;
   summary: string;
-  smsAccountKey?: 'primary' | 'secondary' | null;
+  smsAccountKey?: 'primary' | null;
   threadId?: string | null;
   startTime: string;
   endTime: string;
@@ -308,7 +308,7 @@ export interface ArrivalSession {
   id: string;
   bookingId: string;
   threadId: string | null;
-  smsAccountKey: 'primary' | 'secondary' | null;
+  smsAccountKey: 'primary' | null;
   arrivalEventId: string | null;
   status: 'invited' | 'active' | 'closed' | 'expired';
   expiresAt: string;
@@ -388,6 +388,45 @@ export async function sendThreadReply(
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
     throw new Error(payload?.detail || `Failed to send reply: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export interface BulkSmsRecipientResult {
+  phone: string;
+  status: 'sent' | 'duplicate' | 'failed';
+  error?: string;
+}
+
+export interface BulkSmsResult {
+  status: 'success' | 'partial';
+  requested: number;
+  sent: number;
+  duplicates: number;
+  failed: number;
+  results: BulkSmsRecipientResult[];
+}
+
+export async function sendBulkSms(
+  recipients: string[],
+  message: string,
+  smsAccountKey: 'primary',
+  clientRequestId: string,
+): Promise<BulkSmsResult> {
+  const response = await apiFetch(`${API_BASE}/api/settings/bulk-sms`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ recipients, message, smsAccountKey, clientRequestId }),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    const detail = typeof payload?.detail === 'string'
+      ? payload.detail
+      : Array.isArray(payload?.detail)
+        ? payload.detail.map((item: { msg?: string }) => item.msg).filter(Boolean).join('; ')
+        : '';
+    throw new Error(detail || 'Bulk SMS could not be sent.');
   }
   return response.json();
 }
@@ -490,8 +529,8 @@ export async function toggleAutoresponder(threadId: string, enabled: boolean): P
 export async function sendCustomerSms(
   customerPhone: string,
   body: string,
-  smsAccountKey: 'primary' | 'secondary',
-): Promise<{ status: string; thread_id: string; customer_phone: string; sms_account_key: 'primary' | 'secondary'; provider_sends: 0 }> {
+  smsAccountKey: 'primary',
+): Promise<{ status: string; thread_id: string; customer_phone: string; sms_account_key: 'primary'; provider_sends: 0 }> {
   const response = await apiFetch(`${API_BASE}/api/admin/sms-simulator`, {
     method: 'POST',
     credentials: 'same-origin',
@@ -560,12 +599,32 @@ export async function getFreeBusy(duration?: number): Promise<FreeBusySlot[]> {
   return response.json();
 }
 
+export interface DismissInformationRequestResult {
+  status: string;
+  state: string;
+  sent: false;
+}
+
+export async function dismissInformationRequest(
+  threadId: string,
+  requestEventId: string,
+): Promise<DismissInformationRequestResult> {
+  const response = await apiFetch(`${API_BASE}/api/threads/${threadId}/information-request/${requestEventId}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || 'The information request could not be removed.');
+  }
+  return response.json();
+}
+
 export interface QuickReply {
   label: string;
   content: string;
 }
 
-export async function getQuickReplies(accountKey: 'primary' | 'secondary'): Promise<QuickReply[]> {
+export async function getQuickReplies(accountKey: 'primary'): Promise<QuickReply[]> {
   const response = await apiFetch(`${API_BASE}/api/settings/quick-replies/${accountKey}`, { cache: 'no-store' });
   if (!response.ok) {
     throw new Error(`Failed to load quick replies: ${response.statusText}`);
@@ -575,7 +634,7 @@ export async function getQuickReplies(accountKey: 'primary' | 'secondary'): Prom
 }
 
 export async function saveQuickReply(
-  accountKey: 'primary' | 'secondary',
+  accountKey: 'primary',
   slotIndex: number,
   reply: QuickReply,
 ): Promise<QuickReply[]> {
@@ -610,7 +669,7 @@ export interface KnowledgeFile {
 
 export async function createArrivalInvite(
   booking: CalendarBooking,
-  smsAccountKey: 'primary' | 'secondary',
+  smsAccountKey: 'primary',
   threadId?: string,
 ): Promise<{ session: ArrivalSession; link: string }> {
   const response = await apiFetch(`${API_BASE}/api/arrival/admin/bookings/${encodeURIComponent(booking.id)}/invite`, {
@@ -917,6 +976,186 @@ export interface SmsLearningPreview {
   rejected: SmsLearningPreviewItem[];
 }
 
+export async function setThreadPinned(threadId: string, pinned: boolean): Promise<{ status: string; pinned: boolean }> {
+  const response = await apiFetch(`${API_BASE}/api/threads/${threadId}/pin`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pinned }),
+  });
+  if (!response.ok) throw new Error(`Failed to update pin: ${response.statusText}`);
+  return response.json();
+}
+
+export async function setThreadBlocked(threadId: string, blocked: boolean): Promise<{ status: string; blocked: boolean }> {
+  const response = await apiFetch(`${API_BASE}/api/threads/${threadId}/block`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ blocked }),
+  });
+  if (!response.ok) throw new Error(`Failed to update blocked contact: ${response.statusText}`);
+  return response.json();
+}
+
+export interface BlockedContact {
+  id: string;
+  smsAccountKey: 'primary';
+  customerPhone: string;
+  blockedAt: string;
+}
+
+export async function listBlockedContacts(): Promise<BlockedContact[]> {
+  const response = await apiFetch(`${API_BASE}/api/settings/blocked-contacts`, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`Failed to list blocked contacts: ${response.statusText}`);
+  return response.json();
+}
+
+export async function unblockContact(smsAccountKey: 'primary', customerPhone: string): Promise<void> {
+  const query = new URLSearchParams({ smsAccountKey, customerPhone });
+  const response = await apiFetch(`${API_BASE}/api/settings/blocked-contacts?${query}`, { method: 'DELETE' });
+  if (!response.ok) throw new Error(`Failed to unblock contact: ${response.statusText}`);
+}
+
+export interface SmsLineProfile {
+  displayName: string;
+  providerName: string;
+  informationUrl: string;
+  autoReplyEnabled: boolean;
+  timezone?: string;
+}
+
+export async function getSmsLineProfiles(): Promise<Record<'primary', SmsLineProfile>> {
+  const response = await apiFetch(`${API_BASE}/api/settings/line-profiles`, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`Failed to load line settings: ${response.statusText}`);
+  return (await response.json()).profiles;
+}
+
+export async function saveSmsLineProfiles(profiles: Record<'primary', SmsLineProfile>): Promise<void> {
+  const response = await apiFetch(`${API_BASE}/api/settings/line-profiles`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(profiles),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || `Failed to save line settings: ${response.statusText}`);
+  }
+}
+
+export async function saveSmsLineAutoReply(
+  accountKey: 'primary',
+  enabled: boolean,
+): Promise<{ status: string; accountKey: 'primary'; autoReplyEnabled: boolean }> {
+  const response = await apiFetch(`${API_BASE}/api/settings/line-profiles/${accountKey}/auto-reply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || `Failed to save auto-reply for ${accountKey}.`);
+  }
+  return response.json();
+}
+
+export interface LearnedInformationEntry extends Omit<ManualLearningEntry, 'scope'> {
+  scope: 'shared' | 'internal';
+  review_status?: 'pending' | 'approved';
+  retrieval_enabled?: boolean;
+  category?: string;
+  review_note?: string;
+  review_source?: 'ai-drafted' | 'ai-redrafted' | 'staff-edited-reply' | 'message-correction' | 'sms-pair-template';
+}
+
+export interface KnowledgeCuratorRecordRef {
+  id: string;
+  revision: number;
+}
+
+export interface KnowledgeCuratorRecordPreview extends KnowledgeCuratorRecordRef {
+  reference_status: 'current' | 'stale' | 'missing' | 'malformed';
+  expected_revision?: number | null;
+  current_revision?: number | null;
+  position?: number | null;
+  reason_code?: string;
+  scope?: string;
+  sms_line?: string;
+  source_type?: string;
+  topic?: string;
+  canonical_key?: string;
+  customer_message?: string;
+  applies_when?: string;
+  approved_reply?: string;
+  instruction?: string;
+  example_reply?: string;
+  knowledge_text?: string;
+  status?: string;
+  review_status?: string;
+  retrieval_enabled?: boolean;
+  created_at?: string;
+  updated_at?: string;
+  metadata_issues?: { missing_fields: string[]; invalid_fields: string[] };
+}
+
+export type KnowledgeCuratorResolution =
+  | 'keep_all_examples' | 'select_current_rule' | 'create_merged_draft' | 'needs_manual_investigation'
+  | 'keep_both_distinct' | 'create_consolidation_draft' | 'create_metadata_repair_draft'
+  | 'add_safe_replacement_draft' | 'not_an_issue' | 'dismiss_for_now';
+
+export interface KnowledgeCuratorProposal {
+  id: string;
+  fingerprint: string;
+  canonical_key: string;
+  scope: 'shared' | 'internal';
+  finding_type: string;
+  records: KnowledgeCuratorRecordRef[];
+  reason_codes: string[];
+  evidence: { reason_codes: string[]; record_count: number; missing_fields?: string[]; invalid_fields?: string[]; dynamic_type?: string; same_applicability?: boolean; applicability_status?: string; source_role?: string; trigger_excerpt?: string };
+  proposed_action: 'no_action' | 'ask_owner' | 'draft_replacement' | 'draft_supersession' | 'quarantine_for_review' | 'merge_duplicate';
+  confidence: string;
+  owner_questions: string[];
+  status: 'proposed' | 'accepted' | 'rejected' | 'dismissed' | 'applied' | 'resolved' | 'resolved_not_an_issue' | 'resolved_no_longer_detected';
+  created_at: string;
+  updated_at: string;
+  draft_entry_id?: string | null;
+  resolution?: KnowledgeCuratorResolution;
+  selected_record_ids?: string[];
+  record_previews?: KnowledgeCuratorRecordPreview[];
+  actionable?: boolean;
+}
+
+export interface KnowledgeCuratorRun {
+  id: string;
+  status: 'completed' | 'completed_with_warning';
+  error_code?: string | null;
+  message: string;
+  started_at: string;
+  completed_at: string;
+  finding_counts: Record<string, number>;
+  finding_count: number;
+  created_proposals: number;
+  safe_repairs_completed?: number;
+  ai_helper_status?: string | null;
+}
+
+export interface KnowledgeCuratorState {
+  runs: KnowledgeCuratorRun[];
+  proposals: KnowledgeCuratorProposal[];
+}
+
+export interface SmsLearningPreviewItem {
+  id: string;
+  account_key: 'primary';
+  customer: string;
+  reply: string;
+  reason: string;
+  topic?: string;
+  applies_when?: string;
+  instruction?: string;
+  example_reply?: string;
+}
+
+export interface SmsLearningPreview {
+  sampled: number;
+  candidates: SmsLearningPreviewItem[];
+  rejected: SmsLearningPreviewItem[];
+}
+
 export async function getSettings(): Promise<SystemSettings> {
   const response = await apiFetch(`${API_BASE}/api/settings`, { cache: 'no-store' });
   if (!response.ok) {
@@ -964,6 +1203,7 @@ export interface BusinessVariable {
   description?: string;
   required?: boolean;
   required_status?: string;
+  readOnly?: boolean;
 }
 
 export interface RagStatus {
@@ -1020,7 +1260,7 @@ export async function listKnowledgeFiles(): Promise<KnowledgeFile[]> {
 export async function createManualLearning(
   topic: string,
   guidance: string,
-  scope: 'shared' | 'primary' | 'secondary',
+  scope: 'shared',
 ): Promise<{ status: string; filename: string; entry: ManualLearningEntry }> {
   const response = await apiFetch(`${API_BASE}/api/settings/learnings`, {
     method: 'POST',
@@ -1280,11 +1520,12 @@ export interface BookingPayload {
   phone: string;
   startTime: string;
   notes?: string;
-  providerKey?: 'tori' | 'anonymous';
+  providerKey?: 'tori';
 }
 
-export async function getServices(): Promise<Service[]> {
-  const response = await apiFetch(`${API_BASE}/api/services`);
+export async function getServices(options: { activeOnly?: boolean } = {}): Promise<Service[]> {
+  const query = options.activeOnly ? '?active_only=true' : '';
+  const response = await apiFetch(`${API_BASE}/api/services${query}`);
   if (!response.ok) {
     throw new Error(`Failed to fetch services: ${response.statusText}`);
   }
@@ -1402,6 +1643,41 @@ export async function saveWorkingHours(hours: WorkingHourEntry[]): Promise<{ sta
   return response.json();
 }
 
+export interface AvailabilitySlotDay {
+  day: string; // 'Monday', 'Tuesday', etc.
+  enabled: boolean;
+  open?: string;
+  close?: string;
+  slots: string[]; // ['09:00', '09:30', '10:00', ...]
+}
+
+export interface AvailabilityConfig {
+  maxDaysAhead: number;
+  weeklyHours: AvailabilitySlotDay[];
+}
+
+export async function getAvailabilityConfig(): Promise<AvailabilityConfig> {
+  const response = await apiFetch(`${API_BASE}/api/settings/availability`, { cache: 'no-store' });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Failed to fetch availability config: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function saveAvailabilityConfig(config: AvailabilityConfig): Promise<{ status: string }> {
+  const response = await apiFetch(`${API_BASE}/api/settings/availability`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Failed to save availability config: ${response.statusText}`);
+  }
+  return response.json();
+}
+
 export interface MobileMessageConfig {
   username: string;
   password: string;
@@ -1458,11 +1734,9 @@ export interface FirstContactAutoresponderConfig {
 export interface FirstContactAutoresponderSettings {
   accounts: {
     primary: FirstContactAutoresponderConfig;
-    secondary: FirstContactAutoresponderConfig;
   };
   labels: {
     primary: string;
-    secondary: string;
   };
 }
 
@@ -1487,7 +1761,7 @@ export async function saveFirstContactAutoresponder(
   return response.json();
 }
 
-export async function approveDraft(messageId: string): Promise<{ status: string }> {
+export async function approveDraft(messageId: string): Promise<{ status: string; learningSaved?: boolean; learningCuration?: 'applied' | 'kept_out_of_live_replies' | 'queued' | 'not_saved' }> {
   const response = await apiFetch(`${API_BASE}/api/messages/${messageId}/approve`, {
     method: 'POST',
   });
@@ -1507,6 +1781,37 @@ export async function updateDraft(messageId: string, text: string): Promise<{ st
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
     throw new Error(payload?.detail || `Failed to update draft message: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function getServiceAddons(): Promise<ServiceAddon[]> {
+  const response = await apiFetch(`${API_BASE}/api/service-addons`, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`Failed to fetch service add-ons: ${response.statusText}`);
+  return response.json();
+}
+
+export async function saveServiceAddons(addons: ServiceAddon[]): Promise<{ status: string }> {
+  const response = await apiFetch(`${API_BASE}/api/service-addons`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ addons }),
+  });
+  if (!response.ok) throw new Error(`Failed to save service add-ons: ${response.statusText}`);
+  return response.json();
+}
+
+export async function createMessageCorrection(
+  messageId: string,
+  correction: string,
+  suggestedReply?: string,
+): Promise<{ status: 'queued'; learningId: string; reviewStatus: 'applied' | 'kept_out_of_live_replies' | 'queued' | 'not_saved'; draftMessageId: string }> {
+  const response = await apiFetch(`${API_BASE}/api/messages/${messageId}/corrections`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ correction, suggested_reply: suggestedReply || undefined }),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Failed to queue correction: ${response.statusText}`);
   }
   return response.json();
 }
@@ -1571,6 +1876,40 @@ export interface OperationsChatCapabilities {
   persistentMemory: boolean;
   controlledActions: boolean;
   requiresConfirmation: boolean;
+}
+
+export interface SupportTicket {
+  id: string;
+  category: 'bug' | 'feature_request' | 'upgrade' | 'access' | 'security';
+  title: string;
+  affectedArea: string;
+  status: string;
+  resolutionSummary: string | null;
+  codingTaskId: string | null;
+  deploymentActionId: string | null;
+  deploymentState: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function getSupportTickets(): Promise<{ tickets: SupportTicket[] }> {
+  const response = await apiFetch(`${API_BASE}/api/settings/support-tickets`, { cache: 'no-store' });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Failed to load support tickets: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function approveSupportTicketDeployment(ticketId: string): Promise<{ status: string }> {
+  const response = await apiFetch(`${API_BASE}/api/settings/support-tickets/${encodeURIComponent(ticketId)}/deploy`, {
+    method: 'POST',
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Deployment approval failed: ${response.statusText}`);
+  }
+  return response.json();
 }
 
 export interface SupportTicket {

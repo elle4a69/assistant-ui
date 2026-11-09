@@ -122,6 +122,36 @@ def test_line_profiles_persist_and_supply_line_variables(monkeypatch, tmp_path):
     assert variables["booking_url"] == "https://anonymous.example"
 
 
+def test_each_sms_line_can_disable_its_auto_responder_independently(monkeypatch, tmp_path):
+    profiles_path = tmp_path / "sms_line_profiles.json"
+    monkeypatch.setattr(main, "LINE_PROFILES_PATH", str(profiles_path))
+    main.save_line_profiles({
+        "primary": {"displayName": "Line 1", "providerName": "Tori", "informationUrl": "", "userPrompt": "", "autoReplyEnabled": False},
+        "secondary": {"displayName": "Line 2", "providerName": "Anonymous", "informationUrl": "", "userPrompt": "", "autoReplyEnabled": True},
+    })
+
+    assert main.get_line_profile("primary")["autoReplyEnabled"] is False
+    assert main.get_line_profile("secondary")["autoReplyEnabled"] is True
+    assert main.account_allows_conversational_ai("primary") is False
+    assert main.account_allows_conversational_ai("secondary") is True
+
+
+def test_line_auto_reply_switch_persists_without_saving_other_line_fields(monkeypatch, tmp_path):
+    profiles_path = tmp_path / "sms_line_profiles.json"
+    monkeypatch.setattr(main, "LINE_PROFILES_PATH", str(profiles_path))
+    main.save_line_profiles({
+        "primary": {"displayName": "Line 1", "providerName": "Tori", "informationUrl": "", "userPrompt": "Keep this prompt", "autoReplyEnabled": True},
+        "secondary": {"displayName": "Line 2", "providerName": "Anonymous", "informationUrl": "", "userPrompt": "", "autoReplyEnabled": True},
+    })
+
+    result = main.update_line_auto_reply("primary", main.LineAutoReplyInput(enabled=False))
+
+    assert result["autoReplyEnabled"] is False
+    assert main.get_line_profile("primary")["autoReplyEnabled"] is False
+    assert main.get_line_profile("primary")["userPrompt"] == "Keep this prompt"
+    assert main.get_line_profile("secondary")["autoReplyEnabled"] is True
+
+
 def test_quick_replies_are_saved_independently_per_sms_line(monkeypatch, tmp_path):
     quick_replies_path = tmp_path / "quick_replies.json"
     monkeypatch.setattr(main, "QUICK_REPLIES_PATH", str(quick_replies_path))
@@ -259,7 +289,7 @@ def test_clear_current_thread_review_flags_rejects_unknown_thread():
     db.close()
 
 
-def test_edited_draft_is_saved_to_learning_review_after_approval(monkeypatch, tmp_path):
+def test_edited_draft_is_curated_after_approval(monkeypatch, tmp_path):
     client = FakeLearningClient(lambda kwargs: json.dumps({"classifications": [{
         "id": json.loads(kwargs["input"])["records"][0]["id"],
         "scope": "shared",
@@ -291,14 +321,15 @@ def test_edited_draft_is_saved_to_learning_review_after_approval(monkeypatch, tm
     assert result["status"] == "success"
     assert result["learningSaved"] is True
     assert saved["type"] == "staff_edited_draft"
-    assert saved["review_status"] == "pending"
-    assert saved["retrieval_enabled"] is False
+    assert saved["review_status"] == "approved"
+    assert saved["retrieval_enabled"] is True
+    assert result["learningCuration"] == "applied"
     assert saved["example_reply"].startswith("Yes, natural service")
     assert db.query(Message).filter(Message.id == "draft-learning").one().role == "agent"
     db.close()
 
 
-def test_unedited_draft_is_not_added_to_learning(monkeypatch, tmp_path):
+def test_unedited_draft_without_reusable_guidance_is_safely_ignored(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
     db = make_db()
     add_thread(db, "thread-102")
@@ -315,6 +346,68 @@ def test_unedited_draft_is_not_added_to_learning(monkeypatch, tmp_path):
 
     assert result["learningSaved"] is False
     assert not (tmp_path / main.LEARNED_INFORMATION_FILENAME).exists()
+    db.close()
+
+
+def test_ai_response_correction_is_curated_automatically(monkeypatch, tmp_path):
+    client = FakeLearningClient(lambda kwargs: json.dumps({"classifications": [{
+        "id": json.loads(kwargs["input"])["records"][0]["id"],
+        "scope": "primary",
+        "category": "service_specific",
+        "retrieval_enabled": True,
+    }]}))
+    monkeypatch.setattr(main, "openai_client", client)
+    monkeypatch.setattr(main, "KNOWLEDGE_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "KNOWLEDGE_CHUNKS", [])
+    db = make_db()
+    add_thread(db, "thread-correction")
+    thread = db.query(Thread).filter(Thread.id == "thread-correction").one()
+    thread.sms_account_key = "primary"
+    now = datetime.utcnow()
+    db.add_all([
+        Message(id="customer-correction", thread_id=thread.id, role="customer", text="Do you offer natural service?", at=now),
+        Message(id="agent-correction", thread_id=thread.id, role="system", text="Yes, and see our service page.", at=now + timedelta(seconds=1)),
+    ])
+    db.commit()
+
+    result = main.create_message_correction(
+        "agent-correction",
+        main.MessageCorrectionInput(correction="Do not mention the service page unless the customer asks for it.", suggested_reply="Yes, natural service is available. What would you like to know?"),
+        db,
+    )
+
+    saved = json.loads((tmp_path / main.LEARNED_INFORMATION_FILENAME).read_text(encoding="utf-8").strip())
+    assert result["status"] == "queued"
+    assert result["draftMessageId"]
+    assert saved["type"] == "ai_response_correction"
+    assert saved["review_source"] == "message-correction"
+    assert saved["source_message_id"] == "agent-correction"
+    assert saved["review_status"] == "approved"
+    assert saved["retrieval_enabled"] is True
+    assert result["reviewStatus"] == "applied"
+    assert "Do not mention the service page" in saved["instruction"]
+    event = db.query(ThreadEvent).filter(ThreadEvent.type == "ai-response-correction-queued").one()
+    assert json.loads(event.meta)["message_id"] == "agent-correction"
+    correction_draft = db.query(Message).filter(Message.id == result["draftMessageId"]).one()
+    assert correction_draft.role == "draft"
+    assert correction_draft.text == "Yes, natural service is available. What would you like to know?"
+    db.close()
+
+
+def test_ai_response_correction_rejects_customer_messages():
+    db = make_db()
+    add_thread(db, "thread-correction-customer")
+    db.add(Message(id="customer-only", thread_id="thread-correction-customer", role="customer", text="Hello", at=datetime.utcnow()))
+    db.commit()
+
+    with pytest.raises(main.HTTPException) as error:
+        main.create_message_correction(
+            "customer-only",
+            main.MessageCorrectionInput(correction="This should be corrected."),
+            db,
+        )
+
+    assert error.value.status_code == 400
     db.close()
 
 

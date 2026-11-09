@@ -24,6 +24,7 @@ try:
     from backend.core.constants import LINE_SERVICE_FILENAMES
     from backend.core.state import _quick_replies_lock
     from backend.core.utils import _safe_csv_cell, format_dt
+    from backend.core.service_addons import service_addons_variable_value
     from backend.models.domain import Thread, Message, BlockedContact
     from backend.core.clients import (
         load_line_profiles, canonical_phone_number, get_line_profile,
@@ -43,6 +44,7 @@ except ImportError:
     from core.constants import LINE_SERVICE_FILENAMES
     from core.state import _quick_replies_lock
     from core.utils import _safe_csv_cell, format_dt
+    from core.service_addons import service_addons_variable_value
     from models.domain import Thread, Message, BlockedContact
     from core.clients import (
         load_line_profiles, canonical_phone_number, get_line_profile,
@@ -75,10 +77,7 @@ def _service_addons_path() -> str:
 
 
 def _service_line_key(service: Dict[str, Any]) -> str:
-    explicit = str(service.get("lineKey") or service.get("smsAccountKey") or "").strip().lower()
-    if explicit in FIRST_CONTACT_ACCOUNT_KEYS:
-        return explicit
-    return "secondary" if "anonymous" in str(service.get("name", "")).lower() else "primary"
+    return "primary"
 
 
 def _read_service_catalogue(path: str) -> List[Dict[str, Any]]:
@@ -91,24 +90,30 @@ def _read_service_catalogue(path: str) -> List[Dict[str, Any]]:
 
 
 def _ensure_line_service_catalogues() -> None:
-    if all(os.path.exists(_line_services_path(key)) for key in FIRST_CONTACT_ACCOUNT_KEYS):
+    primary_path = _line_services_path("primary")
+    if os.path.exists(primary_path):
         return
     data_dir = _dyn("DATA_DIR", DATA_DIR)
-    legacy = _read_service_catalogue(os.path.join(data_dir, "services.json"))
-    if not legacy:
+    catalogues = [
+        _read_service_catalogue(os.path.join(data_dir, filename))
+        for filename in ("line_1_services.json", "services.json")
+    ]
+    services: List[Dict[str, Any]] = []
+    seen = set()
+    for catalogue in catalogues:
+        for service in catalogue:
+            normalized = {key: value for key, value in service.items() if key not in {"lineKey", "smsAccountKey"}}
+            identity = str(normalized.get("id") or normalized.get("name") or "")
+            if identity and identity not in seen:
+                seen.add(identity)
+                services.append(normalized)
+    if not services:
         return
-    grouped = {key: [] for key in FIRST_CONTACT_ACCOUNT_KEYS}
-    for service in legacy:
-        key = _service_line_key(service)
-        grouped[key].append({**service, "lineKey": key})
     os.makedirs(data_dir, exist_ok=True)
-    for key, services in grouped.items():
-        path = _line_services_path(key)
-        if not os.path.exists(path):
-            temporary = f"{path}.tmp"
-            with open(temporary, "w", encoding="utf-8") as handle:
-                json.dump(services, handle, indent=2)
-            os.replace(temporary, path)
+    temporary = f"{primary_path}.tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(services, handle, indent=2)
+    os.replace(temporary, primary_path)
 
 
 def load_line_services(account_key: str) -> List[Dict[str, Any]]:
@@ -214,6 +219,11 @@ def load_business_variables() -> List[Dict[str, Any]]:
             print(f"Failed to load business variables: {exc}")
             raw_items = [dict(item) for item in BUSINESS_VARIABLE_DEFAULTS]
 
+    # System-managed tokens are added to older saved catalogues without
+    # changing the customer's existing variable values.
+    if not any(str(item.get("key") or "").strip().lower() == "service_addons" for item in raw_items if isinstance(item, dict)):
+        raw_items.append(next(dict(item) for item in BUSINESS_VARIABLE_DEFAULTS if item["key"] == "service_addons"))
+
     variables = []
     seen = set()
     for item in raw_items:
@@ -227,6 +237,8 @@ def load_business_variables() -> List[Dict[str, Any]]:
         meta = default_meta.get(key, {})
         label = str(item.get("label") or meta.get("label") or key.replace("_", " ").title()).strip()
         value = str(item.get("value", "")).strip()
+        if key == "service_addons":
+            value = service_addons_variable_value(_dyn("DATA_DIR", DATA_DIR))
         description = str(item.get("description") or meta.get("description") or f"Business detail for {label}").strip()
         is_required = bool(item.get("required") if "required" in item else meta.get("required", False))
 
@@ -238,6 +250,7 @@ def load_business_variables() -> List[Dict[str, Any]]:
             "description": description,
             "required": is_required,
             "required_status": "required" if is_required else "optional",
+            "readOnly": key == "service_addons",
         })
     return variables
 
@@ -342,8 +355,14 @@ def build_business_context(query: str, limit: int = 3, account_key: str = "prima
 
 
 def account_allows_conversational_ai(account_key: str) -> bool:
-    """Allow conversational AI only for explicitly configured SMS accounts."""
-    return account_key in CONVERSATIONAL_AI_ACCOUNT_KEYS
+    """Allow AI only for configured SMS lines whose own responder is enabled."""
+    if account_key not in CONVERSATIONAL_AI_ACCOUNT_KEYS:
+        return False
+    try:
+        from backend.core.clients import get_line_profile
+    except ImportError:
+        from core.clients import get_line_profile
+    return bool(get_line_profile(account_key).get("autoReplyEnabled", True))
 
 
 def normalize_first_contact_autoresponder(config: Dict[str, Any]) -> Dict[str, Any]:

@@ -43,6 +43,7 @@ from backend.core.database import *
 from backend.core.clients import *
 from backend.core.state import *
 from backend.core.utils import *
+from backend.core.single_line_migration import migrate_database_state, migrate_file_state
 
 # Domain models & schemas
 from backend.models import *
@@ -150,6 +151,7 @@ async def lifespan(application: FastAPI):
         asyncio.create_task(arrival_alert_worker()),
         asyncio.create_task(start_agent_console_retention_worker()),
         asyncio.create_task(booking_reminder_worker()),
+        asyncio.create_task(autonomous_knowledge_curator_worker()),
     ]
     try:
         yield

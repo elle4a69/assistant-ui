@@ -14,6 +14,7 @@ import {
   discardDraft,
   updateDraft,
   clearThreadReviewFlags,
+  dismissInformationRequest,
   respondToInformationRequest,
   acknowledgeThreadArrival,
   deleteBooking,
@@ -41,6 +42,7 @@ import {
   ArrowLeft,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   FlagOff,
   Trash2,
   X,
@@ -349,6 +351,8 @@ export default function SmsTriageDashboard() {
   const [noteText, setNoteText] = useState('');
   const [requestedInformation, setRequestedInformation] = useState('');
   const [submittingInformation, setSubmittingInformation] = useState(false);
+  const [dismissingInformationRequest, setDismissingInformationRequest] = useState(false);
+  const [informationRequestOpen, setInformationRequestOpen] = useState(false);
   const [showNotesMobile, setShowNotesMobile] = useState(false);
   const sendingReplyRef = useRef(false);
   const reviewingDraftRef = useRef<string | null>(null);
@@ -590,6 +594,11 @@ export default function SmsTriageDashboard() {
     ) ?? null;
   }, [selectedThread?.state, selectedThread?.events]);
 
+  useEffect(() => {
+    setInformationRequestOpen(false);
+    setRequestedInformation('');
+  }, [pendingInformationRequest?.id]);
+
   const handleInformationRequest = async () => {
     if (!selectedThreadId || !pendingInformationRequest || !requestedInformation.trim() || submittingInformation) return;
     setSubmittingInformation(true);
@@ -629,6 +638,21 @@ export default function SmsTriageDashboard() {
       await Promise.all([fetchThreadsList(), fetchThreadDetail(selectedThreadId, true)]);
     } catch (err) {
       alert('Failed to discard draft message');
+    }
+  };
+
+  const dismissInformationRequestPanel = async () => {
+    if (!selectedThreadId || !pendingInformationRequest || dismissingInformationRequest) return;
+    setDismissingInformationRequest(true);
+    try {
+      await dismissInformationRequest(selectedThreadId, pendingInformationRequest.id);
+      setRequestedInformation('');
+      setInformationRequestOpen(false);
+      await Promise.all([fetchThreadsList(), fetchThreadDetail(selectedThreadId, true)]);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'The information request could not be removed.');
+    } finally {
+      setDismissingInformationRequest(false);
     }
   };
 
@@ -838,7 +862,7 @@ export default function SmsTriageDashboard() {
 
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <span className="inline-flex rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-indigo-700">
-                    {t.smsAccountKey === 'secondary' ? 'SMS line 2' : 'SMS line 1'}
+                    SMS
                   </span>
                   {t.pendingArrivalSessionId && (
                     <span className="inline-flex items-center gap-1 rounded-full bg-emerald-600 px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-white shadow-sm">
@@ -1007,7 +1031,7 @@ export default function SmsTriageDashboard() {
                   <div className="flex items-center gap-1.5 sm:gap-2">
                     <h2 className="text-sm sm:text-lg font-bold text-slate-800 tracking-tight">{selectedThread.customerPhone}</h2>
                     <span className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-indigo-700">
-                      {selectedThread.smsAccountKey === 'secondary' ? 'SMS line 2' : 'SMS line 1'}
+                      SMS
                     </span>
                     <span className={`text-[9px] sm:text-xs px-2 py-0.5 rounded-full font-bold shadow-2xs ${getStatusBadgeClass(selectedThread.state)}`}>
                       {selectedThread.state}
@@ -1137,31 +1161,52 @@ export default function SmsTriageDashboard() {
                 )}
 
                 {pendingInformationRequest && (
-                  <div className="shrink-0 rounded-xl border border-amber-300 bg-amber-50 p-3 shadow-sm">
-                    <p className="text-[10px] font-extrabold uppercase tracking-wider text-amber-700">Information Request</p>
-                    <p className="mt-1 text-xs font-semibold text-slate-800">
-                      Tori needs: {String(pendingInformationRequest.meta?.reason || 'More business information to answer this message safely.')}
-                    </p>
-                    <p className="mt-1 text-[10px] text-slate-500">Nothing has been sent. Supply the missing facts and Tori will format them, save reusable knowledge, and reply.</p>
-                    <div className="mt-2 flex flex-col gap-2 sm:flex-row">
-                      <textarea
-                        value={requestedInformation}
-                        onChange={(event) => setRequestedInformation(event.target.value)}
-                        rows={2}
-                        maxLength={6000}
-                        placeholder="Type the information Tori needs..."
-                        className="min-h-[52px] flex-1 resize-none rounded-lg border border-slate-300 bg-white p-2 text-xs outline-none focus:ring-2 focus:ring-amber-500"
-                      />
-                      <button
-                        type="button"
-                        onClick={handleInformationRequest}
-                        disabled={!requestedInformation.trim() || submittingInformation}
-                        className="rounded-lg bg-amber-600 px-4 py-2 text-xs font-bold text-white disabled:bg-slate-300"
-                      >
-                        {submittingInformation ? 'Preparing...' : 'Save Knowledge & Send'}
-                      </button>
-                    </div>
-                  </div>
+                  <section className="shrink-0 -mx-3 border-y border-red-800 bg-white sm:-mx-4">
+                    <button
+                      type="button"
+                      onClick={() => setInformationRequestOpen(open => !open)}
+                      aria-expanded={informationRequestOpen}
+                      aria-controls="dashboard-information-request"
+                      className="relative flex min-h-12 w-full items-center justify-center bg-red-700 px-12 py-3 text-center text-sm font-black uppercase tracking-wide text-white transition-colors hover:bg-red-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-300 focus-visible:ring-inset"
+                    >
+                      <span>Information Request</span>
+                      <ChevronDown className={`absolute right-4 h-5 w-5 transition-transform ${informationRequestOpen ? 'rotate-180' : ''}`} aria-hidden="true" />
+                    </button>
+                    {informationRequestOpen && (
+                      <div id="dashboard-information-request" className="border-t border-red-200 px-3 py-3 sm:px-4">
+                        <p className="text-xs font-semibold text-slate-800">
+                          Tori needs: {String(pendingInformationRequest.meta?.reason || 'More business information to answer this message safely.')}
+                        </p>
+                        <p className="mt-1 text-[10px] text-slate-500">Nothing has been sent. Supply the missing facts and Tori will format them, save reusable knowledge, and reply.</p>
+                        <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                          <textarea
+                            value={requestedInformation}
+                            onChange={(event) => setRequestedInformation(event.target.value)}
+                            rows={2}
+                            maxLength={6000}
+                            placeholder="Type the information Tori needs..."
+                            className="min-h-[52px] flex-1 resize-none rounded-lg border border-slate-300 bg-slate-50 p-2 text-xs outline-none focus:ring-2 focus:ring-red-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={handleInformationRequest}
+                            disabled={!requestedInformation.trim() || submittingInformation || dismissingInformationRequest}
+                            className="rounded-lg bg-red-700 px-4 py-2 text-xs font-bold text-white hover:bg-red-800 disabled:bg-slate-300"
+                          >
+                            {submittingInformation ? 'Preparing...' : 'Save Knowledge & Send'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={dismissInformationRequestPanel}
+                            disabled={submittingInformation || dismissingInformationRequest}
+                            className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                          >
+                            {dismissingInformationRequest ? 'Removing…' : 'Remove request'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </section>
                 )}
 
                 {/* Custom Human Reply Composer */}

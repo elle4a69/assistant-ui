@@ -859,7 +859,7 @@ def _send_confirmed_booking_notification(thread: Thread, booking: Dict[str, Any]
     customer = str(booking.get("customer_name") or "Customer").strip()[:80]
     service = str(booking.get("service_name") or "Appointment").strip()[:100]
     start = str(booking.get("start_time") or "").replace("T", " ")[:32]
-    line_label = "Line 2" if thread.sms_account_key == "secondary" else "Line 1"
+    line_label = "SMS"
     notify_fn(
         notification_type="new_booking",
         title="New Booking",
@@ -905,7 +905,7 @@ def _send_customer_arrival_notification(
             from services.notification_service import build_notification_url, send_notification
         notify_fn = notify_fn or send_notification
         url_fn = url_fn or build_notification_url
-    line_label = "Line 2" if sms_account_key == "secondary" else "Line 1"
+    line_label = "SMS"
     notify_fn(
         notification_type="customer_arrival",
         title="Customer Arrived",
@@ -1129,7 +1129,7 @@ def process_inbound_sms(
                 if public_app_url
                 else f"/chat?thread={thread.id}"
             )
-            line_label = "Line 2" if thread.sms_account_key == "secondary" else "Line 1"
+            line_label = "SMS"
             background_tasks.add_task(
                 notify_fn,
                 notification_type="incoming_sms",
@@ -1566,7 +1566,7 @@ def run_sms_reply_logic(
             lookup_fields = {
                 "lookup_id": lookup_id, "tool": "check_exact_time",
                 "requested_slot": requested_slot.isoformat(), "service_id": service_id,
-                "provider_binding": "secondary-line-provider" if thread.sms_account_key == "secondary" else "primary-line-provider",
+                "provider_binding": "sms-provider",
                 "calendar_binding": "business-calendar", "lookup_source": "booking_discovery",
                 "freshness": "authoritative_live", "cache_status": "bypassed",
                 "pending_state": {"proposal": bool(thread.pending_booking), "accepted_slot": None},
@@ -1934,15 +1934,15 @@ def run_sms_reply_logic(
             source_message_id = audit.get("source_message_id") or ""
             max_tool_rounds = 6
             tool_round = 0
-            secondary_confirmation_retries = 0
+            redundant_confirmation_retries = 0
             delayed_correction_retries = 0
 
-            secondary_check_fn = _dyn("asks_for_secondary_booking_confirmation", None)
-            if secondary_check_fn is None:
+            redundant_confirmation_check = _dyn("asks_for_redundant_booking_confirmation", None)
+            if redundant_confirmation_check is None:
                 try:
-                    from backend.services.booking_service import asks_for_secondary_booking_confirmation as secondary_check_fn
+                    from backend.services.booking_service import asks_for_redundant_booking_confirmation as redundant_confirmation_check
                 except ImportError:
-                    from services.booking_service import asks_for_secondary_booking_confirmation as secondary_check_fn
+                    from services.booking_service import asks_for_redundant_booking_confirmation as redundant_confirmation_check
 
             training_mode = _dyn("TRAINING_MODE_ENABLED", False)
 
@@ -1974,17 +1974,17 @@ def run_sms_reply_logic(
                         continue
                     if (
                         booking_or_availability_turn
-                        and callable(secondary_check_fn)
-                        and secondary_check_fn(candidate_reply)
+                        and callable(redundant_confirmation_check)
+                        and redundant_confirmation_check(candidate_reply)
                         and not (is_simulation and training_mode)
-                        and secondary_confirmation_retries < 2
+                        and redundant_confirmation_retries < 2
                     ):
-                        secondary_confirmation_retries += 1
+                        redundant_confirmation_retries += 1
                         response = ai_client.responses.create(
                             model="gpt-5.6-terra",
                             instructions=(
                                 instructions
-                                + "\n\nCorrection: never ask for a secondary confirmation or tell the "
+                                + "\n\nCorrection: never ask for an extra confirmation or tell the "
                                 "customer to reply yes. The customer has already supplied the booking "
                                 "details. Use the live booking tools now and complete the booking if the "
                                 "required details and availability are present."
@@ -2127,7 +2127,7 @@ def run_sms_reply_logic(
                                 tool=tool_call.name,
                                 requested_slot=requested_slot,
                                 service_id=str(args.get("service_id") or "") or None,
-                                provider_binding="secondary-line-provider" if thread.sms_account_key == "secondary" else "primary-line-provider",
+                                provider_binding="sms-provider",
                                 calendar_binding="business-calendar",
                                 lookup_source=lookup_source,
                                 freshness="authoritative_live",
@@ -2167,7 +2167,7 @@ def run_sms_reply_logic(
                             "tool": tool_call.name,
                             "requested_slot": normalized_requested,
                             "service_id": str(args.get("service_id") or tool_result.get("service_id") or "") or None,
-                            "provider_binding": "secondary-line-provider" if thread.sms_account_key == "secondary" else "primary-line-provider",
+                            "provider_binding": "sms-provider",
                             "calendar_binding": "business-calendar",
                             "lookup_source": lookup_source,
                             "freshness": "authoritative_live",
@@ -2389,22 +2389,22 @@ def run_sms_reply_logic(
 
         training_mode = _dyn("TRAINING_MODE_ENABLED", False)
 
-        secondary_check_fn = _dyn("asks_for_secondary_booking_confirmation", None)
-        if secondary_check_fn is None:
+        redundant_confirmation_check = _dyn("asks_for_redundant_booking_confirmation", None)
+        if redundant_confirmation_check is None:
             try:
-                from backend.services.booking_service import asks_for_secondary_booking_confirmation as secondary_check_fn
+                from backend.services.booking_service import asks_for_redundant_booking_confirmation as redundant_confirmation_check
             except ImportError:
-                from services.booking_service import asks_for_secondary_booking_confirmation as secondary_check_fn
+                from services.booking_service import asks_for_redundant_booking_confirmation as redundant_confirmation_check
 
         availability_error = delayed_reply_error(
             assistant_reply,
             delayed_request_time,
         ) or (
-            "AI requested a prohibited secondary booking confirmation"
+            "AI requested a prohibited extra booking confirmation"
             if booking_or_availability_turn
             and not (is_simulation and training_mode)
-            and callable(secondary_check_fn)
-            and secondary_check_fn(assistant_reply)
+            and callable(redundant_confirmation_check)
+            and redundant_confirmation_check(assistant_reply)
             else None
         ) or unsafe_ai_reply_reason(
             assistant_reply,

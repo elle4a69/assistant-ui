@@ -300,6 +300,11 @@ def catch_up_missed_messages(db: Session = Depends(get_db)):
     auto_reply_enabled = _dyn("AUTO_REPLY_GLOBAL_ENABLED", AUTO_REPLY_GLOBAL_ENABLED)
     if not auto_reply_enabled:
         raise HTTPException(status_code=409, detail="Turn AI on before catching up missed messages.")
+    if _dyn("TRAINING_MODE_ENABLED", False):
+        raise HTTPException(
+            status_code=409,
+            detail="Turn Training Mode off before Catch-up. Training Mode creates drafts instead of sending SMS replies.",
+        )
 
     find_candidate = _dyn("find_oldest_catch_up_candidate", find_oldest_catch_up_candidate)
     candidate = find_candidate(db)
@@ -850,6 +855,54 @@ def respond_to_information_request(
     }
 
 
+@router.delete("/api/threads/{thread_id}/information-request/{request_event_id}")
+def dismiss_information_request(
+    thread_id: str,
+    request_event_id: str,
+    db: Session = Depends(get_db),
+):
+    """Dismiss one pending information request without sending an SMS."""
+    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found.")
+
+    request_event = find_pending_information_request(db, thread_id, request_event_id)
+    if not request_event:
+        raise HTTPException(status_code=409, detail="This information request has already been resolved.")
+
+    try:
+        request_meta = json.loads(request_event.meta or "{}")
+    except (TypeError, json.JSONDecodeError):
+        request_meta = {}
+
+    dismissed_at = datetime.utcnow()
+    request_meta.update({
+        "status": "resolved",
+        "resolution": "dismissed",
+        "resolved_at": dismissed_at.isoformat() + "Z",
+        "resolved_by": "information-request-dismiss",
+    })
+    request_event.meta = json.dumps(request_meta)
+    db.add(ThreadEvent(
+        id=str(uuid.uuid4()),
+        thread_id=thread.id,
+        type="information-request-dismissed",
+        agent_id="information-request-dismiss",
+        meta=json.dumps({"request_event_id": request_event.id}),
+        at=dismissed_at,
+    ))
+    db.flush()
+
+    # Only return the thread to automatic handling when no later request remains.
+    if thread.state == "needs-review" and not find_pending_information_request(db, thread_id):
+        thread.state = "auto-reply"
+        thread.pending_slots = None
+        thread.updated_at = dismissed_at
+
+    db.commit()
+    return {"status": "success", "state": thread.state, "sent": False}
+
+
 @router.post("/api/threads/{thread_id}/notes")
 def add_thread_note(thread_id: str, payload: NoteInput, db: Session = Depends(get_db)):
     thread = db.query(Thread).filter(Thread.id == thread_id).first()
@@ -934,6 +987,7 @@ __all__ = [
     "takeover_thread",
     "reply_thread",
     "respond_to_information_request",
+    "dismiss_information_request",
     "add_thread_note",
     "escalate_thread",
     "resolve_thread",
