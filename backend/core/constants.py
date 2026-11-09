@@ -310,6 +310,10 @@ PUBLIC_EXACT_PATHS = {
     "/api/v1/relay/log",
     "/AI_SMS_Relay_Upgraded.shortcut",
     "/static/AI_SMS_Relay_Upgraded.shortcut",
+    "/AI_SMS_Relay_Upgraded.plist",
+    "/static/AI_SMS_Relay_Upgraded.plist",
+    "/AI_SMS_Relay_Workflow_Guide.md",
+    "/static/AI_SMS_Relay_Workflow_Guide.md",
     "/arrival",
     "/api/auth/status",
     "/api/auth/login",
@@ -424,3 +428,4 @@ APPROVED_KNOWLEDGE_TEMPLATE_VARIABLES = frozenset({
 })
 
 BOOKING_LOCAL_TIMEZONE = "Australia/Melbourne"
+
