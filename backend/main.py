@@ -152,6 +152,7 @@ async def lifespan(application: FastAPI):
         asyncio.create_task(start_agent_console_retention_worker()),
         asyncio.create_task(booking_reminder_worker()),
         asyncio.create_task(autonomous_knowledge_curator_worker()),
+        asyncio.create_task(start_stranded_relay_worker()),
     ]
     try:
         yield

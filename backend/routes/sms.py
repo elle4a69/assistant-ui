@@ -30,6 +30,7 @@ try:
         process_inbound_sms,
         run_sms_reply_logic,
     )
+    from backend.services.relay_service import trigger_gateway_wakeup
 except ImportError:
     from core.config import PROMPTS_DIR
     from core.database import get_db
@@ -44,6 +45,10 @@ except ImportError:
         process_inbound_sms,
         run_sms_reply_logic,
     )
+    try:
+        from backend.services.relay_service import trigger_gateway_wakeup
+    except ImportError:
+        from services.relay_service import trigger_gateway_wakeup
 
 router = APIRouter()
 
@@ -164,32 +169,50 @@ IPHONE_OUTBOUND_PHONE_FIELDS = ("phone", "to", "recipient", "customer_phone", "s
 IPHONE_OUTBOUND_MESSAGE_FIELDS = ("message", "reply", "body", "text", "msg", "content")
 
 
-def _dequeue_oldest_outbound_message(db: Session) -> Dict[str, Any]:
+def _dequeue_pending_outbound_messages(db: Session) -> Dict[str, Any]:
     outbound_cls = _dyn("OutboundQueueMessage", OutboundQueueMessage)
-    oldest = (
+    query = (
         db.query(outbound_cls)
         .filter(outbound_cls.status == "pending")
         .order_by(outbound_cls.created_at.asc())
-        .first()
     )
-    if not oldest:
-        return {"has_message": "no"}
+    try:
+        pending_rows = query.with_for_update(skip_locked=True).all()
+    except Exception:
+        db.rollback()
+        pending_rows = query.all()
 
-    oldest.status = "dispatched"
-    oldest.dispatched_at = datetime.utcnow()
+    if not pending_rows:
+        return {
+            "has_message": "no",
+            "messages": [],
+        }
+
+    now = datetime.utcnow()
+    for r in pending_rows:
+        r.status = "dispatched"
+        r.dispatched_at = now
     db.commit()
+
+    first = pending_rows[0]
     return {
         "has_message": "yes",
-        "phone": oldest.phone,
-        "reply": oldest.message,
-        "message": oldest.message,
+        "messages": [
+            {"id": r.id, "phone": r.phone, "reply": r.message}
+            for r in pending_rows
+        ],
+        "id": first.id,
+        "phone": first.phone,
+        "reply": first.message,
+        "message": first.message,
     }
 
 
+@router.get("/api/v1/relay/sms/pending")
 @router.get("/webhook/outbound")
 @router.get("/weebhook/outbound")
 def get_iphone_shortcuts_outbound(db: Session = Depends(get_db)):
-    return _dequeue_oldest_outbound_message(db)
+    return _dequeue_pending_outbound_messages(db)
 
 
 @router.post("/webhook/outbound")
@@ -253,13 +276,100 @@ async def post_iphone_shortcuts_outbound(
         db.add(new_msg)
         db.commit()
         db.refresh(new_msg)
+
+        wakeup_fn = _dyn("trigger_gateway_wakeup", trigger_gateway_wakeup)
+        if callable(wakeup_fn):
+            try:
+                wakeup_fn()
+            except Exception:
+                pass
+
         return {
             "status": "queued",
             "id": new_msg.id,
         }
 
     # Otherwise called without payload (polling for pending messages) -> Dequeue
-    return _dequeue_oldest_outbound_message(db)
+    return _dequeue_pending_outbound_messages(db)
+
+
+@router.get("/api/v1/relay/sms/sent")
+@router.get("/webhook/sent")
+@router.get("/weebhook/sent")
+def get_delivery_receipt_info():
+    return {
+        "status": "ok",
+        "endpoint": "delivery_receipt",
+        "supported_methods": ["POST"],
+    }
+
+
+@router.post("/api/v1/relay/sms/sent")
+@router.post("/webhook/sent")
+@router.post("/weebhook/sent")
+async def post_delivery_receipt(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    content_type = request.headers.get("content-type", "").lower()
+    data: Dict[str, Any] = {}
+    if "application/json" in content_type:
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        try:
+            form = await request.form()
+            data = dict(form)
+        except Exception:
+            data = {}
+    else:
+        try:
+            data = await request.json()
+        except Exception:
+            try:
+                form = await request.form()
+                data = dict(form)
+            except Exception:
+                data = {}
+
+    if not isinstance(data, dict):
+        data = {}
+
+    raw_ids = []
+    if "ids" in data:
+        val = data["ids"]
+        if isinstance(val, list):
+            raw_ids.extend(str(x).strip() for x in val if str(x).strip())
+        elif isinstance(val, str):
+            raw_ids.extend(part.strip() for part in val.split(",") if part.strip())
+    if "id" in data and str(data["id"]).strip():
+        for part in str(data["id"]).split(","):
+            if part.strip():
+                raw_ids.append(part.strip())
+    if "message_id" in data and str(data["message_id"]).strip():
+        for part in str(data["message_id"]).split(","):
+            if part.strip():
+                raw_ids.append(part.strip())
+
+    target_ids = list(dict.fromkeys(raw_ids))
+    outbound_cls = _dyn("OutboundQueueMessage", OutboundQueueMessage)
+    now = datetime.utcnow()
+    delivered_ids = []
+    if target_ids:
+        records = db.query(outbound_cls).filter(outbound_cls.id.in_(target_ids)).all()
+        for rec in records:
+            rec.status = "delivered"
+            rec.delivered_at = now
+            delivered_ids.append(rec.id)
+        db.commit()
+
+    return {
+        "status": "success",
+        "delivered_count": len(delivered_ids),
+        "ids": delivered_ids,
+    }
 
 
 @router.post("/api/admin/sms-simulator")
@@ -340,6 +450,8 @@ __all__ = [
     "get_iphone_shortcuts_inbound_info",
     "get_iphone_shortcuts_outbound",
     "post_iphone_shortcuts_outbound",
+    "get_delivery_receipt_info",
+    "post_delivery_receipt",
     "simulate_inbound_sms",
     "get_sms_confirmation",
     "save_sms_confirmation",

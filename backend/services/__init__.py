@@ -16,6 +16,7 @@ from .learning_service import *
 from .phone_service import *
 from .notification_service import *
 from .bootcamp_service import *
+from .relay_service import *
 from . import (
     auth_service,
     arrival_service,
@@ -28,6 +29,7 @@ from . import (
     phone_service,
     notification_service,
     bootcamp_service,
+    relay_service,
 )
 
 __all__ = [
@@ -42,4 +44,5 @@ __all__ = [
     *phone_service.__all__,
     *notification_service.__all__,
     *bootcamp_service.__all__,
+    *relay_service.__all__,
 ]

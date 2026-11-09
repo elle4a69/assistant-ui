@@ -659,6 +659,19 @@
     "response_model": null
   },
   {
+    "path": "/api/v1/relay/sms/pending",
+    "name": "get_iphone_shortcuts_outbound",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_iphone_shortcuts_outbound",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
     "path": "/weebhook/outbound",
     "name": "post_iphone_shortcuts_outbound",
     "route_type": "APIRoute",
@@ -679,6 +692,78 @@
       "POST"
     ],
     "endpoint": "post_iphone_shortcuts_outbound",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/weebhook/sent",
+    "name": "get_delivery_receipt_info",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_delivery_receipt_info",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/webhook/sent",
+    "name": "get_delivery_receipt_info",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_delivery_receipt_info",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/v1/relay/sms/sent",
+    "name": "get_delivery_receipt_info",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_delivery_receipt_info",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/weebhook/sent",
+    "name": "post_delivery_receipt",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "post_delivery_receipt",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/webhook/sent",
+    "name": "post_delivery_receipt",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "post_delivery_receipt",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/v1/relay/sms/sent",
+    "name": "post_delivery_receipt",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "post_delivery_receipt",
     "dependencies": [
       "get_db"
     ],

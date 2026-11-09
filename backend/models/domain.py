@@ -303,6 +303,7 @@ class OutboundQueueMessage(Base):
     status = Column(String, default="pending", nullable=False, index=True)  # pending | dispatched
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     dispatched_at = Column(DateTime, nullable=True)
+    delivered_at = Column(DateTime, nullable=True)
 
 
 __all__ = [

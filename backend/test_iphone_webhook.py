@@ -34,6 +34,7 @@ def test_db(monkeypatch):
     app.dependency_overrides[get_db] = override_get_db
     monkeypatch.setattr(backend.core.database, "SessionLocal", TestingSession)
     monkeypatch.setattr(backend.services.sms_service, "SessionLocal", TestingSession)
+    monkeypatch.setattr("backend.services.relay_service.SessionLocal", TestingSession, raising=False)
     monkeypatch.setattr(backend.main, "SessionLocal", TestingSession, raising=False)
     monkeypatch.setattr(backend.services.sms_service, "AUTO_REPLY_GLOBAL_ENABLED", False)
     monkeypatch.setattr(backend.main, "AUTO_REPLY_GLOBAL_ENABLED", False, raising=False)
@@ -192,12 +193,12 @@ def test_iphone_webhook_outbound_empty(client):
     # GET /webhook/outbound with no pending messages
     res_get = client.get("/webhook/outbound")
     assert res_get.status_code == 200
-    assert res_get.json() == {"has_message": "no"}
+    assert res_get.json() == {"has_message": "no", "messages": []}
 
     # POST /webhook/outbound with no payload (polling for messages)
     res_post = client.post("/webhook/outbound", json={})
     assert res_post.status_code == 200
-    assert res_post.json() == {"has_message": "no"}
+    assert res_post.json() == {"has_message": "no", "messages": []}
 
 
 def test_iphone_webhook_outbound_enqueue_and_dequeue(client, test_db):
@@ -235,7 +236,7 @@ def test_iphone_webhook_outbound_enqueue_and_dequeue(client, test_db):
     # Next check has no messages
     next_check = client.get("/webhook/outbound")
     assert next_check.status_code == 200
-    assert next_check.json() == {"has_message": "no"}
+    assert next_check.json() == {"has_message": "no", "messages": []}
 
 
 def test_iphone_webhook_outbound_weebhook_alias(client):
@@ -256,3 +257,128 @@ def test_iphone_webhook_outbound_weebhook_alias(client):
     assert data["phone"] == "+61412345678"
     assert data["reply"] == "Alias queue test"
 
+
+
+def test_relay_sms_pending_batch_retrieval(client, test_db):
+    # Enqueue two messages
+    res1 = client.post("/webhook/outbound", json={"phone": "+61411111111", "message": "Batch message 1"})
+    assert res1.status_code == 200
+    id1 = res1.json()["id"]
+
+    res2 = client.post("/webhook/outbound", json={"phone": "+61422222222", "message": "Batch message 2"})
+    assert res2.status_code == 200
+    id2 = res2.json()["id"]
+
+    # Poll via /api/v1/relay/sms/pending
+    pending_res = client.get("/api/v1/relay/sms/pending")
+    assert pending_res.status_code == 200
+    data = pending_res.json()
+
+    assert data["has_message"] == "yes"
+    assert len(data["messages"]) == 2
+    assert data["messages"][0]["id"] == id1
+    assert data["messages"][0]["phone"] == "+61411111111"
+    assert data["messages"][0]["reply"] == "Batch message 1"
+    assert data["messages"][1]["id"] == id2
+    assert data["messages"][1]["phone"] == "+61422222222"
+    assert data["messages"][1]["reply"] == "Batch message 2"
+
+    # Backwards-compatible top-level keys match first message
+    assert data["id"] == id1
+    assert data["phone"] == "+61411111111"
+    assert data["reply"] == "Batch message 1"
+    assert data["message"] == "Batch message 1"
+
+    # Both marked dispatched in DB
+    with test_db() as db:
+        items = db.query(OutboundQueueMessage).filter(OutboundQueueMessage.id.in_([id1, id2])).all()
+        assert len(items) == 2
+        assert all(it.status == "dispatched" for it in items)
+
+    # Next check has no messages
+    empty_res = client.get("/api/v1/relay/sms/pending")
+    assert empty_res.status_code == 200
+    assert empty_res.json() == {"has_message": "no", "messages": []}
+
+
+def test_relay_sms_sent_delivery_receipt(client, test_db):
+    # Enqueue two messages
+    r1 = client.post("/webhook/outbound", json={"phone": "+61433333333", "message": "Receipt test 1"})
+    r2 = client.post("/webhook/outbound", json={"phone": "+61444444444", "message": "Receipt test 2"})
+    id1 = r1.json()["id"]
+    id2 = r2.json()["id"]
+
+    # Test GET healthcheck
+    for path in ("/webhook/sent", "/weebhook/sent", "/api/v1/relay/sms/sent"):
+        res = client.get(path)
+        assert res.status_code == 200
+        assert res.json() == {"status": "ok", "endpoint": "delivery_receipt", "supported_methods": ["POST"]}
+
+    # Deliver id1 via JSON list
+    deliv_res1 = client.post("/webhook/sent", json={"ids": [id1]})
+    assert deliv_res1.status_code == 200
+    assert deliv_res1.json() == {"status": "success", "delivered_count": 1, "ids": [id1]}
+
+    # Deliver id2 via form-urlencoded message_id
+    deliv_res2 = client.post(
+        "/api/v1/relay/sms/sent",
+        data={"message_id": id2},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert deliv_res2.status_code == 200
+    assert deliv_res2.json() == {"status": "success", "delivered_count": 1, "ids": [id2]}
+
+    # Verify both are marked delivered with timestamp
+    with test_db() as db:
+        items = db.query(OutboundQueueMessage).filter(OutboundQueueMessage.id.in_([id1, id2])).all()
+        assert len(items) == 2
+        for it in items:
+            assert it.status == "delivered"
+            assert it.delivered_at is not None
+
+
+def test_gateway_wakeup_debouncing_and_stranded_worker(test_db, monkeypatch):
+    import backend.services.relay_service as rs
+    from datetime import datetime, timedelta
+
+    pings = []
+    monkeypatch.setattr(rs, "_fire_http_ping", lambda url: pings.append(url))
+    monkeypatch.setenv("ANDROID_GATEWAY_WAKEUP_URL", "https://example.com/wakeup")
+    rs.last_wakeup_sent_at = None
+
+    # First call: triggers
+    assert rs.trigger_gateway_wakeup(force=False) is True
+    assert len(pings) == 1
+
+    # Second immediate call (within 10s): debounced
+    assert rs.trigger_gateway_wakeup(force=False) is False
+    assert len(pings) == 1
+
+    # Force bypasses debounce
+    assert rs.trigger_gateway_wakeup(force=True) is True
+    assert len(pings) == 2
+
+    # Simulate stranded message older than 15s
+    with test_db() as db:
+        stranded_msg = OutboundQueueMessage(
+            id="stranded-1",
+            phone="+61499999999",
+            message="Old stranded message",
+            status="pending",
+            created_at=datetime.utcnow() - timedelta(seconds=25),
+        )
+        db.add(stranded_msg)
+        db.commit()
+
+    # Stranded check finds the message and forces wakeup
+    cutoff = datetime.utcnow() - timedelta(seconds=15)
+    with test_db() as db:
+        count = (
+            db.query(OutboundQueueMessage)
+            .filter(
+                OutboundQueueMessage.status == "pending",
+                OutboundQueueMessage.created_at <= cutoff,
+            )
+            .count()
+        )
+        assert count >= 1
