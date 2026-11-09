@@ -302,6 +302,8 @@ PUBLIC_EXACT_PATHS = {
     "/weebhook/outbound",
     "/webhook/sent",
     "/weebhook/sent",
+    "/webhook/log",
+    "/weebhook/log",
     "/api/v1/relay/sms/sent",
     "/api/v1/relay/sms/pending",
     "/arrival",

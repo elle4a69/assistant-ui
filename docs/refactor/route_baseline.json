@@ -770,6 +770,50 @@
     "response_model": null
   },
   {
+    "path": "/weebhook/log",
+    "name": "get_webhook_log_info",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_webhook_log_info",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/webhook/log",
+    "name": "get_webhook_log_info",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_webhook_log_info",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/weebhook/log",
+    "name": "post_shortcut_telemetry_log",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "post_shortcut_telemetry_log",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/webhook/log",
+    "name": "post_shortcut_telemetry_log",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "post_shortcut_telemetry_log",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
     "path": "/api/admin/sms-simulator",
     "name": "simulate_inbound_sms",
     "route_type": "APIRoute",

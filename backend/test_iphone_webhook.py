@@ -508,3 +508,51 @@ def test_android_sms_gateway_webhook(client):
     assert data_deliv["status"] == "ignored"
     assert data_deliv["event"] == "sms:delivered"
 
+def test_webhook_log_telemetry(client, capsys):
+    # 1. GET healthcheck
+    res_get = client.get("/webhook/log")
+    assert res_get.status_code == 200
+    assert res_get.json() == {
+        "status": "ok",
+        "endpoint": "shortcut_telemetry",
+        "supported_methods": ["POST"],
+    }
+
+    # 2. POST with arbitrary JSON dict
+    payload_json = {
+        "action": "shortcut_started",
+        "step": 3,
+        "detail": {"input_count": 5}
+    }
+    res1 = client.post("/webhook/log", json=payload_json)
+    assert res1.status_code == 200
+    data1 = res1.json()
+    assert data1["status"] == "logged"
+    assert "timestamp" in data1
+    captured1 = capsys.readouterr()
+    assert "[SHORTCUT_TELEMETRY]" in captured1.out
+    assert "shortcut_started" in captured1.out
+
+    # 3. POST with arbitrary plain text string
+    raw_str = "Error: Failed to fetch contact in step 4"
+    res2 = client.post(
+        "/webhook/log",
+        content=raw_str,
+        headers={"Content-Type": "text/plain"},
+    )
+    assert res2.status_code == 200
+    data2 = res2.json()
+    assert data2["status"] == "logged"
+    assert "timestamp" in data2
+    captured2 = capsys.readouterr()
+    assert "[SHORTCUT_TELEMETRY]" in captured2.out
+    assert "Error: Failed to fetch contact in step 4" in captured2.out
+
+    # 4. POST with weebhook alias
+    res3 = client.post(
+        "/weebhook/log",
+        json={"test": "alias_log"},
+    )
+    assert res3.status_code == 200
+    assert res3.json()["status"] == "logged"
+

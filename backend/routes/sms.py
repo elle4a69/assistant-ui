@@ -397,6 +397,37 @@ async def post_delivery_receipt(
     }
 
 
+@router.get("/webhook/log")
+@router.get("/weebhook/log")
+def get_webhook_log_info():
+    return {
+        "status": "ok",
+        "endpoint": "shortcut_telemetry",
+        "supported_methods": ["POST"],
+    }
+
+
+@router.post("/webhook/log")
+@router.post("/weebhook/log")
+async def post_shortcut_telemetry_log(request: Request):
+    ts = datetime.utcnow().isoformat()
+    raw_bytes = await request.body()
+    payload = None
+    try:
+        payload = json.loads(raw_bytes.decode("utf-8"))
+    except Exception:
+        payload = raw_bytes.decode("utf-8", errors="replace")
+
+    log_msg = f"[{ts}] [SHORTCUT_TELEMETRY] {json.dumps(payload) if isinstance(payload, (dict, list)) else payload}"
+    print(log_msg, flush=True)
+    logger.info("%s", log_msg)
+
+    return {
+        "status": "logged",
+        "timestamp": ts,
+    }
+
+
 @router.post("/api/admin/sms-simulator")
 def simulate_inbound_sms(
     simulation: AdminSmsSimulationInput,
@@ -477,6 +508,8 @@ __all__ = [
     "post_iphone_shortcuts_outbound",
     "get_delivery_receipt_info",
     "post_delivery_receipt",
+    "get_webhook_log_info",
+    "post_shortcut_telemetry_log",
     "simulate_inbound_sms",
     "get_sms_confirmation",
     "save_sms_confirmation",
