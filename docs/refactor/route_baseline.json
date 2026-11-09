@@ -537,6 +537,50 @@
     "response_model": null
   },
   {
+    "path": "/weebhook",
+    "name": "get_iphone_shortcuts_inbound_info",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_iphone_shortcuts_inbound_info",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/webhook",
+    "name": "get_iphone_shortcuts_inbound_info",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_iphone_shortcuts_inbound_info",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/weebhook/inbound",
+    "name": "get_iphone_shortcuts_inbound_info",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_iphone_shortcuts_inbound_info",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/webhook/inbound",
+    "name": "get_iphone_shortcuts_inbound_info",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_iphone_shortcuts_inbound_info",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
     "path": "/webhook",
     "name": "iphone_shortcuts_webhook",
     "route_type": "APIRoute",

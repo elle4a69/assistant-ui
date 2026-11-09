@@ -159,6 +159,17 @@ def test_iphone_webhook_inbound_endpoint(client, test_db):
     assert res_alias.json()["status"] == "success"
 
 
+def test_iphone_webhook_inbound_get_info(client):
+    for path in ("/webhook/inbound", "/weebhook/inbound", "/webhook", "/weebhook"):
+        res = client.get(path)
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "ok"
+        assert data["endpoint"] == "inbound_sms_webhook"
+        assert "POST" in data["supported_methods"]
+        assert "Inbound SMS webhook is active" in data["message"]
+
+
 def test_iphone_webhook_missing_fields(client):
     # Missing sender
     res1 = client.post("/weebhook", json={"message": "No sender"})

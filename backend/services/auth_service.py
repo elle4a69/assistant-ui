@@ -25,6 +25,8 @@ try:
         AUTH_PASSWORD,
         AUTH_SESSION_MAX_AGE,
         AUTH_USERNAME,
+    )
+    from backend.core.constants import (
         PORTAL_SPA_PATHS,
         PUBLIC_EXACT_PATHS,
     )
@@ -35,6 +37,8 @@ except ImportError:
         AUTH_PASSWORD,
         AUTH_SESSION_MAX_AGE,
         AUTH_USERNAME,
+    )
+    from core.constants import (
         PORTAL_SPA_PATHS,
         PUBLIC_EXACT_PATHS,
     )

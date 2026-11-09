@@ -67,6 +67,19 @@ IPHONE_SENDER_FIELDS = ("sender", "from", "phone", "from_phone", "contact", "sou
 IPHONE_BODY_FIELDS = ("message", "body", "text", "msg", "content")
 
 
+@router.get("/webhook/inbound")
+@router.get("/weebhook/inbound")
+@router.get("/webhook")
+@router.get("/weebhook")
+def get_iphone_shortcuts_inbound_info():
+    return {
+        "status": "ok",
+        "endpoint": "inbound_sms_webhook",
+        "supported_methods": ["POST"],
+        "message": "Inbound SMS webhook is active. Post JSON or form data with sender/message.",
+    }
+
+
 @router.post("/webhook/inbound")
 @router.post("/weebhook/inbound")
 @router.post("/weebhook")
@@ -324,6 +337,7 @@ __all__ = [
     "router",
     "webhook_sms",
     "iphone_shortcuts_webhook",
+    "get_iphone_shortcuts_inbound_info",
     "get_iphone_shortcuts_outbound",
     "post_iphone_shortcuts_outbound",
     "simulate_inbound_sms",
