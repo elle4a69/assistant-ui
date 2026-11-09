@@ -1266,6 +1266,28 @@
     "response_model": null
   },
   {
+    "path": "/api/settings/webpage",
+    "name": "get_webpage_setting",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_webpage_setting",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/api/settings/webpage",
+    "name": "update_webpage_setting",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "update_webpage_setting",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
     "path": "/api/settings/availability",
     "name": "get_availability_settings",
     "route_type": "APIRoute",

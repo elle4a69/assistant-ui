@@ -671,3 +671,43 @@ def test_manual_learning_saves_nothing_for_invalid_ai_json(monkeypatch, tmp_path
     assert exc_info.value.status_code == 502
     assert not (tmp_path / main.LEARNED_INFORMATION_FILENAME).exists()
 
+
+
+def test_public_webpage_toggle_and_guarding(monkeypatch, tmp_path):
+    import base64
+    from fastapi.testclient import TestClient
+    from backend.schemas.domain import SettingsUpdateInput
+    import backend.services.settings_service as ss
+
+    webpage_path = tmp_path / "public_webpage.json"
+    monkeypatch.setattr(ss, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "PUBLIC_WEBPAGE_PATH", str(webpage_path))
+
+    # Defaults to True
+    assert ss.load_public_webpage_enabled() is True
+
+    # Disable via update_settings
+    main.update_settings(SettingsUpdateInput(publicWebpageEnabled=False))
+    assert ss.load_public_webpage_enabled() is False
+
+    client = TestClient(main.app)
+
+    # When disabled, unauthenticated public landing page returns 503
+    res_landing = client.get("/")
+    assert res_landing.status_code == 503
+    assert "Website is currently offline" in res_landing.text
+
+    res_booking = client.get("/booking")
+    assert res_booking.status_code == 503
+
+    # Admin with valid auth can still access
+    auth_header = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass").decode()}
+    monkeypatch.setattr(main, "AUTH_PASSWORD", "testpass")
+    res_admin = client.get("/settings", headers=auth_header)
+    assert res_admin.status_code != 503
+
+    # Re-enable via dedicated endpoint
+    res_enable = client.post("/api/settings/webpage", json={"enabled": True}, headers=auth_header)
+    assert res_enable.status_code == 200
+    assert ss.load_public_webpage_enabled() is True

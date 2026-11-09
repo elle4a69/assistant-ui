@@ -67,6 +67,8 @@ try:
     )
     from backend.services.knowledge_service import match_qa_rule
     from backend.services.learning_service import curate_message_learning, save_ai_response_correction_learning, save_edited_draft_learning
+    from backend.services.auth_service import is_admin_request
+    from backend.services.settings_service import load_public_webpage_enabled
 except ImportError:
     from core.config import (
         BASE_DIR, DATA_DIR, STYLE_PROFILE_STORE, PROMPTS_DIR, FIRST_CONTACT_ACCOUNT_KEYS,
@@ -118,6 +120,8 @@ except ImportError:
     )
     from services.knowledge_service import match_qa_rule
     from services.learning_service import curate_message_learning, save_ai_response_correction_learning, save_edited_draft_learning
+    from services.auth_service import is_admin_request
+    from services.settings_service import load_public_webpage_enabled
 
 router = APIRouter()
 
@@ -810,9 +814,37 @@ def handle_locanto_message(payload: LocantoMessagePayload, db: Session = Depends
 frontend_dist = os.path.abspath(os.path.join(BASE_DIR, "..", "frontend", "dist"))
 
 @router.get("/{full_path:path}")
-async def serve_spa(full_path: str):
+async def serve_spa(full_path: str, request: Request):
     if full_path.startswith("api/") or full_path.startswith("docs") or full_path.startswith("openapi.json"):
         return None
+
+    # Static assets, images, icons, and worker files should always be served
+    if (
+        full_path.startswith("assets/")
+        or full_path.startswith("images/")
+        or full_path in ("favicon.ico", "manifest.json", "sw.js")
+    ):
+        file_path = os.path.join(frontend_dist, full_path)
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        return None
+
+    # Check if public webpage is disabled
+    load_webpage_fn = _dyn("load_public_webpage_enabled", load_public_webpage_enabled)
+    webpage_enabled = load_webpage_fn() if callable(load_webpage_fn) else True
+
+    clean_path = full_path.strip("/")
+    is_public_landing = (
+        clean_path == ""
+        or clean_path in ("landing.html", "booking", "booking-inline.js", "widget.js")
+        or clean_path == "v2"
+        or clean_path.startswith("v2/")
+    )
+
+    if not webpage_enabled and is_public_landing:
+        admin_check_fn = _dyn("is_admin_request", is_admin_request)
+        if not (callable(admin_check_fn) and admin_check_fn(request)):
+            return Response("Website is currently offline.", status_code=503, media_type="text/plain")
 
     # Public landing page served at root "/"
     if not full_path or full_path == "":

@@ -54,6 +54,8 @@ try:
         load_first_contact_autoresponders,
         save_first_contact_autoresponders,
         render_message_export_csv,
+        load_public_webpage_enabled,
+        save_public_webpage_enabled,
     )
     from backend.services.booking_service import load_working_hours
 except ImportError:
@@ -90,6 +92,8 @@ except ImportError:
         load_first_contact_autoresponders,
         save_first_contact_autoresponders,
         render_message_export_csv,
+        load_public_webpage_enabled,
+        save_public_webpage_enabled,
     )
     from services.booking_service import load_working_hours
 
@@ -430,6 +434,7 @@ def get_settings():
         "trainingModeEnabled": _dyn("TRAINING_MODE_ENABLED", TRAINING_MODE_ENABLED),
         "showMessageAvatars": load_message_ui_settings()["showMessageAvatars"],
         "catchUpLookbackDays": load_message_ui_settings()["catchUpLookbackDays"],
+        "publicWebpageEnabled": _dyn("load_public_webpage_enabled", load_public_webpage_enabled)(),
     }
 
 
@@ -472,6 +477,12 @@ def update_settings(payload: SettingsUpdateInput):
                 json.dump({"enabled": payload.trainingModeEnabled}, f, indent=2)
         except Exception as e:
             print(f"Failed to save training mode state: {e}")
+
+    if payload.publicWebpageEnabled is not None:
+        save_fn = _dyn("save_public_webpage_enabled", save_public_webpage_enabled)
+        if callable(save_fn):
+            save_fn(payload.publicWebpageEnabled)
+        _set_dyn("PUBLIC_WEBPAGE_ENABLED", payload.publicWebpageEnabled)
 
     if payload.showMessageAvatars is not None or payload.catchUpLookbackDays is not None:
         ui_path = _dyn("MESSAGE_UI_SETTINGS_PATH", MESSAGE_UI_SETTINGS_PATH)
@@ -566,6 +577,27 @@ def export_messages_csv(db: Session = Depends(get_db)):
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.get("/api/settings/webpage")
+def get_webpage_setting():
+    load_fn = _dyn("load_public_webpage_enabled", load_public_webpage_enabled)
+    return {"publicWebpageEnabled": load_fn() if callable(load_fn) else True}
+
+
+@router.post("/api/settings/webpage")
+def update_webpage_setting(payload: Dict[str, Any]):
+    enabled = payload.get("publicWebpageEnabled")
+    if enabled is None:
+        enabled = payload.get("enabled")
+    if enabled is None:
+        raise HTTPException(status_code=422, detail="Missing 'publicWebpageEnabled' or 'enabled' boolean.")
+    enabled_bool = bool(enabled)
+    save_fn = _dyn("save_public_webpage_enabled", save_public_webpage_enabled)
+    if callable(save_fn):
+        save_fn(enabled_bool)
+    _set_dyn("PUBLIC_WEBPAGE_ENABLED", enabled_bool)
+    return {"status": "success", "publicWebpageEnabled": enabled_bool}
 
 
 @router.get("/api/settings/availability")
@@ -777,6 +809,8 @@ __all__ = [
     "save_working_hours",
     "get_availability_settings",
     "save_availability_settings",
+    "get_webpage_setting",
+    "update_webpage_setting",
     "get_mobilemessage_settings",
     "save_mobilemessage_settings",
 ]

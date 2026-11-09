@@ -86,6 +86,7 @@ import {
   BookOpen,
   DollarSign,
   Sliders,
+  Globe,
   Plus,
   MessageSquare,
   Copy,
@@ -152,6 +153,8 @@ export default function SettingsView() {
   const [userPrompt, setUserPrompt] = useState('');
   const [hasGoogleCreds, setHasGoogleCreds] = useState(false);
   const [showMessageAvatars, setShowMessageAvatars] = useState(true);
+  const [publicWebpageEnabled, setPublicWebpageEnabled] = useState(true);
+  const [savingPublicWebpage, setSavingPublicWebpage] = useState(false);
   const [savingMessageDisplay, setSavingMessageDisplay] = useState(false);
   const [exportingMessages, setExportingMessages] = useState(false);
   const [clearingPendingDrafts, setClearingPendingDrafts] = useState(false);
@@ -300,6 +303,7 @@ export default function SettingsView() {
       setHasGoogleCreds(settingsData.hasGoogleCredentials);
       setShowMessageAvatars(settingsData.showMessageAvatars !== false);
       setCatchUpLookbackDays(settingsData.catchUpLookbackDays ?? 3);
+      setPublicWebpageEnabled(settingsData.publicWebpageEnabled !== false);
       setSettingsConnectionError(false);
 
     } catch (err) {
@@ -364,6 +368,22 @@ export default function SettingsView() {
       triggerBanner('error', 'Failed to update settings configurations.');
     } finally {
       setSavingSettings(false);
+    }
+  };
+
+  const handlePublicWebpageToggle = async () => {
+    const nextValue = !publicWebpageEnabled;
+    setPublicWebpageEnabled(nextValue);
+    setSavingPublicWebpage(true);
+    try {
+      await updateSettings({ publicWebpageEnabled: nextValue });
+      triggerBanner('success', `Public webpage ${nextValue ? 'enabled' : 'disabled'}.`);
+    } catch (err) {
+      console.error(err);
+      setPublicWebpageEnabled(!nextValue);
+      triggerBanner('error', 'Failed to update public webpage setting.');
+    } finally {
+      setSavingPublicWebpage(false);
     }
   };
 
@@ -2292,6 +2312,35 @@ export default function SettingsView() {
               
               <div className="p-3 sm:p-5 flex flex-col gap-6 font-sans">
                 
+                {/* Public Webpage Toggle */}
+                <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between gap-4">
+                  <div className="flex items-start gap-3 min-w-0">
+                    <Globe className="w-4 h-4 text-indigo-600 mt-0.5 shrink-0" />
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="text-xs font-bold text-slate-800">Public Webpage</p>
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${publicWebpageEnabled ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-slate-200 text-slate-600'}`}>
+                          {publicWebpageEnabled ? 'Online' : 'Offline'}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-slate-500 mt-0.5">
+                        Enable or disable the public landing and booking webpage (<code className="font-mono text-[9px] bg-slate-200/60 px-1 py-0.5 rounded">/</code> and <code className="font-mono text-[9px] bg-slate-200/60 px-1 py-0.5 rounded">/booking</code>). When disabled, the public page is offline while your admin portal and SMS triage remain fully active.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={publicWebpageEnabled}
+                    aria-label="Public Webpage"
+                    disabled={savingPublicWebpage}
+                    onClick={handlePublicWebpageToggle}
+                    className={`relative h-6 w-11 shrink-0 rounded-full border-none p-0 transition-colors cursor-pointer disabled:opacity-50 ${publicWebpageEnabled ? 'bg-indigo-600' : 'bg-slate-300'}`}
+                  >
+                    <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${publicWebpageEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
+                  </button>
+                </div>
+
                 {/* SMS Template Section */}
                 <div className="flex flex-col gap-2.5 pb-5 border-b border-slate-150">
                   <div>

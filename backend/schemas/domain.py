@@ -402,6 +402,7 @@ class SettingsUpdateInput(BaseModel):
     trainingModeEnabled: Optional[bool] = None
     showMessageAvatars: Optional[bool] = None
     catchUpLookbackDays: Optional[int] = Field(default=None, ge=1, le=30)
+    publicWebpageEnabled: Optional[bool] = None
 
 
 class QuickReplyInput(BaseModel):

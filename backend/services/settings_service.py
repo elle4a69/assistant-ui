@@ -497,6 +497,29 @@ def save_quick_replies(replies: Dict[str, List[Dict[str, str]]]) -> None:
     os.replace(temporary_path, qr_path)
 
 
+def load_public_webpage_enabled() -> bool:
+    data_dir = _dyn("DATA_DIR", DATA_DIR)
+    path = os.path.join(data_dir, "public_webpage.json")
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f).get("enabled", True)
+        except Exception:
+            pass
+    return _dyn("PUBLIC_WEBPAGE_ENABLED", True)
+
+
+def save_public_webpage_enabled(enabled: bool) -> None:
+    data_dir = _dyn("DATA_DIR", DATA_DIR)
+    path = os.path.join(data_dir, "public_webpage.json")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"enabled": enabled}, f, indent=2)
+    except Exception as e:
+        print(f"Failed to save public webpage setting: {e}")
+
+
 def render_message_export_csv(db: Session) -> str:
     rows = (
         db.query(Message, Thread)
@@ -555,4 +578,6 @@ __all__ = [
     "load_quick_replies",
     "save_quick_replies",
     "render_message_export_csv",
+    "load_public_webpage_enabled",
+    "save_public_webpage_enabled",
 ]

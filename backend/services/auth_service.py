@@ -112,6 +112,30 @@ def _set_admin_session_cookie(response: Response, request: Request) -> None:
     )
 
 
+def is_admin_request(request: Request) -> bool:
+    """Return True if the request comes from an authenticated admin."""
+    cookie_name = _dyn("AUTH_COOKIE_NAME", AUTH_COOKIE_NAME)
+    token = request.cookies.get(cookie_name, "")
+    validate_session = _dyn("_valid_admin_session", _valid_admin_session)
+    if callable(validate_session) and validate_session(token):
+        return True
+
+    authorization = request.headers.get("Authorization", "")
+    scheme, _, encoded = authorization.partition(" ")
+    if scheme.lower() == "basic" and encoded:
+        try:
+            decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+            supplied_username, separator, supplied_password = decoded.partition(":")
+            if separator:
+                validate_creds = _dyn("_valid_admin_credentials", _valid_admin_credentials)
+                if callable(validate_creds) and validate_creds(supplied_username, supplied_password):
+                    return True
+        except Exception:
+            pass
+
+    return False
+
+
 def is_public_request(request: Request) -> bool:
     """Keep the public website, booking widget, and required integrations open."""
     path = request.url.path.rstrip("/") or "/"
@@ -189,4 +213,5 @@ __all__ = [
     "_set_admin_session_cookie",
     "is_public_request",
     "build_authority_context",
+    "is_admin_request",
 ]

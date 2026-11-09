@@ -110,6 +110,7 @@ BUSINESS_VARIABLES_PATH = os.path.join(DATA_DIR, "business_variables.json")
 LINE_PROFILES_PATH = os.path.join(DATA_DIR, "sms_line_profiles.json")
 WORKING_HOURS_PATH = os.path.join(DATA_DIR, "working_hours.json")
 AVAILABILITY_CONFIG_PATH = os.path.join(DATA_DIR, "availability_config.json")
+PUBLIC_WEBPAGE_PATH = os.path.join(DATA_DIR, "public_webpage.json")
 MESSAGE_UI_SETTINGS_PATH = os.path.join(DATA_DIR, "message_ui_settings.json")
 QUICK_REPLIES_PATH = os.path.join(DATA_DIR, "quick_replies.json")
 FIRST_CONTACT_AUTORESPONDER_PATH = os.path.join(DATA_DIR, "first_contact_autoresponder.json")
@@ -136,6 +137,14 @@ if os.path.exists(auto_reply_path):
     try:
         with open(auto_reply_path, "r", encoding="utf-8") as f:
             AUTO_REPLY_GLOBAL_ENABLED = json.load(f).get("enabled", True)
+    except Exception:
+        pass
+
+PUBLIC_WEBPAGE_ENABLED = True
+if os.path.exists(PUBLIC_WEBPAGE_PATH):
+    try:
+        with open(PUBLIC_WEBPAGE_PATH, "r", encoding="utf-8") as f:
+            PUBLIC_WEBPAGE_ENABLED = json.load(f).get("enabled", True)
     except Exception:
         pass
 
