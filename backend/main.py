@@ -66,6 +66,7 @@ from backend.services import (
 )
 
 # Curator
+from backend.services.relay_service import start_gateway_heartbeat_worker
 from backend.curator import *
 
 # Knowledge & RAG
@@ -154,6 +155,7 @@ async def lifespan(application: FastAPI):
         asyncio.create_task(booking_reminder_worker()),
         asyncio.create_task(autonomous_knowledge_curator_worker()),
         asyncio.create_task(start_stranded_relay_worker()),
+        asyncio.create_task(start_gateway_heartbeat_worker()),
     ]
     try:
         yield

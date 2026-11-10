@@ -163,8 +163,77 @@ async def start_stranded_relay_worker() -> None:
             logger.error("Error in stranded relay worker: %s", e, exc_info=True)
 
 
+async def start_gateway_heartbeat_worker(interval_seconds: int = 1800) -> None:
+    """Background worker that periodically checks Android Gateway health every 30 mins."""
+    env_interval = os.getenv("GATEWAY_HEARTBEAT_INTERVAL_SECONDS")
+    if env_interval:
+        try:
+            interval_seconds = int(env_interval)
+        except (ValueError, TypeError):
+            pass
+
+    logger.info("Gateway heartbeat monitor worker started (interval=%ds).", interval_seconds)
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            raw_url = os.getenv("ANDROID_GATEWAY_WAKEUP_URL", "").strip()
+            if not raw_url:
+                continue
+
+            parsed = urllib.parse.urlsplit(raw_url)
+            username = parsed.username or os.getenv("ANDROID_GATEWAY_WAKEUP_USER")
+            password = parsed.password or os.getenv("ANDROID_GATEWAY_WAKEUP_PASSWORD")
+
+            if parsed.username or parsed.password:
+                netloc = parsed.hostname or ""
+                if parsed.port:
+                    netloc += f":{parsed.port}"
+                target_url = urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+            else:
+                target_url = raw_url
+
+            headers = {
+                "User-Agent": "AssistantUI-Relay-Heartbeat/1.0",
+            }
+            if username and password:
+                token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+                headers["Authorization"] = f"Basic {token}"
+            elif username:
+                token = base64.b64encode(f"{username}:".encode("utf-8")).decode("ascii")
+                headers["Authorization"] = f"Basic {token}"
+
+            req = urllib.request.Request(target_url, headers=headers, method="GET")
+
+            loop = asyncio.get_running_loop()
+            def _check():
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        return resp.status, None
+                except urllib.error.HTTPError as he:
+                    return he.code, None
+                except Exception as ex:
+                    return None, ex
+
+            status, err = await loop.run_in_executor(None, _check)
+            if status is not None:
+                log_msg = f"[Gateway Heartbeat OK] Android Gateway at {target_url} responded with status {status}"
+                logger.info("%s", log_msg)
+                print(log_msg, flush=True)
+            else:
+                log_msg = f"[Gateway Heartbeat WARNING] Android Gateway at {target_url} is offline or unreachable: {err}"
+                logger.warning("%s", log_msg)
+                print(log_msg, flush=True)
+
+        except asyncio.CancelledError:
+            logger.info("Gateway heartbeat monitor worker cancelled.")
+            break
+        except Exception as e:
+            logger.error("Error in gateway heartbeat worker: %s", e, exc_info=True)
+
+
 __all__ = [
     "last_wakeup_sent_at",
     "trigger_gateway_wakeup",
     "start_stranded_relay_worker",
+    "start_gateway_heartbeat_worker",
 ]

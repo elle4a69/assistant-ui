@@ -815,3 +815,46 @@ def test_unified_master_shortcut_generation_and_download(client):
     assert res_alias.status_code == 200
     assert len(res_alias.content) == len(res_dl.content)
 
+@pytest.mark.asyncio
+async def test_gateway_heartbeat_worker(monkeypatch, capsys):
+    import asyncio
+    import contextlib
+    import urllib.error
+    import urllib.request
+    from backend.services.relay_service import start_gateway_heartbeat_worker
+
+    # 1. Successful heartbeat check
+    class DummyResp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc_val, exc_tb): pass
+
+    monkeypatch.setenv("ANDROID_GATEWAY_WAKEUP_URL", "https://heartbeat.gateway/ping")
+    monkeypatch.setenv("GATEWAY_HEARTBEAT_INTERVAL_SECONDS", "0") # immediate for test
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=5: DummyResp())
+
+    task = asyncio.create_task(start_gateway_heartbeat_worker(interval_seconds=0))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    captured = capsys.readouterr()
+    assert "[Gateway Heartbeat OK]" in captured.out
+    assert "status 200" in captured.out
+
+    # 2. Unreachable / timed out gateway
+    def failing_urlopen(req, timeout=5):
+        raise urllib.error.URLError("Connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", failing_urlopen)
+    task2 = asyncio.create_task(start_gateway_heartbeat_worker(interval_seconds=0))
+    await asyncio.sleep(0.05)
+    task2.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task2
+
+    captured2 = capsys.readouterr()
+    assert "[Gateway Heartbeat WARNING]" in captured2.out
+    assert "offline or unreachable" in captured2.out
+
