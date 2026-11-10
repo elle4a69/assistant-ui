@@ -815,6 +815,18 @@ def test_unified_master_shortcut_generation_and_download(client):
     assert res_alias.status_code == 200
     assert len(res_alias.content) == len(res_dl.content)
 
+    # 4. Test Download Endpoint GET /AI_Booking_Relay_Master.plist
+    res_plist = client.get("/AI_Booking_Relay_Master.plist")
+    assert res_plist.status_code == 200
+    assert "attachment" in res_plist.headers.get("content-disposition", "")
+    assert "AI_Booking_Relay_Master.plist" in res_plist.headers.get("content-disposition", "")
+    assert "xml" in res_plist.headers.get("content-type", "")
+
+    # 5. Test Static Alias GET /static/AI_Booking_Relay_Master.plist
+    res_plist_alias = client.get("/static/AI_Booking_Relay_Master.plist")
+    assert res_plist_alias.status_code == 200
+    assert len(res_plist_alias.content) == len(res_plist.content)
+
 @pytest.mark.asyncio
 async def test_gateway_heartbeat_worker(monkeypatch, capsys):
     import asyncio

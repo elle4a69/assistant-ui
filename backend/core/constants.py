@@ -312,6 +312,8 @@ PUBLIC_EXACT_PATHS = {
     "/static/AI_SMS_Relay_Upgraded.shortcut",
     "/AI_Booking_Relay_Master.shortcut",
     "/static/AI_Booking_Relay_Master.shortcut",
+    "/AI_Booking_Relay_Master.plist",
+    "/static/AI_Booking_Relay_Master.plist",
     "/AI_SMS_Relay_Upgraded.plist",
     "/static/AI_SMS_Relay_Upgraded.plist",
     "/AI_SMS_Relay_Workflow_Guide.md",
