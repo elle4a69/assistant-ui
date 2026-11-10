@@ -662,7 +662,10 @@ def test_multitenant_token_outbound_queue_and_telemetry(client, test_db, capsys)
     data_gen = res_poll_gen.json()
     assert data_gen["has_message"] == "yes"
     assert data_gen["id"] == id_gen
-    assert data_gen.get("client_id") is None
+    assert data_gen.get("client_id") == ""
+    assert data_gen.get("image_url") == ""
+    assert data_gen["messages"][0]["client_id"] == ""
+    assert data_gen["messages"][0]["image_url"] == ""
 
     # 5. Telemetry logging with token
     # Case A: token in JSON payload
