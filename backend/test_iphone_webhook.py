@@ -699,3 +699,48 @@ def test_multitenant_token_outbound_queue_and_telemetry(client, test_db, capsys)
     assert data_ack["token"] == "tenant_alpha"
     assert id_a in data_ack["ids"]
 
+def test_iphone_webhook_sliding_window_deduplication(client, test_db, capsys):
+    import time
+    from backend.models.domain import Message
+
+    payload = {
+        "sender": "+61412999888",
+        "message": "Hello Frank dedupe test",
+        "token": "client-token-01"
+    }
+
+    # First request: successfully processed
+    res1 = client.post("/webhook/inbound", json=payload)
+    assert res1.status_code == 200
+    data1 = res1.json()
+    assert data1["status"] == "success"
+    assert data1.get("duplicate") is not True
+    thread_id = data1["thread_id"]
+    assert thread_id is not None
+
+    # Check database: exactly 1 customer message
+    with test_db() as db:
+        msgs1 = db.query(Message).filter(Message.thread_id == thread_id, Message.role == "customer").all()
+        assert len(msgs1) == 1
+        assert msgs1[0].text == "Hello Frank dedupe test"
+
+    # Second identical request 1 second later from matching Personal Automation trigger
+    time.sleep(1.0)
+    capsys.readouterr()
+    res2 = client.post("/webhook/inbound", json=payload)
+    assert res2.status_code == 200
+    data2 = res2.json()
+    assert data2["status"] == "success"
+    assert data2["duplicate"] is True
+    assert data2["thread_id"] == thread_id
+
+    # Verify stdout log output captured
+    captured = capsys.readouterr()
+    assert "[iPhone Inbound Deduplicated]" in captured.out
+    assert "+61412999888" in captured.out
+
+    # Check database: still exactly 1 customer message (no duplicates created)
+    with test_db() as db:
+        msgs2 = db.query(Message).filter(Message.thread_id == thread_id, Message.role == "customer").all()
+        assert len(msgs2) == 1
+

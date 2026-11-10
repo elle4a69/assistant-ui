@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
 import logging
 import os
 import re
+import threading
+import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from sqlalchemy.orm import Session
@@ -85,6 +87,10 @@ def get_iphone_shortcuts_inbound_info():
     }
 
 
+_inbound_dedupe_cache: Dict[Tuple[str, str], float] = {}
+_inbound_dedupe_lock = threading.Lock()
+
+
 @router.post("/webhook/inbound")
 @router.post("/weebhook/inbound")
 @router.post("/weebhook")
@@ -158,6 +164,59 @@ async def iphone_shortcuts_webhook(
             detail="Invalid sender phone number.",
         )
 
+    client_token = _extract_client_token(data, request)
+
+    # 15-second sliding window deduplication for identical sender + message body
+    now_ts = time.time()
+    is_duplicate = False
+    existing_thread_id = None
+
+    with _inbound_dedupe_lock:
+        expired = [k for k, ts in _inbound_dedupe_cache.items() if now_ts - ts > 60.0]
+        for k in expired:
+            _inbound_dedupe_cache.pop(k, None)
+
+        cache_key = (from_phone, raw_body.strip())
+        last_seen = _inbound_dedupe_cache.get(cache_key)
+        if last_seen is not None and (now_ts - last_seen) < 15.0:
+            is_duplicate = True
+        else:
+            _inbound_dedupe_cache[cache_key] = now_ts
+
+    thread_cls = _dyn("Thread", Thread)
+    existing_thread = db.query(thread_cls).filter(thread_cls.customer_phone == from_phone).first()
+    if existing_thread:
+        existing_thread_id = existing_thread.id
+
+    if not is_duplicate and existing_thread:
+        cutoff = datetime.utcnow() - timedelta(seconds=15)
+        message_cls = _dyn("Message", Message)
+        existing_recent_msg = (
+            db.query(message_cls)
+            .filter(
+                message_cls.thread_id == existing_thread.id,
+                message_cls.role == "customer",
+                message_cls.text == raw_body,
+                message_cls.at >= cutoff,
+            )
+            .first()
+        )
+        if existing_recent_msg:
+            is_duplicate = True
+
+    if is_duplicate:
+        log_msg = f"[iPhone Inbound Deduplicated] Ignoring duplicate trigger for from_phone={from_phone} (received within dedupe window)"
+        logger.info("%s", log_msg)
+        print(log_msg, flush=True)
+        resp = {
+            "status": "success",
+            "thread_id": existing_thread_id,
+            "duplicate": True,
+        }
+        if client_token:
+            resp["token"] = client_token
+        return resp
+
     payload = WebhookSMSInput.model_validate({
         "from": from_phone,
         "body": raw_body,
@@ -170,10 +229,14 @@ async def iphone_shortcuts_webhook(
     result = process_fn(payload, background_tasks, db, sms_account_key="primary")
 
     thread_id = result.get("thread_id") if isinstance(result, dict) else None
-    return {
+    client_token = _extract_client_token(data, request)
+    resp = {
         "status": "success",
         "thread_id": thread_id,
     }
+    if client_token:
+        resp["token"] = client_token
+    return resp
 
 IPHONE_OUTBOUND_PHONE_FIELDS = ("phone", "to", "recipient", "customer_phone", "sender", "destination")
 IPHONE_OUTBOUND_MESSAGE_FIELDS = ("message", "reply", "body", "text", "msg", "content")
