@@ -2045,6 +2045,94 @@
     "response_model": null
   },
   {
+    "path": "/static/relay.shortcut",
+    "name": "download_relay_shortcut",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "download_relay_shortcut",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/relay.shortcut",
+    "name": "download_relay_shortcut",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "download_relay_shortcut",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/static/AI_Booking_Relay_Master_new_-_Signed.shortcut",
+    "name": "download_ai_booking_relay_master_new_shortcut",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "download_ai_booking_relay_master_new_shortcut",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/AI_Booking_Relay_Master_new_-_Signed.shortcut",
+    "name": "download_ai_booking_relay_master_new_shortcut",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "download_ai_booking_relay_master_new_shortcut",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/static/AI_Booking_Relay_Master_new_—_Signed.shortcut",
+    "name": "download_ai_booking_relay_master_new_shortcut",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "download_ai_booking_relay_master_new_shortcut",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/AI_Booking_Relay_Master_new_—_Signed.shortcut",
+    "name": "download_ai_booking_relay_master_new_shortcut",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "download_ai_booking_relay_master_new_shortcut",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/static/AI_Booking_Relay_Master_new.shortcut",
+    "name": "download_ai_booking_relay_master_new_shortcut",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "download_ai_booking_relay_master_new_shortcut",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/AI_Booking_Relay_Master_new.shortcut",
+    "name": "download_ai_booking_relay_master_new_shortcut",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "download_ai_booking_relay_master_new_shortcut",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
     "path": "/static/AI_Booking_Relay_Master.shortcut",
     "name": "download_ai_booking_relay_master_shortcut",
     "route_type": "APIRoute",

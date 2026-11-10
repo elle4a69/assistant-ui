@@ -865,6 +865,56 @@ def download_ai_booking_relay_master_plist():
     raise HTTPException(status_code=404, detail="AI_Booking_Relay_Master.plist not found")
 
 
+@router.get("/relay.shortcut")
+@router.get("/static/relay.shortcut")
+def download_relay_shortcut():
+    search_paths = [
+        os.path.join(DATA_DIR, "static", "relay.shortcut"),
+        os.path.join(DATA_DIR, "relay.shortcut"),
+        os.path.join(BASE_DIR, "static", "relay.shortcut"),
+        os.path.join(BASE_DIR, "..", "data", "static", "relay.shortcut"),
+        os.path.join(BASE_DIR, "..", "data", "relay.shortcut"),
+        os.path.join(frontend_dist, "relay.shortcut"),
+    ]
+    for path in search_paths:
+        if os.path.exists(path) and os.path.isfile(path):
+            return FileResponse(
+                path,
+                media_type="application/octet-stream",
+                filename="relay.shortcut",
+                headers={"Content-Disposition": 'attachment; filename="relay.shortcut"'},
+            )
+    raise HTTPException(status_code=404, detail="relay.shortcut not found")
+
+
+@router.get("/AI_Booking_Relay_Master_new.shortcut")
+@router.get("/static/AI_Booking_Relay_Master_new.shortcut")
+@router.get("/AI_Booking_Relay_Master_new_—_Signed.shortcut")
+@router.get("/static/AI_Booking_Relay_Master_new_—_Signed.shortcut")
+@router.get("/AI_Booking_Relay_Master_new_-_Signed.shortcut")
+@router.get("/static/AI_Booking_Relay_Master_new_-_Signed.shortcut")
+def download_ai_booking_relay_master_new_shortcut():
+    search_paths = [
+        os.path.join(DATA_DIR, "static", "AI_Booking_Relay_Master_new.shortcut"),
+        os.path.join(DATA_DIR, "AI_Booking_Relay_Master_new.shortcut"),
+        os.path.join(BASE_DIR, "static", "AI_Booking_Relay_Master_new.shortcut"),
+        os.path.join(BASE_DIR, "..", "data", "static", "AI_Booking_Relay_Master_new.shortcut"),
+        os.path.join(BASE_DIR, "..", "data", "AI_Booking_Relay_Master_new.shortcut"),
+        os.path.join(frontend_dist, "AI_Booking_Relay_Master_new.shortcut"),
+        os.path.join(DATA_DIR, "static", "relay.shortcut"),
+        os.path.join(frontend_dist, "relay.shortcut"),
+    ]
+    for path in search_paths:
+        if os.path.exists(path) and os.path.isfile(path):
+            return FileResponse(
+                path,
+                media_type="application/octet-stream",
+                filename="AI_Booking_Relay_Master_new.shortcut",
+                headers={"Content-Disposition": 'attachment; filename="AI_Booking_Relay_Master_new.shortcut"'},
+            )
+    raise HTTPException(status_code=404, detail="AI_Booking_Relay_Master_new.shortcut not found")
+
+
 @router.get("/AI_Booking_Relay_Master.shortcut")
 @router.get("/static/AI_Booking_Relay_Master.shortcut")
 def download_ai_booking_relay_master_shortcut():
@@ -973,6 +1023,8 @@ __all__ = [
     "handle_locanto_message",
     "download_analyze_plist_file_shortcut",
     "download_ai_booking_relay_master_plist",
+    "download_relay_shortcut",
+    "download_ai_booking_relay_master_new_shortcut",
     "download_ai_booking_relay_master_shortcut",
     "download_ai_sms_relay_shortcut",
     "serve_spa",
