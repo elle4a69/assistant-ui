@@ -264,6 +264,9 @@ def init_db():
                 if outbound_columns and "image_url" not in outbound_columns:
                     conn.exec_driver_sql("ALTER TABLE outbound_queue ADD COLUMN image_url VARCHAR")
                     conn.commit()
+                if outbound_columns and "client_id" not in outbound_columns:
+                    conn.exec_driver_sql("ALTER TABLE outbound_queue ADD COLUMN client_id VARCHAR")
+                    conn.commit()
             except Exception:
                 pass
     except Exception:

@@ -610,3 +610,89 @@ def test_relay_route_aliases_and_shortcut_download(client, test_db, tmp_path, mo
     assert res_download_alias.status_code == 200
     assert res_download_alias.content == b"SHORTCUT_BINARY_CONTENT"
 
+def test_multitenant_token_outbound_queue_and_telemetry(client, test_db, capsys):
+    # 1. Enqueue message for tenant_alpha
+    res_a = client.post(
+        "/webhook/outbound",
+        json={
+            "phone": "+61411111111",
+            "message": "Alpha tenant message",
+            "token": "tenant_alpha"
+        }
+    )
+    assert res_a.status_code == 200
+    id_a = res_a.json()["id"]
+    assert res_a.json().get("client_id") == "tenant_alpha"
+
+    # Enqueue general untokened message
+    res_gen = client.post(
+        "/webhook/outbound",
+        json={
+            "phone": "+61422222222",
+            "message": "General message"
+        }
+    )
+    assert res_gen.status_code == 200
+    id_gen = res_gen.json()["id"]
+
+    # Verify DB storage
+    with test_db() as db:
+        msg_a = db.query(OutboundQueueMessage).filter(OutboundQueueMessage.id == id_a).first()
+        assert msg_a.client_id == "tenant_alpha"
+        msg_gen = db.query(OutboundQueueMessage).filter(OutboundQueueMessage.id == id_gen).first()
+        assert msg_gen.client_id is None
+
+    # 2. Polling for tenant_beta (should have no messages)
+    res_beta = client.get("/api/v1/relay/sms/pending?token=tenant_beta")
+    assert res_beta.status_code == 200
+    assert res_beta.json() == {"has_message": "no", "messages": []}
+
+    # 3. Polling for tenant_alpha retrieves only tenant_alpha's message
+    res_poll_a = client.get("/api/v1/relay/sms/pending?token=tenant_alpha")
+    assert res_poll_a.status_code == 200
+    data_a = res_poll_a.json()
+    assert data_a["has_message"] == "yes"
+    assert data_a["id"] == id_a
+    assert data_a["client_id"] == "tenant_alpha"
+    assert len(data_a["messages"]) == 1
+
+    # 4. Polling general queue (untokened) retrieves only the untokened general message
+    res_poll_gen = client.get("/webhook/outbound")
+    assert res_poll_gen.status_code == 200
+    data_gen = res_poll_gen.json()
+    assert data_gen["has_message"] == "yes"
+    assert data_gen["id"] == id_gen
+    assert data_gen.get("client_id") is None
+
+    # 5. Telemetry logging with token
+    # Case A: token in JSON payload
+    capsys.readouterr() # clear buffer
+    res_log1 = client.post("/webhook/log", json={"token": "tenant_gamma", "event": "step1"})
+    assert res_log1.status_code == 200
+    assert res_log1.json()["token"] == "tenant_gamma"
+    captured1 = capsys.readouterr()
+    assert "[SHORTCUT_TELEMETRY][token=tenant_gamma]" in captured1.out
+
+    # Case B: token in query param with plain text
+    res_log2 = client.post("/api/v1/relay/log?client_id=tenant_delta", content="Raw step text")
+    assert res_log2.status_code == 200
+    assert res_log2.json()["token"] == "tenant_delta"
+    captured2 = capsys.readouterr()
+    assert "[SHORTCUT_TELEMETRY][token=tenant_delta]" in captured2.out
+
+    # Case C: untokened logging (backward compatibility)
+    res_log3 = client.post("/webhook/log", json={"event": "untokened_step"})
+    assert res_log3.status_code == 200
+    assert "token" not in res_log3.json()
+    captured3 = capsys.readouterr()
+    assert "[SHORTCUT_TELEMETRY] " in captured3.out
+    assert "[token=" not in captured3.out
+
+    # 6. Delivery receipt / ack with token
+    res_ack = client.post("/api/v1/relay/sms/ack?token=tenant_alpha", json={"message_id": id_a})
+    assert res_ack.status_code == 200
+    data_ack = res_ack.json()
+    assert data_ack["status"] == "success"
+    assert data_ack["token"] == "tenant_alpha"
+    assert id_a in data_ack["ids"]
+

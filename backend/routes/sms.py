@@ -178,15 +178,40 @@ async def iphone_shortcuts_webhook(
 IPHONE_OUTBOUND_PHONE_FIELDS = ("phone", "to", "recipient", "customer_phone", "sender", "destination")
 IPHONE_OUTBOUND_MESSAGE_FIELDS = ("message", "reply", "body", "text", "msg", "content")
 IPHONE_OUTBOUND_IMAGE_FIELDS = ("image_url", "media_url", "attachment_url", "image")
+IPHONE_CLIENT_ID_FIELDS = ("token", "client_id", "clientId", "client", "tenant_id", "tenant")
 
 
-def _dequeue_pending_outbound_messages(db: Session) -> Dict[str, Any]:
+def _extract_client_token(data: Dict[str, Any], request: Optional[Request] = None) -> Optional[str]:
+    """Extract client/tenant token from body, query parameters, or HTTP headers."""
+    for key in IPHONE_CLIENT_ID_FIELDS:
+        val = data.get(key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    if request is not None:
+        for qkey in IPHONE_CLIENT_ID_FIELDS:
+            val = request.query_params.get(qkey)
+            if val is not None and str(val).strip():
+                return str(val).strip()
+        for hkey in ("x-client-id", "x-client-token", "x-token", "x-tenant-id"):
+            val = request.headers.get(hkey)
+            if val is not None and str(val).strip():
+                return str(val).strip()
+    return None
+
+
+def _dequeue_pending_outbound_messages(db: Session, client_id: Optional[str] = None) -> Dict[str, Any]:
     outbound_cls = _dyn("OutboundQueueMessage", OutboundQueueMessage)
     query = (
         db.query(outbound_cls)
         .filter(outbound_cls.status == "pending")
         .order_by(outbound_cls.created_at.asc())
     )
+    if client_id:
+        query = query.filter(outbound_cls.client_id == client_id)
+    else:
+        # General pending queue: messages without a specific tenant client_id
+        query = query.filter(outbound_cls.client_id.is_(None))
+
     try:
         pending_rows = query.with_for_update(skip_locked=True).all()
     except Exception:
@@ -206,7 +231,7 @@ def _dequeue_pending_outbound_messages(db: Session) -> Dict[str, Any]:
     db.commit()
 
     first = pending_rows[0]
-    return {
+    resp = {
         "has_message": "yes",
         "messages": [
             {
@@ -214,6 +239,7 @@ def _dequeue_pending_outbound_messages(db: Session) -> Dict[str, Any]:
                 "phone": r.phone,
                 "reply": r.message,
                 "image_url": r.image_url,
+                **({"client_id": r.client_id} if getattr(r, "client_id", None) else {}),
             }
             for r in pending_rows
         ],
@@ -223,13 +249,22 @@ def _dequeue_pending_outbound_messages(db: Session) -> Dict[str, Any]:
         "message": first.message,
         "image_url": first.image_url,
     }
+    if getattr(first, "client_id", None):
+        resp["client_id"] = first.client_id
+    return resp
 
 
 @router.get("/api/v1/relay/sms/pending")
 @router.get("/webhook/outbound")
 @router.get("/weebhook/outbound")
-def get_iphone_shortcuts_outbound(db: Session = Depends(get_db)):
-    return _dequeue_pending_outbound_messages(db)
+def get_iphone_shortcuts_outbound(
+    request: Request,
+    token: Optional[str] = None,
+    client_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    effective_client_id = _extract_client_token({"token": token, "client_id": client_id}, request)
+    return _dequeue_pending_outbound_messages(db, client_id=effective_client_id)
 
 
 @router.post("/webhook/outbound")
@@ -264,6 +299,8 @@ async def post_iphone_shortcuts_outbound(
     if not isinstance(data, dict):
         data = {}
 
+    effective_client_id = _extract_client_token(data, request)
+
     raw_phone: Optional[str] = None
     for key in IPHONE_OUTBOUND_PHONE_FIELDS:
         val = data.get(key)
@@ -295,6 +332,7 @@ async def post_iphone_shortcuts_outbound(
             phone=phone,
             message=raw_msg,
             image_url=raw_image,
+            client_id=effective_client_id,
             status="pending",
             created_at=datetime.utcnow(),
         )
@@ -309,13 +347,16 @@ async def post_iphone_shortcuts_outbound(
             except Exception:
                 pass
 
-        return {
+        resp = {
             "status": "queued",
             "id": new_msg.id,
         }
+        if effective_client_id:
+            resp["client_id"] = effective_client_id
+        return resp
 
     # Otherwise called without payload (polling for pending messages) -> Dequeue
-    return _dequeue_pending_outbound_messages(db)
+    return _dequeue_pending_outbound_messages(db, client_id=effective_client_id)
 
 
 @router.get("/api/v1/relay/sms/sent")
@@ -364,6 +405,8 @@ async def post_delivery_receipt(
     if not isinstance(data, dict):
         data = {}
 
+    token = _extract_client_token(data, request)
+
     raw_ids = []
     if "ids" in data:
         val = data["ids"]
@@ -392,11 +435,18 @@ async def post_delivery_receipt(
             delivered_ids.append(rec.id)
         db.commit()
 
-    return {
+    if token:
+        logger.info("Delivery receipt ack for token=%s, ids=%s", token, delivered_ids)
+        print(f"[{now.isoformat()}] [DELIVERY_ACK][token={token}] ids={delivered_ids}", flush=True)
+
+    resp = {
         "status": "success",
         "delivered_count": len(delivered_ids),
         "ids": delivered_ids,
     }
+    if token:
+        resp["token"] = token
+    return resp
 
 
 @router.get("/api/v1/relay/log")
@@ -422,14 +472,24 @@ async def post_shortcut_telemetry_log(request: Request):
     except Exception:
         payload = raw_bytes.decode("utf-8", errors="replace")
 
-    log_msg = f"[{ts}] [SHORTCUT_TELEMETRY] {json.dumps(payload) if isinstance(payload, (dict, list)) else payload}"
+    token = None
+    if isinstance(payload, dict):
+        token = _extract_client_token(payload, request)
+    else:
+        token = _extract_client_token({}, request)
+
+    token_prefix = f"[token={token}]" if token else ""
+    log_msg = f"[{ts}] [SHORTCUT_TELEMETRY]{token_prefix} {json.dumps(payload) if isinstance(payload, (dict, list)) else payload}"
     print(log_msg, flush=True)
     logger.info("%s", log_msg)
 
-    return {
+    resp = {
         "status": "logged",
         "timestamp": ts,
     }
+    if token:
+        resp["token"] = token
+    return resp
 
 
 @router.post("/api/admin/sms-simulator")
