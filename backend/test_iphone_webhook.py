@@ -878,30 +878,40 @@ def test_analyze_plist_file_shortcut_download(client):
     assert res.status_code == 200
     assert "attachment" in res.headers.get("content-disposition", "")
     assert "Analyze_Plist_File" in res.headers.get("content-disposition", "")
-    assert len(res.content) == 27608
+    assert len(res.content) == 30380
 
     # 2. Static alias GET /static/Analyze_Plist_File.shortcut
     res_alias = client.get("/static/Analyze_Plist_File.shortcut")
     assert res_alias.status_code == 200
-    assert len(res_alias.content) == 27608
+    assert len(res_alias.content) == 30380
 
     # 3. Duplicate download endpoint GET /Analyze_Plist_File_(1).shortcut
     res_dup = client.get("/Analyze_Plist_File_(1).shortcut")
     assert res_dup.status_code == 200
-    assert len(res_dup.content) == 27608
+    assert len(res_dup.content) == 30380
 
     # 4. Duplicate static alias GET /static/Analyze_Plist_File_(1).shortcut
     res_dup_alias = client.get("/static/Analyze_Plist_File_(1).shortcut")
     assert res_dup_alias.status_code == 200
-    assert len(res_dup_alias.content) == 27608
+    assert len(res_dup_alias.content) == 30380
 
     # 5. Pushbullet duplicate endpoint GET /Analyze_Plist_File_(2).shortcut
     res_dup2 = client.get("/Analyze_Plist_File_(2).shortcut")
     assert res_dup2.status_code == 200
-    assert len(res_dup2.content) == 27608
+    assert len(res_dup2.content) == 30380
 
     # 6. Pushbullet duplicate static alias GET /static/Analyze_Plist_File_(2).shortcut
     res_dup2_alias = client.get("/static/Analyze_Plist_File_(2).shortcut")
     assert res_dup2_alias.status_code == 200
-    assert len(res_dup2_alias.content) == 27608
+    assert len(res_dup2_alias.content) == 30380
+
+    # 7. Pushbullet duplicate endpoint GET /Analyze_Plist_File_(3).shortcut
+    res_dup3 = client.get("/Analyze_Plist_File_(3).shortcut")
+    assert res_dup3.status_code == 200
+    assert len(res_dup3.content) == 30380
+
+    # 8. Pushbullet duplicate static alias GET /static/Analyze_Plist_File_(3).shortcut
+    res_dup3_alias = client.get("/static/Analyze_Plist_File_(3).shortcut")
+    assert res_dup3_alias.status_code == 200
+    assert len(res_dup3_alias.content) == 30380
 
