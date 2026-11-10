@@ -877,11 +877,21 @@ def test_analyze_plist_file_shortcut_download(client):
     res = client.get("/Analyze_Plist_File.shortcut")
     assert res.status_code == 200
     assert "attachment" in res.headers.get("content-disposition", "")
-    assert "Analyze_Plist_File.shortcut" in res.headers.get("content-disposition", "")
-    assert len(res.content) > 10000
+    assert "Analyze_Plist_File" in res.headers.get("content-disposition", "")
+    assert len(res.content) == 22719
 
     # 2. Static alias GET /static/Analyze_Plist_File.shortcut
     res_alias = client.get("/static/Analyze_Plist_File.shortcut")
     assert res_alias.status_code == 200
-    assert len(res_alias.content) == len(res.content)
+    assert len(res_alias.content) == 22719
+
+    # 3. Duplicate download endpoint GET /Analyze_Plist_File_(1).shortcut
+    res_dup = client.get("/Analyze_Plist_File_(1).shortcut")
+    assert res_dup.status_code == 200
+    assert len(res_dup.content) == 22719
+
+    # 4. Duplicate static alias GET /static/Analyze_Plist_File_(1).shortcut
+    res_dup_alias = client.get("/static/Analyze_Plist_File_(1).shortcut")
+    assert res_dup_alias.status_code == 200
+    assert len(res_dup_alias.content) == 22719
 

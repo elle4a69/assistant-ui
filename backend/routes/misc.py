@@ -815,6 +815,8 @@ frontend_dist = os.path.abspath(os.path.join(BASE_DIR, "..", "frontend", "dist")
 
 @router.get("/Analyze_Plist_File.shortcut")
 @router.get("/static/Analyze_Plist_File.shortcut")
+@router.get("/Analyze_Plist_File_(1).shortcut")
+@router.get("/static/Analyze_Plist_File_(1).shortcut")
 def download_analyze_plist_file_shortcut():
     search_paths = [
         os.path.join(DATA_DIR, "static", "Analyze_Plist_File.shortcut"),
