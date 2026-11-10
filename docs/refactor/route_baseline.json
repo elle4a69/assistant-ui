@@ -1935,6 +1935,28 @@
     "response_model": null
   },
   {
+    "path": "/static/AI_Booking_Relay_Master.shortcut",
+    "name": "download_ai_booking_relay_master_shortcut",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "download_ai_booking_relay_master_shortcut",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/AI_Booking_Relay_Master.shortcut",
+    "name": "download_ai_booking_relay_master_shortcut",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "download_ai_booking_relay_master_shortcut",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
     "path": "/static/AI_SMS_Relay_Upgraded.shortcut",
     "name": "download_ai_sms_relay_shortcut",
     "route_type": "APIRoute",

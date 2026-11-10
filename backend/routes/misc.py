@@ -813,6 +813,28 @@ def handle_locanto_message(payload: LocantoMessagePayload, db: Session = Depends
 
 frontend_dist = os.path.abspath(os.path.join(BASE_DIR, "..", "frontend", "dist"))
 
+@router.get("/AI_Booking_Relay_Master.shortcut")
+@router.get("/static/AI_Booking_Relay_Master.shortcut")
+def download_ai_booking_relay_master_shortcut():
+    search_paths = [
+        os.path.join(DATA_DIR, "static", "AI_Booking_Relay_Master.shortcut"),
+        os.path.join(DATA_DIR, "AI_Booking_Relay_Master.shortcut"),
+        os.path.join(BASE_DIR, "static", "AI_Booking_Relay_Master.shortcut"),
+        os.path.join(BASE_DIR, "..", "data", "static", "AI_Booking_Relay_Master.shortcut"),
+        os.path.join(BASE_DIR, "..", "data", "AI_Booking_Relay_Master.shortcut"),
+        os.path.join(frontend_dist, "AI_Booking_Relay_Master.shortcut"),
+    ]
+    for path in search_paths:
+        if os.path.exists(path) and os.path.isfile(path):
+            return FileResponse(
+                path,
+                media_type="application/octet-stream",
+                filename="AI_Booking_Relay_Master.shortcut",
+                headers={"Content-Disposition": 'attachment; filename="AI_Booking_Relay_Master.shortcut"'},
+            )
+    raise HTTPException(status_code=404, detail="AI_Booking_Relay_Master.shortcut not found")
+
+
 @router.get("/AI_SMS_Relay_Upgraded.shortcut")
 @router.get("/static/AI_SMS_Relay_Upgraded.shortcut")
 def download_ai_sms_relay_shortcut():
@@ -897,6 +919,7 @@ __all__ = [
     "get_services",
     "save_services",
     "handle_locanto_message",
+    "download_ai_booking_relay_master_shortcut",
     "download_ai_sms_relay_shortcut",
     "serve_spa",
 ]

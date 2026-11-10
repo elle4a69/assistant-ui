@@ -744,3 +744,74 @@ def test_iphone_webhook_sliding_window_deduplication(client, test_db, capsys):
         msgs2 = db.query(Message).filter(Message.thread_id == thread_id, Message.role == "customer").all()
         assert len(msgs2) == 1
 
+def test_unified_master_shortcut_generation_and_download(client):
+    import plistlib
+    import os
+
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    shortcut_file = os.path.join(repo_root, "AI_Booking_Relay_Master.shortcut")
+    plist_file = os.path.join(repo_root, "AI_Booking_Relay_Master.plist")
+
+    assert os.path.exists(shortcut_file), "AI_Booking_Relay_Master.shortcut does not exist"
+    assert os.path.exists(plist_file), "AI_Booking_Relay_Master.plist does not exist"
+
+    # 1. Parse binary shortcut
+    with open(shortcut_file, "rb") as f:
+        data = plistlib.load(f)
+
+    assert data.get("WFWorkflowHasShortcutInputVariables") is True
+    actions = data.get("WFWorkflowActions", [])
+    assert len(actions) == 27, f"Expected 27 actions, got {len(actions)}"
+
+    # Check Import Questions
+    questions = data.get("WFWorkflowImportQuestions", [])
+    assert len(questions) == 1
+    assert questions[0]["ParameterKey"] == "WFTextActionText"
+    assert "CLIENT_01" in questions[0]["DefaultValue"]
+
+    # Verify Action 0: Text Token
+    assert actions[0]["WFWorkflowActionIdentifier"] == "is.workflow.actions.gettext"
+    assert actions[0]["WFWorkflowActionParameters"]["WFTextActionText"] == "CLIENT_01"
+
+    # Verify Action 1: Set Variable Tenant Token
+    assert actions[1]["WFWorkflowActionIdentifier"] == "is.workflow.actions.setvariable"
+    assert actions[1]["WFWorkflowActionParameters"]["WFVariableName"] == "Tenant Token"
+
+    # Verify Action 2: Conditional on Shortcut Input
+    assert actions[2]["WFWorkflowActionIdentifier"] == "is.workflow.actions.conditional"
+    assert actions[2]["WFWorkflowActionParameters"]["WFControlFlowMode"] == 0
+
+    # Verify Action 3: Inbound POST
+    assert actions[3]["WFWorkflowActionIdentifier"] == "is.workflow.actions.downloadurl"
+    assert actions[3]["WFWorkflowActionParameters"]["WFHTTPMethod"] == "POST"
+    assert "webhook/inbound" in actions[3]["WFWorkflowActionParameters"]["WFURL"]
+
+    # Verify Action 4: Otherwise
+    assert actions[4]["WFWorkflowActionParameters"]["WFControlFlowMode"] == 1
+
+    # Verify Action 6: Outbound GET with token
+    assert actions[6]["WFWorkflowActionParameters"]["WFHTTPMethod"] == "GET"
+    assert "webhook/outbound?token=" in actions[6]["WFWorkflowActionParameters"]["WFURL"]["Value"]["string"]
+
+    # Verify Action 18 & 20: SendMessage
+    assert actions[18]["WFWorkflowActionIdentifier"] == "is.workflow.actions.sendmessage"
+    assert actions[18]["WFWorkflowActionParameters"]["ShowWhenRun"] is False
+    assert actions[20]["WFWorkflowActionIdentifier"] == "is.workflow.actions.sendmessage"
+    assert actions[20]["WFWorkflowActionParameters"]["ShowWhenRun"] is False
+
+    # Verify Action 22: Sent Ack POST
+    assert actions[22]["WFWorkflowActionParameters"]["WFHTTPMethod"] == "POST"
+    assert "webhook/sent" in actions[22]["WFWorkflowActionParameters"]["WFURL"]
+
+    # 2. Test Download Endpoint GET /AI_Booking_Relay_Master.shortcut
+    res_dl = client.get("/AI_Booking_Relay_Master.shortcut")
+    assert res_dl.status_code == 200
+    assert "attachment" in res_dl.headers.get("content-disposition", "")
+    assert "AI_Booking_Relay_Master.shortcut" in res_dl.headers.get("content-disposition", "")
+    assert len(res_dl.content) > 1000
+
+    # 3. Test Static Alias GET /static/AI_Booking_Relay_Master.shortcut
+    res_alias = client.get("/static/AI_Booking_Relay_Master.shortcut")
+    assert res_alias.status_code == 200
+    assert len(res_alias.content) == len(res_dl.content)
+
