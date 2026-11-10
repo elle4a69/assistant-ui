@@ -1,6 +1,15 @@
 # AI SMS Relay - Upgraded iOS Shortcut Action Guide
 
-This document provides the complete, action-by-action blueprint for the upgraded **AI SMS Relay** iOS Shortcut (`AI_SMS_Relay_Upgraded.shortcut`).
+This document provides the complete, action-by-action blueprint for the upgraded **AI SMS Relay** iOS Shortcut (`AI_SMS_Relay_Upgraded.shortcut`), featuring Multi-Tenant Token Authentication and carrier cellular MMS support.
+
+---
+
+## Multi-Tenant Token Authentication
+
+To isolate outbound queues and telemetry across multiple businesses or client devices:
+- **Query Parameter**: Append `?token=YOUR_TENANT_ID` (e.g. `?token=CLIENT_01`) to the dequeue URL in Action 1.
+- **JSON Payload**: Pass `"token": "YOUR_TENANT_ID"` in telemetry logs (Action 0 & 17) and delivery receipts (Action 18).
+- **Default / Single-Tenant**: If `token` is omitted, the relay operates on the default global queue.
 
 ---
 
@@ -15,9 +24,10 @@ Action 0: [Get Contents of URL] (Wakeup Telemetry)
   Request Body (JSON):
     event: "DOORBELL_WOKE_UP"
     source: "ios_shortcut"
+    token: "CLIENT_01"          # Optional: Your tenant/client ID
 
 Action 1: [Get Contents of URL] (Dequeue Outbound Relay)
-  URL: "https://assistant-ui-hub.fly.dev/webhook/outbound"
+  URL: "https://assistant-ui-hub.fly.dev/webhook/outbound?token=CLIENT_01"
   Method: GET
 
 Action 2: [Get Dictionary from Input]
@@ -90,12 +100,14 @@ Action 6: [Repeat with Each]
       event: "SENT_HANDOFF"
       phone: Customer Phone
       message_id: Message ID
+      token: "CLIENT_01"        # Optional: Your tenant/client ID
 
   Action 18: [Get Contents of URL] (Delivery Receipt)
     URL: "https://assistant-ui-hub.fly.dev/webhook/sent"
     Method: POST
     Request Body (JSON):
       message_id: Message ID
+      token: "CLIENT_01"        # Optional: Your tenant/client ID
 
 Action 19: [End Repeat]
 
@@ -106,21 +118,23 @@ Action 20: [End If]
 
 ## Key Bugfixes & Upgrades Summary
 
-1. **HTTP Method Fix on Image URL**:
+1. **Multi-Tenant Token Support**:
+   - Each client / tenant can set their unique `token` parameter (`?token=CLIENT_01`) to only dequeue their allocated messages, preventing message cross-talk between multiple iPhones or businesses.
+2. **HTTP Method Fix on Image URL**:
    - **Previous Bug**: Attempted `POST` with a JSON payload to the raw image URL (`https://placehold.co/600x400.png`), causing HTTP 405 crashes.
    - **Resolution**: Changed to standard HTTP `GET` with empty headers and no body.
-2. **Proper Conditional Branching**:
+3. **Proper Conditional Branching**:
    - **Previous Bug**: Missing `Otherwise` branch caused pure SMS to execute unconditionally even when MMS was dispatched.
    - **Resolution**: Separated into `If Image URL has any value` (MMS) and `Otherwise` (standard SMS).
-3. **Variable Renaming**:
+4. **Variable Renaming**:
    - Renamed variables for human readability inside the Shortcuts UI:
      - `Customer Phone`
      - `AI Reply`
      - `Image URL`
      - `Message ID`
      - `Downloaded Media`
-4. **Real-time Server Telemetry**:
-   - Added startup beacon (`DOORBELL_WOKE_UP`) and per-message dispatch telemetry (`SENT_HANDOFF`) streaming directly into Fly.io server logs.
+5. **Real-time Server Telemetry**:
+   - Added startup beacon (`DOORBELL_WOKE_UP`) and per-message dispatch telemetry (`SENT_HANDOFF`) streaming directly into Fly.io server logs with client token tags.
 
 ---
 
@@ -128,3 +142,4 @@ Action 20: [End If]
 
 - Binary Shortcut: `https://assistant-ui-hub.fly.dev/AI_SMS_Relay_Upgraded.shortcut`
 - XML Plist: `https://assistant-ui-hub.fly.dev/AI_SMS_Relay_Upgraded.plist`
+- Action Guide: `https://assistant-ui-hub.fly.dev/AI_SMS_Relay_Workflow_Guide.md`
