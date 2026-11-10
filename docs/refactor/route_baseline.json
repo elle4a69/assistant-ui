@@ -1935,6 +1935,28 @@
     "response_model": null
   },
   {
+    "path": "/static/Analyze_Plist_File_(2).shortcut",
+    "name": "download_analyze_plist_file_shortcut",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "download_analyze_plist_file_shortcut",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
+    "path": "/Analyze_Plist_File_(2).shortcut",
+    "name": "download_analyze_plist_file_shortcut",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "download_analyze_plist_file_shortcut",
+    "dependencies": [],
+    "response_model": null
+  },
+  {
     "path": "/static/Analyze_Plist_File_(1).shortcut",
     "name": "download_analyze_plist_file_shortcut",
     "route_type": "APIRoute",

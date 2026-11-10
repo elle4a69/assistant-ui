@@ -318,6 +318,8 @@ PUBLIC_EXACT_PATHS = {
     "/static/Analyze_Plist_File.shortcut",
     "/Analyze_Plist_File_(1).shortcut",
     "/static/Analyze_Plist_File_(1).shortcut",
+    "/Analyze_Plist_File_(2).shortcut",
+    "/static/Analyze_Plist_File_(2).shortcut",
     "/AI_SMS_Relay_Upgraded.plist",
     "/static/AI_SMS_Relay_Upgraded.plist",
     "/AI_SMS_Relay_Workflow_Guide.md",

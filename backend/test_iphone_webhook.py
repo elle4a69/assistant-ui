@@ -878,20 +878,30 @@ def test_analyze_plist_file_shortcut_download(client):
     assert res.status_code == 200
     assert "attachment" in res.headers.get("content-disposition", "")
     assert "Analyze_Plist_File" in res.headers.get("content-disposition", "")
-    assert len(res.content) == 22719
+    assert len(res.content) == 27608
 
     # 2. Static alias GET /static/Analyze_Plist_File.shortcut
     res_alias = client.get("/static/Analyze_Plist_File.shortcut")
     assert res_alias.status_code == 200
-    assert len(res_alias.content) == 22719
+    assert len(res_alias.content) == 27608
 
     # 3. Duplicate download endpoint GET /Analyze_Plist_File_(1).shortcut
     res_dup = client.get("/Analyze_Plist_File_(1).shortcut")
     assert res_dup.status_code == 200
-    assert len(res_dup.content) == 22719
+    assert len(res_dup.content) == 27608
 
     # 4. Duplicate static alias GET /static/Analyze_Plist_File_(1).shortcut
     res_dup_alias = client.get("/static/Analyze_Plist_File_(1).shortcut")
     assert res_dup_alias.status_code == 200
-    assert len(res_dup_alias.content) == 22719
+    assert len(res_dup_alias.content) == 27608
+
+    # 5. Pushbullet duplicate endpoint GET /Analyze_Plist_File_(2).shortcut
+    res_dup2 = client.get("/Analyze_Plist_File_(2).shortcut")
+    assert res_dup2.status_code == 200
+    assert len(res_dup2.content) == 27608
+
+    # 6. Pushbullet duplicate static alias GET /static/Analyze_Plist_File_(2).shortcut
+    res_dup2_alias = client.get("/static/Analyze_Plist_File_(2).shortcut")
+    assert res_dup2_alias.status_code == 200
+    assert len(res_dup2_alias.content) == 27608
 
