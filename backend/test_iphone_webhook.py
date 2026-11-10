@@ -870,3 +870,18 @@ async def test_gateway_heartbeat_worker(monkeypatch, capsys):
     assert "[Gateway Heartbeat WARNING]" in captured2.out
     assert "offline or unreachable" in captured2.out
 
+def test_analyze_plist_file_shortcut_download(client):
+    import os
+
+    # 1. Download endpoint GET /Analyze_Plist_File.shortcut
+    res = client.get("/Analyze_Plist_File.shortcut")
+    assert res.status_code == 200
+    assert "attachment" in res.headers.get("content-disposition", "")
+    assert "Analyze_Plist_File.shortcut" in res.headers.get("content-disposition", "")
+    assert len(res.content) > 10000
+
+    # 2. Static alias GET /static/Analyze_Plist_File.shortcut
+    res_alias = client.get("/static/Analyze_Plist_File.shortcut")
+    assert res_alias.status_code == 200
+    assert len(res_alias.content) == len(res.content)
+

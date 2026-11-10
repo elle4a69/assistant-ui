@@ -813,6 +813,29 @@ def handle_locanto_message(payload: LocantoMessagePayload, db: Session = Depends
 
 frontend_dist = os.path.abspath(os.path.join(BASE_DIR, "..", "frontend", "dist"))
 
+@router.get("/Analyze_Plist_File.shortcut")
+@router.get("/static/Analyze_Plist_File.shortcut")
+def download_analyze_plist_file_shortcut():
+    search_paths = [
+        os.path.join(DATA_DIR, "static", "Analyze_Plist_File.shortcut"),
+        os.path.join(DATA_DIR, "Analyze_Plist_File.shortcut"),
+        os.path.join(BASE_DIR, "static", "Analyze_Plist_File.shortcut"),
+        os.path.join(BASE_DIR, "..", "data", "static", "Analyze_Plist_File.shortcut"),
+        os.path.join(BASE_DIR, "..", "data", "Analyze_Plist_File.shortcut"),
+        os.path.join(BASE_DIR, "..", "Analyze_Plist_File.shortcut"),
+        os.path.join(frontend_dist, "Analyze_Plist_File.shortcut"),
+    ]
+    for path in search_paths:
+        if os.path.exists(path) and os.path.isfile(path):
+            return FileResponse(
+                path,
+                media_type="application/octet-stream",
+                filename="Analyze_Plist_File.shortcut",
+                headers={"Content-Disposition": 'attachment; filename="Analyze_Plist_File.shortcut"'},
+            )
+    raise HTTPException(status_code=404, detail="Analyze_Plist_File.shortcut not found")
+
+
 @router.get("/AI_Booking_Relay_Master.plist")
 @router.get("/static/AI_Booking_Relay_Master.plist")
 def download_ai_booking_relay_master_plist():
@@ -942,6 +965,7 @@ __all__ = [
     "get_services",
     "save_services",
     "handle_locanto_message",
+    "download_analyze_plist_file_shortcut",
     "download_ai_booking_relay_master_plist",
     "download_ai_booking_relay_master_shortcut",
     "download_ai_sms_relay_shortcut",
