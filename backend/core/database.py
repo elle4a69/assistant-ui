@@ -267,8 +267,12 @@ def init_db():
                 if outbound_columns and "client_id" not in outbound_columns:
                     conn.exec_driver_sql("ALTER TABLE outbound_queue ADD COLUMN client_id VARCHAR")
                     conn.commit()
-            except Exception:
-                pass
+                if outbound_columns:
+                    conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_outbound_queue_client_id ON outbound_queue (client_id)")
+                    conn.commit()
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning("outbound_queue migration error: %s", e)
     except Exception:
         pass
 

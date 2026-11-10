@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from backend.core.config import PROMPTS_DIR
-    from backend.core.database import get_db
+    from backend.core.database import get_db, init_db
     from backend.core.clients import mobilemessage_service, canonical_phone_number
     from backend.core.utils import _dyn
     from backend.models.domain import Thread, Message, OutboundQueueMessage
@@ -33,7 +33,7 @@ try:
     from backend.services.relay_service import trigger_gateway_wakeup
 except ImportError:
     from core.config import PROMPTS_DIR
-    from core.database import get_db
+    from core.database import get_db, init_db
     from core.clients import mobilemessage_service, canonical_phone_number
     from core.utils import _dyn
     from models.domain import Thread, Message, OutboundQueueMessage
@@ -213,10 +213,32 @@ def _dequeue_pending_outbound_messages(db: Session, client_id: Optional[str] = N
         query = query.filter(outbound_cls.client_id.is_(None))
 
     try:
-        pending_rows = query.with_for_update(skip_locked=True).all()
+        try:
+            pending_rows = query.with_for_update(skip_locked=True).all()
+        except Exception:
+            db.rollback()
+            pending_rows = query.all()
     except Exception:
+        # Gracefully handle missing client_id column during cold startup
         db.rollback()
-        pending_rows = query.all()
+        init_db_fn = _dyn("init_db", init_db)
+        if callable(init_db_fn):
+            try:
+                init_db_fn()
+            except Exception:
+                pass
+        try:
+            pending_rows = query.all()
+        except Exception:
+            try:
+                fallback_query = (
+                    db.query(outbound_cls)
+                    .filter(outbound_cls.status == "pending")
+                    .order_by(outbound_cls.created_at.asc())
+                )
+                pending_rows = fallback_query.all()
+            except Exception:
+                pending_rows = []
 
     if not pending_rows:
         return {
@@ -231,15 +253,15 @@ def _dequeue_pending_outbound_messages(db: Session, client_id: Optional[str] = N
     db.commit()
 
     first = pending_rows[0]
-    resp = {
+    return {
         "has_message": "yes",
         "messages": [
             {
                 "id": r.id,
                 "phone": r.phone,
                 "reply": r.message,
-                "image_url": r.image_url,
-                **({"client_id": r.client_id} if getattr(r, "client_id", None) else {}),
+                "image_url": r.image_url or "",
+                "client_id": getattr(r, "client_id", "") or "",
             }
             for r in pending_rows
         ],
@@ -247,11 +269,9 @@ def _dequeue_pending_outbound_messages(db: Session, client_id: Optional[str] = N
         "phone": first.phone,
         "reply": first.message,
         "message": first.message,
-        "image_url": first.image_url,
+        "image_url": first.image_url or "",
+        "client_id": getattr(first, "client_id", "") or "",
     }
-    if getattr(first, "client_id", None):
-        resp["client_id"] = first.client_id
-    return resp
 
 
 @router.get("/api/v1/relay/sms/pending")
