@@ -776,6 +776,8 @@ def test_unified_master_shortcut_generation_and_download(client):
     # Verify Action 1: Set Variable Tenant Token
     assert actions[1]["WFWorkflowActionIdentifier"] == "is.workflow.actions.setvariable"
     assert actions[1]["WFWorkflowActionParameters"]["WFVariableName"] == "Tenant Token"
+    assert actions[1]["WFWorkflowActionParameters"]["WFInput"]["Value"]["OutputName"] == "Token Text"
+    assert actions[1]["WFWorkflowActionParameters"]["WFInput"]["Value"]["OutputUUID"] == actions[0]["WFWorkflowActionParameters"]["UUID"]
 
     # Verify Action 2: Conditional on Shortcut Input
     assert actions[2]["WFWorkflowActionIdentifier"] == "is.workflow.actions.conditional"
@@ -791,7 +793,10 @@ def test_unified_master_shortcut_generation_and_download(client):
 
     # Verify Action 6: Outbound GET with token
     assert actions[6]["WFWorkflowActionParameters"]["WFHTTPMethod"] == "GET"
-    assert "webhook/outbound?token=" in actions[6]["WFWorkflowActionParameters"]["WFURL"]["Value"]["string"]
+    url_str = actions[6]["WFWorkflowActionParameters"]["WFURL"]["Value"]["string"]
+    assert "webhook/outbound?token=" in url_str
+    assert "{56, 1}" in actions[6]["WFWorkflowActionParameters"]["WFURL"]["Value"]["attachmentsByRange"]
+    assert url_str[56:57] == "\ufffc" 
 
     # Verify Action 18 & 20: SendMessage
     assert actions[18]["WFWorkflowActionIdentifier"] == "is.workflow.actions.sendmessage"
@@ -914,4 +919,34 @@ def test_analyze_plist_file_shortcut_download(client):
     res_dup3_alias = client.get("/static/Analyze_Plist_File_(3).shortcut")
     assert res_dup3_alias.status_code == 200
     assert len(res_dup3_alias.content) == 30380
+
+def test_outbound_untokened_query_fallback_and_token_stripping(client, test_db):
+    from backend.models.domain import OutboundQueueMessage
+
+    # 1. Enqueue an outbound message for a specific tenant
+    enqueue_res = client.post("/webhook/outbound", json={
+        "phone": "+61412345678",
+        "reply": "Your booking is confirmed!",
+        "token": "CLIENT_01"
+    })
+    assert enqueue_res.status_code == 200
+    msg_id = enqueue_res.json()["id"]
+
+    # 2. Dequeue with untokened query (?token= or empty) - must fall back and return the message
+    pending_res = client.get("/webhook/outbound?token=")
+    assert pending_res.status_code == 200
+    data = pending_res.json()
+    assert data["has_message"] == "yes"
+    assert data["id"] == msg_id
+    assert data["phone"] == "+61412345678"
+
+    # 3. Verify telemetry stripping trailing newlines and whitespace
+    log_res = client.post("/webhook/log", json={
+        "event": "DOORBELL_WOKE_UP",
+        "token": "CLIENT_01\n\n",
+        "source": "ios_shortcut"
+    })
+    assert log_res.status_code == 200
+    assert log_res.json()["status"] == "logged"
+    assert log_res.json()["token"] == "CLIENT_01"
 

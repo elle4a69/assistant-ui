@@ -303,6 +303,23 @@ def _dequeue_pending_outbound_messages(db: Session, client_id: Optional[str] = N
             except Exception:
                 pending_rows = []
 
+    # Resilient fallback: if no untokened messages are found, fall back to the oldest
+    # pending messages so an untokened query NEVER leaves messages stranded!
+    if not pending_rows and not client_id:
+        try:
+            fallback_query = (
+                db.query(outbound_cls)
+                .filter(outbound_cls.status == "pending")
+                .order_by(outbound_cls.created_at.asc())
+            )
+            try:
+                pending_rows = fallback_query.with_for_update(skip_locked=True).all()
+            except Exception:
+                db.rollback()
+                pending_rows = fallback_query.all()
+        except Exception:
+            pass
+
     if not pending_rows:
         return {
             "has_message": "no",
@@ -557,6 +574,9 @@ async def post_shortcut_telemetry_log(request: Request):
 
     token = None
     if isinstance(payload, dict):
+        for k in ("token", "client_id"):
+            if k in payload and isinstance(payload[k], str):
+                payload[k] = payload[k].strip()
         token = _extract_client_token(payload, request)
     else:
         token = _extract_client_token({}, request)

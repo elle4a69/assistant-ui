@@ -26,6 +26,20 @@
 			<dict>
 				<key>UUID</key>
 				<string>476AAB80-7AB8-449A-A9D9-DBDD85DC9FFC</string>
+				<key>WFInput</key>
+				<dict>
+					<key>Value</key>
+					<dict>
+						<key>OutputName</key>
+						<string>Token Text</string>
+						<key>OutputUUID</key>
+						<string>C61B6107-77EF-426C-9D47-C1901C66F075</string>
+						<key>Type</key>
+						<string>ActionOutput</string>
+					</dict>
+					<key>WFSerializationType</key>
+					<string>WFTextTokenAttachment</string>
+				</dict>
 				<key>WFVariableName</key>
 				<string>Tenant Token</string>
 			</dict>
@@ -340,7 +354,7 @@
 					<dict>
 						<key>attachmentsByRange</key>
 						<dict>
-							<key>{45, 1}</key>
+							<key>{56, 1}</key>
 							<dict>
 								<key>Type</key>
 								<string>Variable</string>
