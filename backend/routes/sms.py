@@ -132,20 +132,22 @@ async def iphone_shortcuts_webhook(
         merged.update(inner)
         data = merged
 
-    event_val = data.get("event")
+    lookup = {str(k).lower(): v for k, v in data.items()}
+
+    event_val = lookup.get("event")
     if event_val and event_val != "sms:received":
         return {"status": "ignored", "event": event_val}
 
     raw_sender: Optional[str] = None
     for key in IPHONE_SENDER_FIELDS:
-        val = data.get(key)
+        val = lookup.get(key)
         if val is not None and str(val).strip():
             raw_sender = str(val).strip()
             break
 
     raw_body: Optional[str] = None
     for key in IPHONE_BODY_FIELDS:
-        val = data.get(key)
+        val = lookup.get(key)
         if val is not None and str(val).strip():
             raw_body = str(val).strip()
             break
@@ -155,6 +157,12 @@ async def iphone_shortcuts_webhook(
             status_code=422,
             detail="Missing or empty sender phone number or message body.",
         )
+
+    # Filter out Doorbell wake-up ping SMS from Central Gateway
+    if "doorbell" in raw_body.lower():
+        logger.info("[Doorbell Ping Filtered] Acknowledging gateway wake-up text without creating customer thread.")
+        print("[Doorbell Ping Filtered] Acknowledging gateway wake-up text without creating customer thread.", flush=True)
+        return {"status": "success", "event": "doorbell_ack"}
 
     canonical_fn = _dyn("canonical_phone_number", canonical_phone_number)
     from_phone = canonical_fn(raw_sender)

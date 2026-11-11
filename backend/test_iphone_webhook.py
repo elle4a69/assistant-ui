@@ -761,7 +761,7 @@ def test_unified_master_shortcut_generation_and_download(client):
 
     assert data.get("WFWorkflowHasShortcutInputVariables") is True
     actions = data.get("WFWorkflowActions", [])
-    assert len(actions) == 27, f"Expected 27 actions, got {len(actions)}"
+    assert len(actions) == 29, f"Expected 29 actions, got {len(actions)}"
 
     # Check Import Questions
     questions = data.get("WFWorkflowImportQuestions", [])
@@ -779,34 +779,45 @@ def test_unified_master_shortcut_generation_and_download(client):
     assert actions[1]["WFWorkflowActionParameters"]["WFInput"]["Value"]["OutputName"] == "Token Text"
     assert actions[1]["WFWorkflowActionParameters"]["WFInput"]["Value"]["OutputUUID"] == actions[0]["WFWorkflowActionParameters"]["UUID"]
 
-    # Verify Action 2: Conditional on Shortcut Input
+    # Verify Action 2: Outer If (Shortcut Input has value)
     assert actions[2]["WFWorkflowActionIdentifier"] == "is.workflow.actions.conditional"
     assert actions[2]["WFWorkflowActionParameters"]["WFControlFlowMode"] == 0
+    assert actions[2]["WFWorkflowActionParameters"]["WFCondition"] == 100
 
-    # Verify Action 3: Inbound POST
-    assert actions[3]["WFWorkflowActionIdentifier"] == "is.workflow.actions.downloadurl"
-    assert actions[3]["WFWorkflowActionParameters"]["WFHTTPMethod"] == "POST"
-    assert "webhook/inbound" in actions[3]["WFWorkflowActionParameters"]["WFURL"]
+    # Verify Action 3: Inner If (Content does not contain DOORBELL)
+    assert actions[3]["WFWorkflowActionIdentifier"] == "is.workflow.actions.conditional"
+    assert actions[3]["WFWorkflowActionParameters"]["WFControlFlowMode"] == 0
+    assert actions[3]["WFWorkflowActionParameters"]["WFCondition"] == 999
+    assert actions[3]["WFWorkflowActionParameters"]["WFConditionalActionString"] == "DOORBELL"
 
-    # Verify Action 4: Otherwise
-    assert actions[4]["WFWorkflowActionParameters"]["WFControlFlowMode"] == 1
+    # Verify Action 4: Inbound POST
+    assert actions[4]["WFWorkflowActionIdentifier"] == "is.workflow.actions.downloadurl"
+    assert actions[4]["WFWorkflowActionParameters"]["WFHTTPMethod"] == "POST"
+    assert "webhook/inbound" in actions[4]["WFWorkflowActionParameters"]["WFURL"]
 
-    # Verify Action 6: Outbound GET with token
-    assert actions[6]["WFWorkflowActionParameters"]["WFHTTPMethod"] == "GET"
-    url_str = actions[6]["WFWorkflowActionParameters"]["WFURL"]["Value"]["string"]
+    # Verify Action 5: Exit (Stop This Shortcut)
+    assert actions[5]["WFWorkflowActionIdentifier"] == "is.workflow.actions.exit"
+
+    # Verify Actions 6 & 7: End Inner If & End Outer If
+    assert actions[6]["WFWorkflowActionParameters"]["WFControlFlowMode"] == 2
+    assert actions[7]["WFWorkflowActionParameters"]["WFControlFlowMode"] == 2
+
+    # Verify Action 9: Outbound GET with dynamic token range
+    assert actions[9]["WFWorkflowActionParameters"]["WFHTTPMethod"] == "GET"
+    url_str = actions[9]["WFWorkflowActionParameters"]["WFURL"]["Value"]["string"]
     assert "webhook/outbound?token=" in url_str
-    assert "{56, 1}" in actions[6]["WFWorkflowActionParameters"]["WFURL"]["Value"]["attachmentsByRange"]
-    assert url_str[56:57] == "\ufffc" 
+    assert "{56, 1}" in actions[9]["WFWorkflowActionParameters"]["WFURL"]["Value"]["attachmentsByRange"]
+    assert url_str[56:57] == "\ufffc"
 
-    # Verify Action 18 & 20: SendMessage
-    assert actions[18]["WFWorkflowActionIdentifier"] == "is.workflow.actions.sendmessage"
-    assert actions[18]["WFWorkflowActionParameters"]["ShowWhenRun"] is False
-    assert actions[20]["WFWorkflowActionIdentifier"] == "is.workflow.actions.sendmessage"
-    assert actions[20]["WFWorkflowActionParameters"]["ShowWhenRun"] is False
+    # Verify Action 21 & 23: SendMessage (MMS & SMS)
+    assert actions[21]["WFWorkflowActionIdentifier"] == "is.workflow.actions.sendmessage"
+    assert actions[21]["WFWorkflowActionParameters"]["ShowWhenRun"] is False
+    assert actions[23]["WFWorkflowActionIdentifier"] == "is.workflow.actions.sendmessage"
+    assert actions[23]["WFWorkflowActionParameters"]["ShowWhenRun"] is False
 
-    # Verify Action 22: Sent Ack POST
-    assert actions[22]["WFWorkflowActionParameters"]["WFHTTPMethod"] == "POST"
-    assert "webhook/sent" in actions[22]["WFWorkflowActionParameters"]["WFURL"]
+    # Verify Action 25: Sent Ack POST
+    assert actions[25]["WFWorkflowActionParameters"]["WFHTTPMethod"] == "POST"
+    assert "webhook/sent" in actions[25]["WFWorkflowActionParameters"]["WFURL"]
 
     # 2. Test Download Endpoint GET /AI_Booking_Relay_Master.shortcut
     res_dl = client.get("/AI_Booking_Relay_Master.shortcut")
@@ -950,3 +961,29 @@ def test_outbound_untokened_query_fallback_and_token_stripping(client, test_db):
     assert log_res.json()["status"] == "logged"
     assert log_res.json()["token"] == "CLIENT_01"
 
+
+
+def test_doorbell_inbound_ping_filtered(client):
+    # 1. Exact string from Central Android Gateway
+    res1 = client.post("/webhook/inbound", json={
+        "sender": "+61436281573",
+        "message": "DOORBELL PING from Central Android Gateway"
+    })
+    assert res1.status_code == 200
+    assert res1.json() == {"status": "success", "event": "doorbell_ack"}
+
+    # 2. Case-insensitive "doorbell" in body
+    res2 = client.post("/webhook/inbound", json={
+        "sender": "+61436281573",
+        "message": "Doorbell wake-up signal"
+    })
+    assert res2.status_code == 200
+    assert res2.json() == {"status": "success", "event": "doorbell_ack"}
+
+    # 3. Form-encoded field variations
+    res3 = client.post("/webhook/inbound", data={
+        "From": "+61436281573",
+        "Body": "DOORBELL ping"
+    })
+    assert res3.status_code == 200
+    assert res3.json() == {"status": "success", "event": "doorbell_ack"}
