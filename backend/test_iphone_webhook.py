@@ -1054,7 +1054,7 @@ def test_unified_ai_booking_relay_shortcut_generation_and_endpoints(client):
 
     assert data.get("WFWorkflowHasShortcutInputVariables") is True
     actions = data.get("WFWorkflowActions", [])
-    assert len(actions) == 29, f"Expected 29 actions, got {len(actions)}"
+    assert len(actions) == 46, f"Expected 46 actions, got {len(actions)}"
 
     # Single Import Question
     questions = data.get("WFWorkflowImportQuestions", [])
@@ -1072,25 +1072,41 @@ def test_unified_ai_booking_relay_shortcut_generation_and_endpoints(client):
     assert actions[1]["WFWorkflowActionIdentifier"] == "is.workflow.actions.setvariable"
     assert actions[1]["WFWorkflowActionParameters"]["WFVariableName"] == "Tenant Token"
 
-    # Action 2: Trigger Details
-    assert actions[2]["WFWorkflowActionIdentifier"] == "is.workflow.actions.gettext"
-    assert actions[2]["WFWorkflowActionParameters"]["CustomOutputName"] == "Trigger Details"
+    # Remote Action Telemetry: Battery & Wi-Fi
+    assert actions[2]["WFWorkflowActionIdentifier"] == "is.workflow.actions.getbatterylevel"
+    assert actions[3]["WFWorkflowActionIdentifier"] == "is.workflow.actions.getwifinetworkname"
 
-    # Action 3: Trigger Matches regex
-    assert actions[3]["WFWorkflowActionIdentifier"] == "is.workflow.actions.text.match"
-    assert actions[3]["WFWorkflowActionParameters"]["CustomOutputName"] == "Trigger Matches"
-    assert "432172148" in actions[3]["WFWorkflowActionParameters"]["WFMatchTextPattern"]
+    # Action 4: Trigger Details
+    assert actions[4]["WFWorkflowActionIdentifier"] == "is.workflow.actions.gettext"
+    assert actions[4]["WFWorkflowActionParameters"]["CustomOutputName"] == "Trigger Details"
 
-    # Action 4: If Trigger Matches (Branch on sender / trigger)
-    assert actions[4]["WFWorkflowActionIdentifier"] == "is.workflow.actions.conditional"
-    assert actions[4]["WFWorkflowActionParameters"]["WFControlFlowMode"] == 0
+    # Remote Action Safety: Panic match & GPS dispatch
+    assert actions[5]["WFWorkflowActionIdentifier"] == "is.workflow.actions.text.match"
+    assert "PANIC" in actions[5]["WFWorkflowActionParameters"]["WFMatchTextPattern"]
+    assert actions[7]["WFWorkflowActionIdentifier"] == "is.workflow.actions.getcurrentlocation"
+    assert actions[8]["WFWorkflowActionIdentifier"] == "is.workflow.actions.downloadurl"
+    assert "api/v1/relay/panic" in actions[8]["WFWorkflowActionParameters"]["WFURL"]
+
+    # Action 11: Trigger Matches regex
+    assert actions[11]["WFWorkflowActionIdentifier"] == "is.workflow.actions.text.match"
+    assert actions[11]["WFWorkflowActionParameters"]["CustomOutputName"] == "Trigger Matches"
+    assert "432172148" in actions[11]["WFWorkflowActionParameters"]["WFMatchTextPattern"]
+
+    # Action 12: If Trigger Matches (Branch on sender / trigger)
+    assert actions[12]["WFWorkflowActionIdentifier"] == "is.workflow.actions.conditional"
+    assert actions[12]["WFWorkflowActionParameters"]["WFControlFlowMode"] == 0
 
     # True Branch: Outbound Mode
-    assert actions[5]["WFWorkflowActionIdentifier"] == "is.workflow.actions.downloadurl"
-    assert "webhook/log" in actions[5]["WFWorkflowActionParameters"]["WFURL"]
-    assert actions[6]["WFWorkflowActionIdentifier"] == "is.workflow.actions.downloadurl"
-    assert actions[6]["WFWorkflowActionParameters"]["WFHTTPMethod"] == "GET"
-    assert "webhook/outbound?token=" in actions[6]["WFWorkflowActionParameters"]["WFURL"]["Value"]["string"]
+    assert actions[13]["WFWorkflowActionIdentifier"] == "is.workflow.actions.downloadurl"
+    assert "webhook/log" in actions[13]["WFWorkflowActionParameters"]["WFURL"]
+    assert actions[14]["WFWorkflowActionIdentifier"] == "is.workflow.actions.downloadurl"
+    assert actions[14]["WFWorkflowActionParameters"]["WFHTTPMethod"] == "GET"
+    assert "webhook/outbound?token=" in actions[14]["WFWorkflowActionParameters"]["WFURL"]["Value"]["string"]
+
+    # Native Apple Calendar Action in repeat loop
+    cal_actions = [a for a in actions if a.get("WFWorkflowActionIdentifier") == "is.workflow.actions.addnewevent"]
+    assert len(cal_actions) == 1
+    assert cal_actions[0]["WFWorkflowActionParameters"]["ShowWhenRun"] is False
 
     # Check ShowWhenRun: False on all Send Message actions
     send_msg_actions = [a for a in actions if a.get("WFWorkflowActionIdentifier") == "is.workflow.actions.sendmessage"]
@@ -1098,28 +1114,21 @@ def test_unified_ai_booking_relay_shortcut_generation_and_endpoints(client):
     for sa in send_msg_actions:
         assert sa["WFWorkflowActionParameters"]["ShowWhenRun"] is False
 
-    # Check Action 22: Sent Receipt POST
-    assert actions[22]["WFWorkflowActionParameters"]["WFHTTPMethod"] == "POST"
-    assert "webhook/sent" in actions[22]["WFWorkflowActionParameters"]["WFURL"]
+    # Check Sent Receipt POST
+    sent_posts = [a for a in actions if a.get("WFWorkflowActionIdentifier") == "is.workflow.actions.downloadurl" and "webhook/sent" in str(a.get("WFWorkflowActionParameters", {}).get("WFURL", ""))]
+    assert len(sent_posts) == 1
 
-    # Check Action 26: Otherwise (Inbound Mode)
-    assert actions[26]["WFWorkflowActionIdentifier"] == "is.workflow.actions.conditional"
-    assert actions[26]["WFWorkflowActionParameters"]["WFControlFlowMode"] == 1
-
-    # Check Action 27: Inbound POST
-    assert actions[27]["WFWorkflowActionIdentifier"] == "is.workflow.actions.downloadurl"
-    assert actions[27]["WFWorkflowActionParameters"]["WFHTTPMethod"] == "POST"
-    assert "webhook/inbound" in actions[27]["WFWorkflowActionParameters"]["WFURL"]
-    inbound_items = actions[27]["WFWorkflowActionParameters"]["WFJSONValues"]["Value"]["WFDictionaryFieldValueItems"]
+    # Check Inbound POST
+    inbound_posts = [a for a in actions if a.get("WFWorkflowActionIdentifier") == "is.workflow.actions.downloadurl" and "webhook/inbound" in str(a.get("WFWorkflowActionParameters", {}).get("WFURL", ""))]
+    assert len(inbound_posts) == 1
+    inbound_items = inbound_posts[0]["WFWorkflowActionParameters"]["WFJSONValues"]["Value"]["WFDictionaryFieldValueItems"]
     keys = [item["WFKey"]["Value"]["string"] for item in inbound_items]
     assert "token" in keys
     assert "sender" in keys
     assert "message" in keys
     assert "source" in keys
-
-    # Check Action 28: End If
-    assert actions[28]["WFWorkflowActionIdentifier"] == "is.workflow.actions.conditional"
-    assert actions[28]["WFWorkflowActionParameters"]["WFControlFlowMode"] == 2
+    assert "battery_level" in keys
+    assert "wifi_network" in keys
 
     # 2. Test Download Endpoint GET /AI_Booking_Relay.shortcut
     res_dl = client.get("/AI_Booking_Relay.shortcut")
@@ -1219,3 +1228,149 @@ def test_queue_retry_cap_and_failure_isolation(test_db):
         msg = db.query(OutboundQueueMessage).filter(OutboundQueueMessage.id == "exhausted-msg-1").first()
         assert msg is not None
         assert msg.status == "failed"
+
+
+def test_relay_device_telemetry_intake_and_query(client, test_db):
+    from backend.models.domain import DeviceTelemetry
+
+    # 1. Post telemetry log with battery and wifi
+    payload = {
+        "event": "DOORBELL_WOKE_UP",
+        "token": "CLIENT_TELEMETRY_01",
+        "phone": "+61436281573",
+        "battery_level": 88.5,
+        "wifi_network": "Vodafone_Office_5G",
+        "source": "ios_shortcut",
+    }
+    res_log = client.post("/webhook/log", json=payload)
+    assert res_log.status_code == 200
+    assert res_log.json()["status"] == "logged"
+
+    # Verify persisted in database
+    with test_db() as db:
+        rec = db.query(DeviceTelemetry).filter(DeviceTelemetry.token == "CLIENT_TELEMETRY_01").first()
+        assert rec is not None
+        assert rec.battery_level == 88.5
+        assert rec.wifi_network == "Vodafone_Office_5G"
+        assert rec.phone == "+61436281573"
+        assert rec.last_seen_at is not None
+
+    # 2. Query telemetry by token
+    res_get = client.get("/api/v1/relay/telemetry/CLIENT_TELEMETRY_01")
+    assert res_get.status_code == 200
+    data = res_get.json()
+    assert data["status"] == "ok"
+    assert data["token"] == "CLIENT_TELEMETRY_01"
+    assert data["phone"] == "+61436281573"
+    assert data["battery_level"] == 88.5
+    assert data["wifi_network"] == "Vodafone_Office_5G"
+    assert data["online"] is True
+
+    # 3. Query telemetry without token (returns latest)
+    res_latest = client.get("/api/v1/relay/telemetry")
+    assert res_latest.status_code == 200
+    assert res_latest.json()["token"] == "CLIENT_TELEMETRY_01"
+
+
+def test_relay_panic_beacon_and_maps_alert(client, test_db, monkeypatch):
+    from backend.models.domain import EmergencyEvent, OutboundQueueMessage
+
+    wakeups = []
+    monkeypatch.setattr(
+        "backend.routes.sms.trigger_gateway_wakeup",
+        lambda force=False: wakeups.append(force),
+    )
+
+    panic_payload = {
+        "token": "CLIENT_PANIC_01",
+        "phone": "+61436281573",
+        "lat": -37.8136,
+        "lon": 144.9631,
+        "altitude": 45.2,
+        "battery": 76.0,
+    }
+
+    # 1. POST /api/v1/relay/panic
+    res = client.post("/api/v1/relay/panic", json=panic_payload)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "alert_dispatched"
+    assert data["token"] == "CLIENT_PANIC_01"
+    assert data["phone"] == "+61436281573"
+    assert data["lat"] == -37.8136
+    assert data["lon"] == 144.9631
+    assert data["maps_url"] == "https://maps.google.com/?q=-37.8136,144.9631"
+    assert data["emergency_queue_id"] is not None
+
+    # Check emergency event persisted in DB
+    with test_db() as db:
+        event = db.query(EmergencyEvent).filter(EmergencyEvent.id == data["incident_id"]).first()
+        assert event is not None
+        assert event.token == "CLIENT_PANIC_01"
+        assert event.phone == "+61436281573"
+        assert event.latitude == -37.8136
+        assert event.longitude == 144.9631
+        assert event.altitude == 45.2
+        assert event.battery_level == 76.0
+        assert event.status == "active"
+        assert event.maps_url == "https://maps.google.com/?q=-37.8136,144.9631"
+
+        # Check outbound queue message created
+        msg = db.query(OutboundQueueMessage).filter(OutboundQueueMessage.id == data["emergency_queue_id"]).first()
+        assert msg is not None
+        assert "EMERGENCY PANIC BEACON" in msg.message
+        assert "https://maps.google.com/?q=-37.8136,144.9631" in msg.message
+        assert msg.status == "pending"
+
+    # Check gateway was triggered with force=True
+    assert len(wakeups) == 1
+    assert wakeups[0] is True
+
+    # 2. Test aliases /webhook/panic and /api/v1/relay/sos
+    res_webhook = client.post("/webhook/panic", json=panic_payload)
+    assert res_webhook.status_code == 200
+    assert res_webhook.json()["status"] == "alert_dispatched"
+
+    res_sos = client.post("/api/v1/relay/sos", json=panic_payload)
+    assert res_sos.status_code == 200
+    assert res_sos.json()["status"] == "alert_dispatched"
+
+
+def test_relay_outbound_calendar_event_payload(client, test_db):
+    # 1. Enqueue outbound message with native Apple Calendar event payload
+    enqueue_payload = {
+        "phone": "+61436281573",
+        "message": "Appointment confirmed for tomorrow at 2:00 PM!",
+        "token": "CLIENT_CAL_01",
+        "calendar_event": {
+            "title": "Haircut - Sarah",
+            "start_date": "2026-11-12 14:00",
+            "end_date": "2026-11-12 15:00",
+            "location": "Downtown Studio Suite 4B",
+            "notes": "Automated booking confirmed via AI Assistant.",
+        },
+    }
+    res_enq = client.post("/webhook/outbound", json=enqueue_payload)
+    assert res_enq.status_code == 200
+    data_enq = res_enq.json()
+    assert data_enq["status"] == "queued"
+    msg_id = data_enq["id"]
+
+    # 2. Fetch pending outbound messages via GET /webhook/outbound?token=CLIENT_CAL_01
+    res_fetch = client.get("/webhook/outbound?token=CLIENT_CAL_01")
+    assert res_fetch.status_code == 200
+    data_fetch = res_fetch.json()
+    assert data_fetch["has_message"] == "yes"
+    assert len(data_fetch["messages"]) >= 1
+
+    # Verify calendar_event is present and accurate
+    target = next((m for m in data_fetch["messages"] if m["id"] == msg_id), None)
+    assert target is not None
+    assert target["calendar_event"] is not None
+    cal = target["calendar_event"]
+    assert cal["title"] == "Haircut - Sarah"
+    assert cal["start_date"] == "2026-11-12 14:00"
+    assert cal["end_date"] == "2026-11-12 15:00"
+    assert cal["location"] == "Downtown Studio Suite 4B"
+    assert "Automated booking confirmed" in cal["notes"]
+

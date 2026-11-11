@@ -23,7 +23,7 @@ try:
     from backend.core.database import get_db, init_db
     from backend.core.clients import mobilemessage_service, canonical_phone_number
     from backend.core.utils import _dyn
-    from backend.models.domain import Thread, Message, OutboundQueueMessage
+    from backend.models.domain import Thread, Message, OutboundQueueMessage, DeviceTelemetry, EmergencyEvent
     from backend.schemas.domain import (
         WebhookSMSInput, AdminSmsSimulationInput, SmsConfirmationInput,
     )
@@ -38,7 +38,7 @@ except ImportError:
     from core.database import get_db, init_db
     from core.clients import mobilemessage_service, canonical_phone_number
     from core.utils import _dyn
-    from models.domain import Thread, Message, OutboundQueueMessage
+    from models.domain import Thread, Message, OutboundQueueMessage, DeviceTelemetry, EmergencyEvent
     from schemas.domain import (
         WebhookSMSInput, AdminSmsSimulationInput, SmsConfirmationInput,
     )
@@ -362,7 +362,16 @@ def _dequeue_pending_outbound_messages(db: Session, client_id: Optional[str] = N
             r.retry_count = (r.retry_count or 0) + 1
     db.commit()
 
+    def _parse_cal(row):
+        if hasattr(row, "calendar_data") and row.calendar_data:
+            try:
+                return json.loads(row.calendar_data)
+            except Exception:
+                return None
+        return None
+
     first = pending_rows[0]
+    first_cal = _parse_cal(first)
     return {
         "has_message": "yes",
         "messages": [
@@ -372,6 +381,7 @@ def _dequeue_pending_outbound_messages(db: Session, client_id: Optional[str] = N
                 "reply": r.message,
                 "image_url": r.image_url or "",
                 "client_id": getattr(r, "client_id", "") or "",
+                "calendar_event": _parse_cal(r),
             }
             for r in pending_rows
         ],
@@ -380,6 +390,7 @@ def _dequeue_pending_outbound_messages(db: Session, client_id: Optional[str] = N
         "reply": first.message,
         "message": first.message,
         "image_url": first.image_url or "",
+        "calendar_event": first_cal,
         "client_id": getattr(first, "client_id", "") or "",
     }
 
@@ -457,12 +468,16 @@ async def post_iphone_shortcuts_outbound(
         canonical_fn = _dyn("canonical_phone_number", canonical_phone_number)
         phone = canonical_fn(raw_phone) or raw_phone
         outbound_cls = _dyn("OutboundQueueMessage", OutboundQueueMessage)
+        cal_input = data.get("calendar_event")
+        cal_str = json.dumps(cal_input) if isinstance(cal_input, dict) else None
+
         new_msg = outbound_cls(
             id=str(uuid.uuid4()),
             phone=phone,
             message=raw_msg,
             image_url=raw_image,
             client_id=effective_client_id,
+            calendar_data=cal_str,
             status="pending",
             created_at=datetime.utcnow(),
         )
@@ -615,6 +630,53 @@ async def post_shortcut_telemetry_log(request: Request):
     log_msg = f"[{ts}] [SHORTCUT_TELEMETRY]{token_prefix} {json.dumps(payload) if isinstance(payload, (dict, list)) else payload}"
     print(log_msg, flush=True)
     logger.info("%s", log_msg)
+
+    # Persist or update device health & battery telemetry
+    if isinstance(payload, dict):
+        battery_raw = payload.get("battery_level") or payload.get("battery")
+        wifi_raw = payload.get("wifi_network") or payload.get("wifi") or payload.get("network")
+        phone_raw = payload.get("phone") or payload.get("sender")
+        source_raw = payload.get("source") or "ios_shortcut"
+        ip = request.client.host if request.client else None
+
+        eff_token = token or phone_raw or "CLIENT_01"
+        try:
+            from backend.core.database import SessionLocal
+            with SessionLocal() as db_session:
+                telem_cls = _dyn("DeviceTelemetry", DeviceTelemetry)
+                rec = db_session.query(telem_cls).filter(telem_cls.token == eff_token).first()
+                try:
+                    bat_val = float(battery_raw) if battery_raw is not None else None
+                except (ValueError, TypeError):
+                    bat_val = None
+
+                if not rec:
+                    rec = telem_cls(
+                        id=str(uuid.uuid4()),
+                        token=eff_token,
+                        phone=str(phone_raw) if phone_raw else None,
+                        battery_level=bat_val,
+                        wifi_network=str(wifi_raw) if wifi_raw else None,
+                        ip_address=ip,
+                        source=source_raw,
+                        last_seen_at=datetime.utcnow(),
+                        raw_payload=json.dumps(payload),
+                    )
+                    db_session.add(rec)
+                else:
+                    if bat_val is not None:
+                        rec.battery_level = bat_val
+                    if wifi_raw is not None:
+                        rec.wifi_network = str(wifi_raw)
+                    if phone_raw:
+                        rec.phone = str(phone_raw)
+                    rec.ip_address = ip
+                    rec.source = source_raw
+                    rec.last_seen_at = datetime.utcnow()
+                    rec.raw_payload = json.dumps(payload)
+                db_session.commit()
+        except Exception as telem_err:
+            logger.debug("Failed to record device telemetry: %s", telem_err)
 
     resp = {
         "status": "logged",
@@ -850,6 +912,191 @@ def install_baked_shortcut(
             "X-Baked-Token": baked_token,
         },
     )
+
+
+@router.get("/api/v1/relay/telemetry/{token}")
+@router.get("/api/v1/relay/telemetry")
+def get_relay_telemetry(
+    token: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Fetch device health, battery level, and network status for React frontend and admin."""
+    telem_cls = _dyn("DeviceTelemetry", DeviceTelemetry)
+    query = db.query(telem_cls)
+    if token:
+        rec = query.filter(telem_cls.token == token).first()
+    else:
+        rec = query.order_by(telem_cls.last_seen_at.desc()).first()
+
+    if not rec:
+        return {
+            "status": "ok",
+            "token": token or "CLIENT_01",
+            "battery_level": None,
+            "wifi_network": None,
+            "ip_address": None,
+            "last_seen_at": None,
+            "online": False,
+        }
+
+    now = datetime.utcnow()
+    is_online = (now - rec.last_seen_at).total_seconds() < 300 if rec.last_seen_at else False
+    return {
+        "status": "ok",
+        "token": rec.token,
+        "phone": rec.phone,
+        "battery_level": rec.battery_level,
+        "wifi_network": rec.wifi_network,
+        "ip_address": rec.ip_address,
+        "source": rec.source,
+        "last_seen_at": rec.last_seen_at.isoformat() if rec.last_seen_at else None,
+        "online": is_online,
+    }
+
+
+@router.post("/api/v1/relay/panic")
+@router.post("/webhook/panic")
+@router.post("/api/v1/relay/sos")
+async def post_relay_panic(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Personal safety and emergency panic beacon with live GPS pin and auto-alert dispatch."""
+    data = {}
+    content_type = request.headers.get("content-type", "").lower()
+    if "application/json" in content_type:
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        try:
+            form = await request.form()
+            data = dict(form)
+        except Exception:
+            data = {}
+    else:
+        try:
+            data = await request.json()
+        except Exception:
+            try:
+                form = await request.form()
+                data = dict(form)
+            except Exception:
+                data = {}
+
+    if not isinstance(data, dict):
+        data = {}
+
+    merged = dict(request.query_params)
+    merged.update(data)
+
+    token = _extract_client_token(merged, request) or "CLIENT_01"
+    raw_phone = (
+        merged.get("phone")
+        or merged.get("sender")
+        or os.getenv("ANDROID_GATEWAY_WAKEUP_PHONE", "").strip()
+        or "+61436281573"
+    )
+    canonical_fn = _dyn("canonical_phone_number", canonical_phone_number)
+    phone = canonical_fn(raw_phone) or raw_phone
+
+    raw_lat = merged.get("lat") or merged.get("latitude") or merged.get("location_lat") or 0.0
+    raw_lon = merged.get("lon") or merged.get("lng") or merged.get("longitude") or merged.get("location_lon") or 0.0
+    raw_alt = merged.get("altitude") or merged.get("alt")
+    raw_bat = merged.get("battery") or merged.get("battery_level")
+
+    try:
+        lat = float(raw_lat)
+    except (ValueError, TypeError):
+        lat = 0.0
+    try:
+        lon = float(raw_lon)
+    except (ValueError, TypeError):
+        lon = 0.0
+    try:
+        alt = float(raw_alt) if raw_alt is not None else None
+    except (ValueError, TypeError):
+        alt = None
+    try:
+        battery = float(raw_bat) if raw_bat is not None else None
+    except (ValueError, TypeError):
+        battery = None
+
+    maps_url = f"https://maps.google.com/?q={lat},{lon}"
+
+    emergency_cls = _dyn("EmergencyEvent", EmergencyEvent)
+    incident = emergency_cls(
+        id=str(uuid.uuid4()),
+        token=token,
+        phone=phone,
+        latitude=lat,
+        longitude=lon,
+        altitude=alt,
+        battery_level=battery,
+        maps_url=maps_url,
+        status="active",
+        created_at=datetime.utcnow(),
+        raw_payload=json.dumps(merged),
+    )
+    db.add(incident)
+    db.commit()
+    db.refresh(incident)
+
+    alert_phone = (
+        os.getenv("EMERGENCY_CONTACT_PHONE", "").strip()
+        or os.getenv("ANDROID_GATEWAY_WAKEUP_PHONE", "").strip()
+        or phone
+        or "+61436281573"
+    )
+    bat_str = f"{int(battery)}%" if battery is not None else "N/A"
+    alt_str = f"{round(alt, 1)}m" if alt is not None else "N/A"
+    alert_text = (
+        f"EMERGENCY PANIC BEACON: Client {token} ({phone}) triggered SOS alert at "
+        f"{maps_url} (Battery: {bat_str}, Altitude: {alt_str})"
+    )
+
+    outbound_cls = _dyn("OutboundQueueMessage", OutboundQueueMessage)
+    alert_msg = outbound_cls(
+        id=str(uuid.uuid4()),
+        phone=alert_phone,
+        message=alert_text,
+        image_url=None,
+        client_id=token,
+        status="pending",
+        created_at=datetime.utcnow(),
+    )
+    db.add(alert_msg)
+    db.commit()
+    db.refresh(alert_msg)
+
+    incident.emergency_queue_id = alert_msg.id
+    db.commit()
+
+    try:
+        trigger_gateway_wakeup(force=True)
+    except Exception:
+        pass
+
+    logger.critical(
+        "[EMERGENCY PANIC ALERT] Incident %s dispatched to %s. Maps: %s",
+        incident.id,
+        alert_phone,
+        maps_url,
+    )
+
+    return {
+        "status": "alert_dispatched",
+        "incident_id": incident.id,
+        "token": token,
+        "phone": phone,
+        "lat": lat,
+        "lon": lon,
+        "altitude": alt,
+        "battery": battery,
+        "maps_url": maps_url,
+        "emergency_queue_id": alert_msg.id,
+    }
 
 
 @router.post("/api/admin/sms-simulator")

@@ -270,6 +270,9 @@ def init_db():
                 if outbound_columns and "retry_count" not in outbound_columns:
                     conn.exec_driver_sql("ALTER TABLE outbound_queue ADD COLUMN retry_count INTEGER DEFAULT 0")
                     conn.commit()
+                if outbound_columns and "calendar_data" not in outbound_columns:
+                    conn.exec_driver_sql("ALTER TABLE outbound_queue ADD COLUMN calendar_data TEXT")
+                    conn.commit()
                 if outbound_columns:
                     conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_outbound_queue_client_id ON outbound_queue (client_id)")
                     conn.commit()

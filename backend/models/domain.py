@@ -14,6 +14,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -304,9 +305,43 @@ class OutboundQueueMessage(Base):
     client_id = Column(String, nullable=True, index=True)
     status = Column(String, default="pending", nullable=False, index=True)  # pending | dispatched | failed
     retry_count = Column(Integer, default=0, nullable=True)
+    calendar_data = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     dispatched_at = Column(DateTime, nullable=True)
     delivered_at = Column(DateTime, nullable=True)
+
+
+class DeviceTelemetry(Base):
+    """Device health, battery level, network, and telemetry heartbeat."""
+    __tablename__ = "device_telemetry"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    token = Column(String, nullable=False, index=True)
+    phone = Column(String, nullable=True, index=True)
+    battery_level = Column(Float, nullable=True)
+    wifi_network = Column(String, nullable=True)
+    ip_address = Column(String, nullable=True)
+    source = Column(String, default="ios_shortcut", nullable=False)
+    last_seen_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    raw_payload = Column(Text, nullable=True)
+
+
+class EmergencyEvent(Base):
+    """Personal safety and emergency panic beacon events with live GPS coordinates."""
+    __tablename__ = "emergency_events"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    token = Column(String, nullable=True, index=True)
+    phone = Column(String, nullable=True, index=True)
+    latitude = Column(Float, nullable=False)
+    longitude = Column(Float, nullable=False)
+    altitude = Column(Float, nullable=True)
+    battery_level = Column(Float, nullable=True)
+    maps_url = Column(String, nullable=False)
+    status = Column(String, default="active", nullable=False, index=True)  # active | acknowledged | resolved
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    emergency_queue_id = Column(String, nullable=True)
+    raw_payload = Column(Text, nullable=True)
 
 
 __all__ = [
@@ -328,4 +363,6 @@ __all__ = [
     "OperationsAgentRun",
     "OperationsAgentEvent",
     "OutboundQueueMessage",
+    "DeviceTelemetry",
+    "EmergencyEvent",
 ]

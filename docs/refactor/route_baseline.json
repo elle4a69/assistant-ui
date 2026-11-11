@@ -906,6 +906,71 @@
     "response_model": null
   },
   {
+    "path": "/api/v1/relay/telemetry",
+    "name": "get_relay_telemetry",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_relay_telemetry",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/v1/relay/telemetry/{token}",
+    "name": "get_relay_telemetry",
+    "route_type": "APIRoute",
+    "methods": [
+      "GET"
+    ],
+    "endpoint": "get_relay_telemetry",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/v1/relay/sos",
+    "name": "post_relay_panic",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "post_relay_panic",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/webhook/panic",
+    "name": "post_relay_panic",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "post_relay_panic",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
+    "path": "/api/v1/relay/panic",
+    "name": "post_relay_panic",
+    "route_type": "APIRoute",
+    "methods": [
+      "POST"
+    ],
+    "endpoint": "post_relay_panic",
+    "dependencies": [
+      "get_db"
+    ],
+    "response_model": null
+  },
+  {
     "path": "/api/admin/sms-simulator",
     "name": "simulate_inbound_sms",
     "route_type": "APIRoute",

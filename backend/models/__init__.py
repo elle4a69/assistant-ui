@@ -25,6 +25,8 @@ try:
         PushSubscription,
         Thread,
         ThreadEvent,
+        DeviceTelemetry,
+        EmergencyEvent,
     )
 except ImportError:
     from models.domain import (
@@ -46,6 +48,8 @@ except ImportError:
         PushSubscription,
         Thread,
         ThreadEvent,
+        DeviceTelemetry,
+        EmergencyEvent,
     )
 
 __all__ = [

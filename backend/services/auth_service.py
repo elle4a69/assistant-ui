@@ -158,6 +158,8 @@ def is_public_request(request: Request) -> bool:
         return True
     if path == "/api/arrival/activate" or path.startswith("/api/arrival/client/"):
         return True
+    if path == "/api/v1/relay/telemetry" or path.startswith("/api/v1/relay/telemetry/"):
+        return True
 
     if method == "GET" and path in {"/api/anon/content", "/api/anon/image"}:
         return True
