@@ -102,26 +102,60 @@ def _fire_http_ping(url: str) -> None:
         logger.warning("Gateway wake-up ping failed: %s", e)
 
 
-def trigger_gateway_wakeup(force: bool = False) -> bool:
-    """Trigger the Android Gateway wake-up doorbell.
+_target_wakeup_cooldowns: Dict[str, datetime] = {}
 
-    If not forced, triggers are debounced to at most once every 10 seconds.
+
+def trigger_gateway_wakeup(
+    force: bool = False,
+    target_key: Optional[str] = None,
+    cooldown_seconds: Optional[float] = None,
+) -> bool:
+    """Trigger the Android Gateway wake-up doorbell with anti-spam / anti-loop protection.
+
+    Enforces a strict 15-30 second debouncing cooldown (default 15s).
+    Under no circumstances can doorbell pings fire in rapid succession for the same target.
     """
     global last_wakeup_sent_at
     now = datetime.utcnow()
 
+    if cooldown_seconds is None:
+        try:
+            cooldown_seconds = float(os.getenv("GATEWAY_WAKEUP_COOLDOWN_SECONDS", "15.0"))
+        except (ValueError, TypeError):
+            cooldown_seconds = 15.0
+
     with _wakeup_lock:
+        # Check target-specific cooldown if target_key provided
+        if target_key:
+            last_target = _target_wakeup_cooldowns.get(target_key)
+            if last_target is not None:
+                target_elapsed = (now - last_target).total_seconds()
+                if target_elapsed < cooldown_seconds:
+                    logger.debug(
+                        "Gateway wake-up debounced for target %s (elapsed %.1fs < %.1fs)",
+                        target_key,
+                        target_elapsed,
+                        cooldown_seconds,
+                    )
+                    return False
+            _target_wakeup_cooldowns[target_key] = now
+
+        # General debouncing check
         if not force and last_wakeup_sent_at is not None:
             elapsed = (now - last_wakeup_sent_at).total_seconds()
-            if elapsed < 10.0:
-                logger.debug("Gateway wake-up debounced (elapsed %.1fs < 10s)", elapsed)
+            if elapsed < cooldown_seconds:
+                logger.debug(
+                    "Gateway wake-up debounced (elapsed %.1fs < %.1fs)",
+                    elapsed,
+                    cooldown_seconds,
+                )
                 return False
 
         last_wakeup_sent_at = now
 
     url = os.getenv("ANDROID_GATEWAY_WAKEUP_URL", "").strip()
     if url:
-        logger.info("Triggering Android gateway wake-up at %s (force=%s)", url, force)
+        logger.info("Triggering Android gateway wake-up at %s (force=%s, target=%s)", url, force, target_key)
         threading.Thread(target=_fire_http_ping, args=(url,), daemon=True).start()
         return True
 
@@ -129,38 +163,65 @@ def trigger_gateway_wakeup(force: bool = False) -> bool:
     return False
 
 
+def check_stranded_and_retry_caps(db: Session) -> int:
+    """Process queue item retry caps and rescue stranded pending messages."""
+    outbound_cls = _dyn("OutboundQueueMessage", OutboundQueueMessage)
+
+    # Queue Item Retry Cap: Messages retried >= 3 times are moved to 'failed' status
+    if hasattr(outbound_cls, "retry_count"):
+        failed_messages = (
+            db.query(outbound_cls)
+            .filter(
+                outbound_cls.status == "pending",
+                outbound_cls.retry_count >= 3,
+            )
+            .all()
+        )
+        if failed_messages:
+            for fm in failed_messages:
+                fm.status = "failed"
+                logger.warning(
+                    "[Queue Failure Isolation] Message %s exceeded retry cap (3); marked as failed.",
+                    fm.id,
+                )
+            db.commit()
+
+    cutoff = datetime.utcnow() - timedelta(seconds=15)
+    stranded_count = (
+        db.query(outbound_cls)
+        .filter(
+            outbound_cls.status == "pending",
+            outbound_cls.created_at <= cutoff,
+        )
+        .count()
+    )
+    if stranded_count > 0:
+        logger.warning(
+            "Found %d stranded pending outbound message(s); forcing gateway wake-up.",
+            stranded_count,
+        )
+        trigger_gateway_wakeup(force=True)
+    return stranded_count
+
+
 async def start_stranded_relay_worker() -> None:
-    """Background worker that runs every 15s and forces wake-up if messages are stranded."""
+    """Background worker that runs every 15s, caps failed retries, and rescues stranded messages."""
     logger.info("Stranded relay worker started.")
     while True:
         try:
-            await asyncio.sleep(15)
             session_factory = _dyn("SessionLocal", SessionLocal)
             db = session_factory()
             try:
-                cutoff = datetime.utcnow() - timedelta(seconds=15)
-                outbound_cls = _dyn("OutboundQueueMessage", OutboundQueueMessage)
-                stranded_count = (
-                    db.query(outbound_cls)
-                    .filter(
-                        outbound_cls.status == "pending",
-                        outbound_cls.created_at <= cutoff,
-                    )
-                    .count()
-                )
-                if stranded_count > 0:
-                    logger.warning(
-                        "Found %d stranded pending outbound message(s); forcing gateway wake-up.",
-                        stranded_count,
-                    )
-                    trigger_gateway_wakeup(force=True)
+                check_stranded_and_retry_caps(db)
             finally:
                 db.close()
+            await asyncio.sleep(15)
         except asyncio.CancelledError:
             logger.info("Stranded relay worker cancelled.")
             break
         except Exception as e:
             logger.error("Error in stranded relay worker: %s", e, exc_info=True)
+            await asyncio.sleep(15)
 
 
 async def start_gateway_heartbeat_worker(interval_seconds: int = 1800) -> None:

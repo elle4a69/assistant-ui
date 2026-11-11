@@ -196,3 +196,5 @@ def build_master_workflow():
 
 if __name__ == "__main__":
     build_master_workflow()
+    from generate_unified_relay_shortcut import build_unified_relay_workflow
+    build_unified_relay_workflow()

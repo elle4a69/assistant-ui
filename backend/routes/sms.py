@@ -13,7 +13,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks, Response
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -142,7 +142,10 @@ async def iphone_shortcuts_webhook(
     for key in IPHONE_SENDER_FIELDS:
         val = lookup.get(key)
         if val is not None and str(val).strip():
-            raw_sender = str(val).strip()
+            val_str = str(val).strip()
+            if key == "source" and val_str.lower() in ("ios_shortcut", "android", "shortcut", "relay"):
+                continue
+            raw_sender = val_str
             break
 
     raw_body: Optional[str] = None
@@ -152,7 +155,15 @@ async def iphone_shortcuts_webhook(
             raw_body = str(val).strip()
             break
 
+    is_ios_shortcut = (
+        lookup.get("source") == "ios_shortcut"
+        or "shortcuts" in request.headers.get("user-agent", "").lower()
+    )
+
     if not raw_sender or not raw_body:
+        if is_ios_shortcut:
+            logger.warning("[iPhone Shortcuts Webhook] Missing sender or body in shortcut payload; returning graceful 200.")
+            return {"status": "received", "action": "none", "detail": "Missing sender or body"}
         raise HTTPException(
             status_code=422,
             detail="Missing or empty sender phone number or message body.",
@@ -167,6 +178,9 @@ async def iphone_shortcuts_webhook(
     canonical_fn = _dyn("canonical_phone_number", canonical_phone_number)
     from_phone = canonical_fn(raw_sender)
     if not from_phone:
+        if is_ios_shortcut:
+            logger.warning("[iPhone Shortcuts Webhook] Invalid sender phone %s; returning graceful 200.", raw_sender)
+            return {"status": "received", "action": "none", "detail": "Invalid sender phone number"}
         raise HTTPException(
             status_code=422,
             detail="Invalid sender phone number.",
@@ -234,7 +248,13 @@ async def iphone_shortcuts_webhook(
     })
 
     process_fn = _dyn("process_inbound_sms", process_inbound_sms)
-    result = process_fn(payload, background_tasks, db, sms_account_key="primary")
+    try:
+        result = process_fn(payload, background_tasks, db, sms_account_key="primary")
+    except Exception as exc:
+        logger.exception("[iPhone Shortcuts Webhook] Inbound message processing failed: %s", exc)
+        if is_ios_shortcut:
+            return {"status": "received", "action": "none", "error": "Processing error suppressed for shortcut client"}
+        raise
 
     thread_id = result.get("thread_id") if isinstance(result, dict) else None
     client_token = _extract_client_token(data, request)
@@ -338,6 +358,8 @@ def _dequeue_pending_outbound_messages(db: Session, client_id: Optional[str] = N
     for r in pending_rows:
         r.status = "dispatched"
         r.dispatched_at = now
+        if hasattr(r, "retry_count"):
+            r.retry_count = (r.retry_count or 0) + 1
     db.commit()
 
     first = pending_rows[0]
@@ -601,6 +623,233 @@ async def post_shortcut_telemetry_log(request: Request):
     if token:
         resp["token"] = token
     return resp
+
+
+
+GATEWAY_VCARD_RAW = """BEGIN:VCARD
+VERSION:3.0
+FN:AI Booking Sync
+ORG:Booking System Relay
+TEL;TYPE=CELL:+61432172148
+NOTE:System sync line for your AI Booking Agent. Keep alerts muted so background updates stay silent.
+END:VCARD
+"""
+
+
+@router.get("/api/v1/relay/assets/gateway.vcf")
+def get_gateway_vcf():
+    """Return the vCard contact card for the Central Android Gateway."""
+    return Response(
+        content=GATEWAY_VCARD_RAW,
+        media_type="text/vcard",
+        headers={
+            "Content-Disposition": 'inline; filename="gateway.vcf"',
+            "Cache-Control": "public, max-age=86400",
+        },
+    )
+
+
+@router.post("/api/v1/relay/onboarding/send-contact")
+async def send_onboarding_contact(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Trigger delivery of the welcome message with vCard link to the tenant's mobile."""
+    data = {}
+    content_type = request.headers.get("content-type", "").lower()
+    if "application/json" in content_type:
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        try:
+            form = await request.form()
+            data = dict(form)
+        except Exception:
+            data = {}
+    else:
+        try:
+            data = await request.json()
+        except Exception:
+            try:
+                form = await request.form()
+                data = dict(form)
+            except Exception:
+                data = {}
+
+    if not isinstance(data, dict):
+        data = {}
+
+    query_params = dict(request.query_params)
+    merged_data = dict(query_params)
+    merged_data.update(data)
+
+    raw_phone = (
+        merged_data.get("phone")
+        or merged_data.get("customer_phone")
+        or merged_data.get("to")
+        or os.getenv("ANDROID_GATEWAY_WAKEUP_PHONE", "").strip()
+        or "+61436281573"
+    )
+
+    canonical_fn = _dyn("canonical_phone_number", canonical_phone_number)
+    phone = canonical_fn(raw_phone) or raw_phone
+
+    token = _extract_client_token(merged_data, request) or "CLIENT_01"
+
+    base_url = str(request.base_url).rstrip("/")
+    default_vcf_url = f"{base_url}/api/v1/relay/assets/gateway.vcf"
+    vcard_url = (
+        merged_data.get("vcard_url")
+        or merged_data.get("vcf_url")
+        or default_vcf_url
+    )
+
+    import urllib.parse
+    install_url = f"{base_url}/api/v1/relay/install?phone={urllib.parse.quote(phone)}"
+
+    welcome_msg = (
+        merged_data.get("message")
+        or f"AI Booking Sync:\n1. Save contact: {vcard_url}\n2. Install shortcut: {install_url}"
+    )
+
+    outbound_cls = _dyn("OutboundQueueMessage", OutboundQueueMessage)
+    new_msg = outbound_cls(
+        id=str(uuid.uuid4()),
+        phone=phone,
+        message=welcome_msg,
+        image_url=None,
+        client_id=token,
+        status="pending",
+        created_at=datetime.utcnow(),
+    )
+    db.add(new_msg)
+    db.commit()
+    db.refresh(new_msg)
+
+    try:
+        trigger_gateway_wakeup(force=True)
+    except Exception:
+        pass
+
+    logger.info(
+        "[Relay Onboarding] Enqueued welcome vCard message to %s (token=%s, id=%s)",
+        phone,
+        token,
+        new_msg.id,
+    )
+
+    return {
+        "status": "success",
+        "delivery": "queued",
+        "id": new_msg.id,
+        "phone": phone,
+        "token": token,
+        "vcard_url": vcard_url,
+        "install_url": install_url,
+        "message": welcome_msg,
+    }
+
+
+@router.get("/api/v1/relay/install")
+@router.get("/relay/install")
+def install_baked_shortcut(
+    request: Request,
+    phone: Optional[str] = None,
+    token: Optional[str] = None,
+    client_id: Optional[str] = None,
+):
+    """Dynamically bake tenant phone / token into AI_Booking_Relay.shortcut on the fly.
+
+    Clears WFWorkflowImportQuestions so iOS imports the shortcut in 1-tap with ZERO questions!
+    """
+    import copy
+    import os
+    import plistlib
+
+    raw_identifier = (
+        phone
+        or token
+        or client_id
+        or request.query_params.get("phone")
+        or request.query_params.get("token")
+        or "CLIENT_01"
+    )
+
+    clean_id = str(raw_identifier).strip()
+    canonical_fn = _dyn("canonical_phone_number", canonical_phone_number)
+    if clean_id.startswith("+"):
+        norm = canonical_fn(clean_id)
+    elif clean_id.isdigit() and len(clean_id) >= 9:
+        norm = canonical_fn("+" + clean_id)
+    else:
+        norm = canonical_fn(clean_id)
+    baked_token = norm or clean_id or "CLIENT_01"
+
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    candidates = [
+        os.path.join(repo_root, "AI_Booking_Relay.plist"),
+        os.path.join(repo_root, "data", "static", "AI_Booking_Relay.plist"),
+        os.path.join(repo_root, "frontend", "public", "AI_Booking_Relay.plist"),
+        os.path.join(repo_root, "AI_Booking_Relay.shortcut"),
+    ]
+    template_path = None
+    for c in candidates:
+        if os.path.exists(c) and os.path.isfile(c):
+            template_path = c
+            break
+
+    if not template_path:
+        raise HTTPException(status_code=500, detail="Base shortcut template not found")
+
+    with open(template_path, "rb") as f:
+        workflow = plistlib.load(f)
+
+    actions = workflow.get("WFWorkflowActions", [])
+    if not actions:
+        raise HTTPException(status_code=500, detail="Invalid shortcut template actions")
+
+    # 1. Action 0: Set Token Text to baked_token
+    actions[0]["WFWorkflowActionParameters"]["WFTextActionText"] = baked_token
+
+    # 2. Recalculate dynamic URL offset for Action 6 (GET Outbound)
+    url_prefix = "https://assistant-ui-hub.fly.dev/webhook/outbound?token="
+    range_key = f"{{{len(url_prefix)}, 1}}"
+    for act in actions:
+        params = act.get("WFWorkflowActionParameters", {})
+        if act.get("WFWorkflowActionIdentifier") == "is.workflow.actions.downloadurl":
+            if params.get("WFHTTPMethod") == "GET" and "webhook/outbound" in str(params.get("WFURL", "")):
+                params["WFURL"] = {
+                    "Value": {
+                        "attachmentsByRange": {
+                            range_key: {
+                                "Type": "Variable",
+                                "VariableName": "Tenant Token",
+                            }
+                        },
+                        "string": f"{url_prefix}\ufffc",
+                    },
+                    "WFSerializationType": "WFTextTokenString",
+                }
+                break
+
+    # 3. Clear Import Questions so iOS prompts for 1-tap installation without questions
+    workflow["WFWorkflowImportQuestions"] = []
+
+    # 4. Serialize to binary bplist
+    binary_data = plistlib.dumps(workflow, fmt=plistlib.FMT_BINARY)
+
+    safe_filename = "AI_Booking_Relay.shortcut"
+    return Response(
+        content=binary_data,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_filename}"',
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "X-Baked-Token": baked_token,
+        },
+    )
 
 
 @router.post("/api/admin/sms-simulator")

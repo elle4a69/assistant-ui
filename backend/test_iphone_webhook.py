@@ -987,3 +987,235 @@ def test_doorbell_inbound_ping_filtered(client):
     })
     assert res3.status_code == 200
     assert res3.json() == {"status": "success", "event": "doorbell_ack"}
+
+def test_gateway_vcf_asset_endpoint(client):
+    res = client.get("/api/v1/relay/assets/gateway.vcf")
+    assert res.status_code == 200
+    assert "text/vcard" in res.headers.get("content-type", "")
+    assert "gateway.vcf" in res.headers.get("content-disposition", "")
+    text = res.text
+    assert "BEGIN:VCARD" in text
+    assert "VERSION:3.0" in text
+    assert "FN:AI Booking Sync" in text
+    assert "TEL;TYPE=CELL:+61432172148" in text
+    assert "END:VCARD" in text
+
+
+def test_onboarding_send_contact_endpoint(client, test_db, monkeypatch):
+    from backend.models.domain import OutboundQueueMessage
+
+    # Mock gateway wakeup
+    wakeup_called = False
+    def fake_wakeup(force=False):
+        nonlocal wakeup_called
+        wakeup_called = True
+        return True
+
+    monkeypatch.setattr("backend.routes.sms.trigger_gateway_wakeup", fake_wakeup)
+
+    payload = {
+        "phone": "+61436281573",
+        "token": "CLIENT_01",
+    }
+    res = client.post("/api/v1/relay/onboarding/send-contact", json=payload)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "success"
+    assert data["delivery"] == "queued"
+    assert data["phone"] == "+61436281573"
+    assert data["token"] == "CLIENT_01"
+    assert "gateway.vcf" in data["vcard_url"]
+    assert "AI Booking Sync" in data["message"]
+    assert wakeup_called is True
+
+    # Verify message in database
+    with test_db() as db:
+        msg = db.query(OutboundQueueMessage).filter(OutboundQueueMessage.id == data["id"]).first()
+        assert msg is not None
+        assert msg.phone == "+61436281573"
+        assert msg.client_id == "CLIENT_01"
+        assert msg.status == "pending"
+        assert "gateway.vcf" in msg.message
+
+
+def test_unified_ai_booking_relay_shortcut_generation_and_endpoints(client):
+    import os
+    import plistlib
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    shortcut_file = os.path.join(repo_root, "AI_Booking_Relay.shortcut")
+    plist_file = os.path.join(repo_root, "AI_Booking_Relay.plist")
+
+    assert os.path.exists(shortcut_file), "AI_Booking_Relay.shortcut does not exist"
+    assert os.path.exists(plist_file), "AI_Booking_Relay.plist does not exist"
+
+    # 1. Parse binary shortcut
+    with open(shortcut_file, "rb") as f:
+        data = plistlib.load(f)
+
+    assert data.get("WFWorkflowHasShortcutInputVariables") is True
+    actions = data.get("WFWorkflowActions", [])
+    assert len(actions) == 29, f"Expected 29 actions, got {len(actions)}"
+
+    # Single Import Question
+    questions = data.get("WFWorkflowImportQuestions", [])
+    assert len(questions) == 1
+    assert questions[0]["ParameterKey"] == "WFTextActionText"
+    assert "CLIENT_01" in questions[0]["DefaultValue"]
+    assert questions[0]["Text"] == "Enter your Booking System Client Token:"
+
+    # Action 0: Text Token
+    assert actions[0]["WFWorkflowActionIdentifier"] == "is.workflow.actions.gettext"
+    assert actions[0]["WFWorkflowActionParameters"]["CustomOutputName"] == "Token Text"
+    assert actions[0]["WFWorkflowActionParameters"]["WFTextActionText"] == "CLIENT_01"
+
+    # Action 1: Set Variable Tenant Token
+    assert actions[1]["WFWorkflowActionIdentifier"] == "is.workflow.actions.setvariable"
+    assert actions[1]["WFWorkflowActionParameters"]["WFVariableName"] == "Tenant Token"
+
+    # Action 2: Trigger Details
+    assert actions[2]["WFWorkflowActionIdentifier"] == "is.workflow.actions.gettext"
+    assert actions[2]["WFWorkflowActionParameters"]["CustomOutputName"] == "Trigger Details"
+
+    # Action 3: Trigger Matches regex
+    assert actions[3]["WFWorkflowActionIdentifier"] == "is.workflow.actions.text.match"
+    assert actions[3]["WFWorkflowActionParameters"]["CustomOutputName"] == "Trigger Matches"
+    assert "432172148" in actions[3]["WFWorkflowActionParameters"]["WFMatchTextPattern"]
+
+    # Action 4: If Trigger Matches (Branch on sender / trigger)
+    assert actions[4]["WFWorkflowActionIdentifier"] == "is.workflow.actions.conditional"
+    assert actions[4]["WFWorkflowActionParameters"]["WFControlFlowMode"] == 0
+
+    # True Branch: Outbound Mode
+    assert actions[5]["WFWorkflowActionIdentifier"] == "is.workflow.actions.downloadurl"
+    assert "webhook/log" in actions[5]["WFWorkflowActionParameters"]["WFURL"]
+    assert actions[6]["WFWorkflowActionIdentifier"] == "is.workflow.actions.downloadurl"
+    assert actions[6]["WFWorkflowActionParameters"]["WFHTTPMethod"] == "GET"
+    assert "webhook/outbound?token=" in actions[6]["WFWorkflowActionParameters"]["WFURL"]["Value"]["string"]
+
+    # Check ShowWhenRun: False on all Send Message actions
+    send_msg_actions = [a for a in actions if a.get("WFWorkflowActionIdentifier") == "is.workflow.actions.sendmessage"]
+    assert len(send_msg_actions) >= 2
+    for sa in send_msg_actions:
+        assert sa["WFWorkflowActionParameters"]["ShowWhenRun"] is False
+
+    # Check Action 22: Sent Receipt POST
+    assert actions[22]["WFWorkflowActionParameters"]["WFHTTPMethod"] == "POST"
+    assert "webhook/sent" in actions[22]["WFWorkflowActionParameters"]["WFURL"]
+
+    # Check Action 26: Otherwise (Inbound Mode)
+    assert actions[26]["WFWorkflowActionIdentifier"] == "is.workflow.actions.conditional"
+    assert actions[26]["WFWorkflowActionParameters"]["WFControlFlowMode"] == 1
+
+    # Check Action 27: Inbound POST
+    assert actions[27]["WFWorkflowActionIdentifier"] == "is.workflow.actions.downloadurl"
+    assert actions[27]["WFWorkflowActionParameters"]["WFHTTPMethod"] == "POST"
+    assert "webhook/inbound" in actions[27]["WFWorkflowActionParameters"]["WFURL"]
+    inbound_items = actions[27]["WFWorkflowActionParameters"]["WFJSONValues"]["Value"]["WFDictionaryFieldValueItems"]
+    keys = [item["WFKey"]["Value"]["string"] for item in inbound_items]
+    assert "token" in keys
+    assert "sender" in keys
+    assert "message" in keys
+    assert "source" in keys
+
+    # Check Action 28: End If
+    assert actions[28]["WFWorkflowActionIdentifier"] == "is.workflow.actions.conditional"
+    assert actions[28]["WFWorkflowActionParameters"]["WFControlFlowMode"] == 2
+
+    # 2. Test Download Endpoint GET /AI_Booking_Relay.shortcut
+    res_dl = client.get("/AI_Booking_Relay.shortcut")
+    assert res_dl.status_code == 200
+    assert "attachment" in res_dl.headers.get("content-disposition", "")
+    assert "AI_Booking_Relay.shortcut" in res_dl.headers.get("content-disposition", "")
+    assert len(res_dl.content) > 1000
+
+    # 3. Test Static Alias GET /static/AI_Booking_Relay.shortcut
+    res_alias = client.get("/static/AI_Booking_Relay.shortcut")
+    assert res_alias.status_code == 200
+    assert len(res_alias.content) == len(res_dl.content)
+
+    # 4. Test Download Endpoint GET /AI_Booking_Relay.plist
+    res_plist = client.get("/AI_Booking_Relay.plist")
+    assert res_plist.status_code == 200
+    assert "attachment" in res_plist.headers.get("content-disposition", "")
+    assert "AI_Booking_Relay.plist" in res_plist.headers.get("content-disposition", "")
+
+    # 5. Test Static Alias GET /static/AI_Booking_Relay.plist
+    res_plist_alias = client.get("/static/AI_Booking_Relay.plist")
+    assert res_plist_alias.status_code == 200
+    assert len(res_plist_alias.content) == len(res_plist.content)
+
+def test_install_baked_shortcut_endpoint(client):
+    import plistlib
+
+    # 1. Bake with phone
+    res_phone = client.get("/api/v1/relay/install?phone=+61436281573")
+    assert res_phone.status_code == 200
+    assert "attachment" in res_phone.headers.get("content-disposition", "")
+    assert res_phone.headers.get("X-Baked-Token") == "+61436281573"
+
+    baked_data = plistlib.loads(res_phone.content)
+    assert baked_data.get("WFWorkflowImportQuestions") == [] # ZERO popup questions!
+    actions = baked_data.get("WFWorkflowActions", [])
+    assert actions[0]["WFWorkflowActionParameters"]["WFTextActionText"] == "+61436281573"
+
+    # 2. Bake with token via /relay/install alias
+    res_token = client.get("/relay/install?token=SALON_PRO_01")
+    assert res_token.status_code == 200
+    assert res_token.headers.get("X-Baked-Token") == "SALON_PRO_01"
+
+    baked_data2 = plistlib.loads(res_token.content)
+    assert baked_data2.get("WFWorkflowImportQuestions") == []
+    actions2 = baked_data2.get("WFWorkflowActions", [])
+    assert actions2[0]["WFWorkflowActionParameters"]["WFTextActionText"] == "SALON_PRO_01"
+
+
+def test_inbound_graceful_fallback_for_ios_shortcuts(client):
+    # When source is "ios_shortcut", missing or invalid sender/body must return 200
+    res_missing_sender = client.post("/webhook/inbound", json={
+        "source": "ios_shortcut",
+        "message": "Hello Tori!",
+    })
+    assert res_missing_sender.status_code == 200
+    assert res_missing_sender.json()["status"] == "received"
+    assert res_missing_sender.json()["action"] == "none"
+
+    # Missing body
+    res_missing_body = client.post("/webhook/inbound", json={
+        "source": "ios_shortcut",
+        "sender": "+61412345678",
+    })
+    assert res_missing_body.status_code == 200
+    assert res_missing_body.json()["status"] == "received"
+    assert res_missing_body.json()["action"] == "none"
+
+    # Standard non-shortcut API caller without source still gets 422
+    res_standard = client.post("/webhook", json={"message": "No sender"})
+    assert res_standard.status_code == 422
+
+
+def test_queue_retry_cap_and_failure_isolation(test_db):
+    import asyncio
+    from backend.models.domain import OutboundQueueMessage
+    from backend.services.relay_service import start_stranded_relay_worker
+
+    with test_db() as db:
+        # Create a message that has failed/retried 3 times
+        exhausted_msg = OutboundQueueMessage(
+            id="exhausted-msg-1",
+            phone="+61436281573",
+            message="Test message",
+            status="pending",
+            retry_count=3,
+        )
+        db.add(exhausted_msg)
+        db.commit()
+
+    # Run check_stranded_and_retry_caps on database
+    from backend.services.relay_service import check_stranded_and_retry_caps
+    with test_db() as db:
+        check_stranded_and_retry_caps(db)
+
+    with test_db() as db:
+        msg = db.query(OutboundQueueMessage).filter(OutboundQueueMessage.id == "exhausted-msg-1").first()
+        assert msg is not None
+        assert msg.status == "failed"

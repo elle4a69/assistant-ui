@@ -915,6 +915,52 @@ def download_ai_booking_relay_master_new_shortcut():
     raise HTTPException(status_code=404, detail="AI_Booking_Relay_Master_new.shortcut not found")
 
 
+@router.get("/AI_Booking_Relay.shortcut")
+@router.get("/static/AI_Booking_Relay.shortcut")
+def download_ai_booking_relay_shortcut():
+    search_paths = [
+        os.path.join(DATA_DIR, "static", "AI_Booking_Relay.shortcut"),
+        os.path.join(DATA_DIR, "AI_Booking_Relay.shortcut"),
+        os.path.join(BASE_DIR, "static", "AI_Booking_Relay.shortcut"),
+        os.path.join(BASE_DIR, "..", "data", "static", "AI_Booking_Relay.shortcut"),
+        os.path.join(BASE_DIR, "..", "data", "AI_Booking_Relay.shortcut"),
+        os.path.join(BASE_DIR, "..", "AI_Booking_Relay.shortcut"),
+        os.path.join(frontend_dist, "AI_Booking_Relay.shortcut"),
+    ]
+    for path in search_paths:
+        if os.path.exists(path) and os.path.isfile(path):
+            return FileResponse(
+                path,
+                media_type="application/octet-stream",
+                filename="AI_Booking_Relay.shortcut",
+                headers={"Content-Disposition": 'attachment; filename="AI_Booking_Relay.shortcut"'},
+            )
+    raise HTTPException(status_code=404, detail="AI_Booking_Relay.shortcut not found")
+
+
+@router.get("/AI_Booking_Relay.plist")
+@router.get("/static/AI_Booking_Relay.plist")
+def download_ai_booking_relay_plist():
+    search_paths = [
+        os.path.join(DATA_DIR, "static", "AI_Booking_Relay.plist"),
+        os.path.join(DATA_DIR, "AI_Booking_Relay.plist"),
+        os.path.join(BASE_DIR, "static", "AI_Booking_Relay.plist"),
+        os.path.join(BASE_DIR, "..", "data", "static", "AI_Booking_Relay.plist"),
+        os.path.join(BASE_DIR, "..", "data", "AI_Booking_Relay.plist"),
+        os.path.join(BASE_DIR, "..", "AI_Booking_Relay.plist"),
+        os.path.join(frontend_dist, "AI_Booking_Relay.plist"),
+    ]
+    for path in search_paths:
+        if os.path.exists(path) and os.path.isfile(path):
+            return FileResponse(
+                path,
+                media_type="application/xml",
+                filename="AI_Booking_Relay.plist",
+                headers={"Content-Disposition": 'attachment; filename="AI_Booking_Relay.plist"'},
+            )
+    raise HTTPException(status_code=404, detail="AI_Booking_Relay.plist not found")
+
+
 @router.get("/AI_Booking_Relay_Master.shortcut")
 @router.get("/static/AI_Booking_Relay_Master.shortcut")
 def download_ai_booking_relay_master_shortcut():

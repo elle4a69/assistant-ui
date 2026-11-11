@@ -302,7 +302,8 @@ class OutboundQueueMessage(Base):
     message = Column(Text, nullable=False)
     image_url = Column(String, nullable=True)
     client_id = Column(String, nullable=True, index=True)
-    status = Column(String, default="pending", nullable=False, index=True)  # pending | dispatched
+    status = Column(String, default="pending", nullable=False, index=True)  # pending | dispatched | failed
+    retry_count = Column(Integer, default=0, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     dispatched_at = Column(DateTime, nullable=True)
     delivered_at = Column(DateTime, nullable=True)
